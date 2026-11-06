@@ -37,10 +37,10 @@ Every write applies the type's `@normalize.trim` / `@normalize.lowercase` / `@no
 
 - All write paths: `insertOne/insertMany` (incl. `onConflict: "ignore"`), `replaceOne/bulkReplace/replaceMany`, `updateOne/bulkUpdate/updateMany`, `validateRows`; moost-db POST/PUT/PATCH go through them.
 - Patches: plain values, nested objects, array operators (`$replace`/`$insert`/`$upsert` items, `$update`/`$remove` items = the keys that find elements: `$remove: [" RED "]` removes stored `"red"`); `$inc/$dec/$mul` untouched.
-- Nested writes: TO/FROM/VIA rows, insert/replace and patch operators — once, at the root call. Defaults are normalized where they are filled (a nested row's `@db.default` too).
+- Nested writes: TO/FROM/VIA rows, insert/replace and patch operators — once, at the root call. `@db.default` literals are normalized once in the field descriptor (0.1.173): the SDK fill (nested rows too), the column `DEFAULT` schema sync writes and Mongo's backfill of an added field all store the normalized value (an unchanged literal keeps its spelling → same hash; a changed one → the next sync alters the default).
 - Keys: a unique-key collision is judged on the normalized value; a patch addressed by a unique field, `table.recordFilter(payload)` and `touchMany` keys use the normalized value.
 - Pure, copy-on-change (caller's payload untouched); near-zero cost: a type reaching no `@normalize.*` is not walked; one reaching it only through a relation walks each row once. A write guard sees normalized rows; values it sets are validated, not re-normalized.
-- Lookups: operands of implicit equality / `$eq` / `$ne` / `$in` / `$nin` on a normalized field (root filter, `updateMany`/`deleteMany`, `$with` filters, `$some`/`$none`) and every id (`findById`, `resolveRowFilter`, `deleteOne`, `GET /one/:id`, composite + unique-key ids) are normalized. NEVER: `$regex`, `$search`/fulltext, ranges, `$exists`, aggregate conditions, `$having`.
+- Lookups: operands of implicit equality / `$eq` / `$ne` / `$in` / `$nin` on a normalized field (root filter, `updateMany`/`deleteMany`, `$with` filters, `$some`/`$none`) and every id (`findById`, `resolveRowFilter`, `deleteOne`, `GET /one/:id`, composite + unique-key ids) are normalized. NEVER: `$regex`, `$search`/fulltext, ranges, `$exists`, aggregate conditions, `$having`. AS STORED (0.1.173): keys the table reads from stored rows — `$with` relation loading, app-level cascades / RESTRICT counts, a row pinned by the PK just read (delete by a unique key, `check` filters) — so legacy un-normalized keys still load / cascade / delete.
 - Legacy rows (stored before 0.1.170, not normalized) are no longer found by their old exact value, and new FK/VIA values (refs inherit the target's normalizers) no longer match legacy keys — rewrite them once with a data step through `space.getAdapter(T)` + `normalizeWritePayload(T, row, "replace")` (recipe in docs `guide/upgrading.md#v0-1-170`).
 
 ```ts
@@ -49,7 +49,7 @@ const opts = dbValidatorOptions(User, "patch"); // build once per mode and reuse
 const patch = normalizeWritePayload(User, { id: 1, email: " A@X " }, "patch", opts);
 ```
 
-`opts` = the options the result will be validated with — they decide between union members whose normalized results differ.
+`opts` = the options the result will be validated with — they decide between union members whose normalized results differ. On a table: `table.normalizePayload(rowOrRows, mode)` (0.1.173) does the same with the table's own validator options (array → row by row, copy-on-change, no defaults / validation) — moost-db's `onWrite` gets the body through it.
 
 ## Client-side
 

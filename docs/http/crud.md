@@ -626,7 +626,17 @@ The controller automatically transforms errors into appropriate HTTP responses:
 | `DbError` (other, incl. BUCKET_NOT_SUPPORTED, AGG_FN_NOT_SUPPORTED, AGG_EXPR_NOT_SUPPORTED) | 400         | `{ message, statusCode, errors }`                                                                                                                                                                        |
 | Version mismatch (OCC)                                                                      | 409         | `{ statusCode, error, message: "version_mismatch", kind, currentVersion }` — see [OCC over HTTP](#occ-over-http)                                                                                         |
 | `version` + differing `$cas`                                                                | 400         | `{ message, statusCode, errors: [{ path: "$cas", message }] }`                                                                                                                                           |
-| Not found                                                                                   | 404         | Standard 404                                                                                                                                                                                             |
+| Not found — a missing row, a row outside the caller's scope, an unknown form or action      | 404         | `code: "NOT_FOUND"`, the same body everywhere — see [Not found](#not-found)                                                                                                                              |
+
+### Not found {#not-found}
+
+Every `404` moost-db answers — `/one/:id` and `/one?…`, `DELETE`, a `PATCH` / `PUT` with a version on a missing row, a `'row'` action, value-help `/one`, an unknown or refused `/meta/form/:name`, an unknown delegated action — has one body (since 0.1.173):
+
+```json
+{ "message": "Not found", "statusCode": 404, "code": "NOT_FOUND", "error": "Not Found" }
+```
+
+A missing row and a row outside the caller's scope answer the same bytes, so the answer never tells whether a row exists. `NOT_FOUND` is in moost-db's message catalog (`MOOST_DB_MESSAGES`, registered with moost), so a [translator](/http/i18n#error-bodies) renders it per request. A permission layer that refuses a row itself should throw `notFoundError()` from `@atscript/moost-db` — the same body.
 
 Built-in write failures are **thrown** as `HttpError` (since 0.1.128) rather than returned — the wire response is identical, and a throw also rolls back any transaction a subclass wrapped around `super.update()`. See [Customization — thrown errors](/http/customization#thrown-errors).
 

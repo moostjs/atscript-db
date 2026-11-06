@@ -3,6 +3,7 @@ import type { FilterExpr, Uniquery, WithRelation } from "@uniqu/core";
 import type { BaseDbAdapter } from "../base-adapter";
 import type { TGenericLogger } from "../logger";
 import type { TDbForeignKey, TDbRelation, TTableResolver } from "../types";
+import { storedValuesFilter } from "../query/normalize-filter";
 import { andFilters, relationStaticFilter } from "../query/relation-filter";
 import {
   type TGroupPage,
@@ -471,7 +472,8 @@ function hasSort(controls: Record<string, unknown>): boolean {
 /**
  * A filter matching the rows whose `toFields` equal `fromFields` of any of
  * `rows` — `$in` for a single field, `$or` of conditions for a composite key.
- * `undefined` when no row has every `fromFields` value.
+ * `undefined` when no row has every `fromFields` value. The values are the
+ * stored ones, compared as stored (see `storedValuesFilter`).
  */
 function matchAnyFilter(
   rows: Array<Record<string, unknown>>,
@@ -486,7 +488,9 @@ function matchAnyFilter(
         values.add(v);
       }
     }
-    return values.size > 0 ? ({ [toFields[0]]: { $in: [...values] } } as FilterExpr) : undefined;
+    return values.size > 0
+      ? storedValuesFilter({ [toFields[0]]: { $in: [...values] } } as FilterExpr)
+      : undefined;
   }
   const seen = new Set<string>();
   const conditions: Array<Record<string, unknown>> = [];
@@ -513,7 +517,9 @@ function matchAnyFilter(
   if (conditions.length === 0) {
     return undefined;
   }
-  return (conditions.length === 1 ? conditions[0] : { $or: conditions }) as FilterExpr;
+  return storedValuesFilter(
+    (conditions.length === 1 ? conditions[0] : { $or: conditions }) as FilterExpr,
+  );
 }
 
 /** The first of `items` per `fields` key. */

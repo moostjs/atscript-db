@@ -38,6 +38,14 @@ tags: string[]
 
 A literal and its canonical string spelling are the same value and give the same column default — `0` and `'0'`, `-1.5` and `'-1.5'`, `true` and `'true'` — so switching between them does not change the schema hash. Other spellings of a number are the same value but not the same text: `1.50` is stored as `1.5` and `1e3` as `1000`, so moving from `'1.50'` to `1.50` changes the column default's text (and the hash). Write an integer beyond 2⁵³ as a string: a number literal loses its precision. A `decimal` default is filled as its text (`9.99` → `"9.99"`), like any decimal value.
 
+A field's [`@normalize.*`](/api/crud#normalization) applies to its default too: with `@normalize.lowercase`, `@db.default 'NEW'` is stored as `"new"` — by an insert through the table, in the column's `DEFAULT` (a row written outside the SDK gets it too), and in the value MongoDB fills existing documents with when the field is added. A literal the normalizers leave as it is keeps its spelling, so the schema hash does not change.
+
+```atscript
+@db.default 'NEW'
+@normalize.lowercase
+status: string // DEFAULT 'new'
+```
+
 ::: info Literal defaults — 0.1.170
 `@db.default 0` and `@db.default true` work since 0.1.170; earlier versions take a string only (`@db.default '0'`).
 :::

@@ -6,6 +6,25 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.173 {#v0-1-173}
+
+### Features
+
+- **`table.normalizePayload(payload, mode)`** returns a payload (one row or an array of rows) as a write of `mode` stores it — the type's `@normalize.*` applied, copy-on-change, nothing validated. See [Normalization](/api/crud#normalization).
+- **`notFoundError()` and `MOOST_DB_MESSAGES`** from `@atscript/moost-db`: the 404 every moost-db endpoint answers, and its message catalog (registered with moost on import). See [Not found](/http/crud#not-found).
+
+### Breaking & behaviour changes
+
+- **One coded 404 body.** Every moost-db `404` answers `{ "message": "Not found", "statusCode": 404, "code": "NOT_FOUND", "error": "Not Found" }`. That covers `/one`, `DELETE`, a versioned write on a missing row, `'row'` actions, value-help `/one`, `/meta/form/:name` and delegated actions. Before, most 404s had an empty message (a translator received the id `""`), a `'row'` action answered `"Row not found for action identifier"`, and an unknown or refused form or delegated action answered `Unknown form "<name>"` / `Unknown action "<name>"`. Branch on the status or on `code`, not on those texts. A permission layer that refuses a row itself should throw `notFoundError()`, so its answer matches a missing row byte for byte. See [Not found](/http/crud#not-found).
+- **`onWrite` receives the normalized body.** The body is passed in with the type's `@normalize.*` applied, as `guardWrite` and `checkWrite` already saw it. Before, the hook got the raw request body. The request's body object itself is not changed. The controller calls the bound table's `normalizePayload(payload, mode)` for it, so a custom stand-in for `AtscriptDbTable` (a wrapper or a test double) must implement that method too. See [onWrite](/http/customization#onwrite).
+- **Column defaults are normalized.** A `@db.default` on a field with `@normalize.*` now becomes the normalized value in the column `DEFAULT` that schema sync writes, and in the value MongoDB fills existing documents with when the field is added. An insert through the table already stored the normalized value. On such tables the next schema sync changes the column's default: MySQL and PostgreSQL alter it in place, SQLite rebuilds the table, and `--safe` leaves it pending. Rows already stored are not rewritten. A literal the normalizers leave unchanged keeps its schema hash. See [Static Defaults](/api/defaults#static-defaults).
+- **Safe mode: a type change waits for a removed table that references the column.** A run without `--safe` drops the removed table first, then changes the type. A `--safe` run keeps that table, so the type change is now skipped and pending (`skipped` includes `'retype'`, `typeChanges[].waitsFor` names the table) until a run without `--safe`. Before, MySQL and PostgreSQL ran the change into the kept foreign key and the sync failed with the engine's error when the types no longer matched; SQLite applied the change under the kept constraint. See [Safe Mode](/sync/#safe-mode).
+
+### Fixes
+
+- **`validateRows` keeps codes.** Each problem now carries the `code` and `params` that the same write's error carries: the validator's codes (`custom` for your own annotation text), `DEPTH_EXCEEDED`, and `FK_MISSING` for a missing foreign-key target. Translators and HTTP answers built from them are rendered like a write's errors. See [Validation](/api/crud#validation).
+- **Stored keys are compared as stored.** Relation loading (`$with`), application-level cascades and `RESTRICT` checks, and a row addressed by the primary key the table just read no longer normalize those keys. A row stored before its key field gained `@normalize.*` (`"ABC"`) is loaded, cascaded and deleted with the rows that reference it. Before, they looked for `"abc"` and missed it. Lookups by what a caller sends are still normalized. See [Lookups](/api/crud#normalized-lookups).
+
 ## 0.1.170 {#v0-1-170}
 
 **Requires `@uniqu/core` / `@uniqu/url` 0.2.1 and `@atscript/core` / `@atscript/typescript` 0.2.7.**

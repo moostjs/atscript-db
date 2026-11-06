@@ -10,6 +10,21 @@ import { isPlainObject, mapItems } from "../shared/object";
 import type { TableMetadata } from "../table/table-metadata";
 
 /**
+ * Marks a filter the database layer builds from STORED values (relation
+ * loading, cascade child filters, a row pinned by its stored primary key):
+ * {@link normalizeFilterEquality} leaves it, and every condition inside it,
+ * as it is — a stored value is compared as stored, so a row written before
+ * its field gained `@normalize.*` is still found by the rows that reference
+ * it. Marked by identity: wrap it (`{ $and: [marked, other] }`), never copy it.
+ */
+export function storedValuesFilter<F extends object>(filter: F): F {
+  STORED_VALUES.add(filter);
+  return filter;
+}
+
+const STORED_VALUES = new WeakSet<object>();
+
+/**
  * Equality lookups on a field with `@normalize.*`: the operands of implicit equality, `$eq`, `$ne`, `$in` and `$nin` get the
  * field's normalizers, so `{ email: " Ann@X.io" }` finds the stored
  * `"ann@x.io"` — the form every write stores. Array fields normalize an
@@ -28,7 +43,7 @@ export function normalizeFilterEquality(filter: FilterExpr, meta: TableMetadata)
 }
 
 function walk(filter: FilterExpr, meta: TableMetadata): FilterExpr {
-  if (!isPlainObject(filter)) return filter;
+  if (!isPlainObject(filter) || STORED_VALUES.has(filter)) return filter;
   let out: Record<string, unknown> | undefined;
   for (const key of Object.keys(filter)) {
     const value = (filter as Record<string, unknown>)[key];

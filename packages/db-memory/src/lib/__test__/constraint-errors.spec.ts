@@ -90,4 +90,19 @@ describe("[memory] validateRows fk lookup — composite key", () => {
       [1, "slotB"],
     ]);
   });
+
+  it("each FK_MISSING entry has its own params (a consumer may edit one)", async () => {
+    const rows = [
+      { id: 1, slotA: 1, slotB: 2 },
+      { id: 2, slotA: 1, slotB: 2 },
+    ];
+    const errors: any[] = await t(fx.CeReservation).validateRows(rows, "insert", { fk: true });
+    expect(errors).toHaveLength(4);
+    const params = { fields: ["slotA", "slotB"], target: "ce_slots", values: "1, 2" };
+    for (const e of errors) expect(e).toMatchObject({ code: "FK_MISSING", params });
+    // e.g. a caller re-pathing the fields of one entry
+    errors[0].params.fields.push("x");
+    errors[0].params.target = "changed";
+    for (const e of errors.slice(1)) expect(e.params).toEqual(params);
+  });
 });

@@ -105,6 +105,7 @@ function makeMockTable(overrides: Record<string, any> = {}) {
     canSortField: vi.fn().mockReturnValue(true),
     getSearchIndexes: vi.fn().mockReturnValue([]),
     getValidator: vi.fn().mockReturnValue(validator),
+    normalizePayload: vi.fn((payload: unknown) => payload),
     resolveIdFilter: vi.fn().mockImplementation((id: unknown) => ({ id })),
     findMany: vi.fn().mockResolvedValue([]),
     findOne: vi.fn().mockResolvedValue(null),

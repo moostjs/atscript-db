@@ -1,6 +1,7 @@
 import type {
   AtscriptQueryNode,
   TAtscriptAnnotatedType,
+  TError,
   TSerializedAnnotatedType,
 } from "@atscript/typescript/utils";
 import type {
@@ -691,12 +692,25 @@ export interface TDbIndexField {
 
 /**
  * One problem {@link AtscriptDbTable.validateRows} found: the row's position
- * in the input, the field path and the message (since 0.1.165).
+ * in the input, the field path and the message (since 0.1.165), with the
+ * `code` / `params` a write's error carries for it (since 0.1.173) — the
+ * validator's codes (`MIN_LENGTH`, `REQUIRED`, the `DB_VALIDATOR_MESSAGES`
+ * codes, …; `custom` when the message is the app's own text), a structural
+ * refusal's `DbError` code (`DEPTH_EXCEEDED`), and `FK_MISSING` for a
+ * missing foreign-key target.
  */
 export interface TValidateRowsError {
   index: number;
   path: string;
   message: string;
+  /** Stable UPPER_SNAKE reason — translate by it (see `TError.code`). */
+  code?: string;
+  /** The values `message` names. */
+  params?: Record<string, unknown>;
+  /** `true` when `message` is the app's own text (a translator gets the text as its id). */
+  custom?: boolean;
+  /** The errors of each union branch, for a union value. */
+  details?: TError[];
 }
 
 export interface TDbIndex {

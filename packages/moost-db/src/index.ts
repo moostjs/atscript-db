@@ -49,7 +49,13 @@ export type { TTerminalRef } from "./meta/terminal-ref";
 // walker for the HTTP gate and the core backstop) — re-exported for convenience.
 export { collectQueryPaths } from "@atscript/db";
 export type { TQueryPathOp, TQueryPathRefs } from "@atscript/db";
-export { badRequest, errorEnvelope, unknownRelationError } from "./http-errors";
+export {
+  badRequest,
+  errorEnvelope,
+  MOOST_DB_MESSAGES,
+  notFoundError,
+  unknownRelationError,
+} from "./http-errors";
 // HTTP client budget for relational predicates (since 0.1.147).
 export { REL_FILTER_CLIENT_MAX_DEPTH, REL_FILTER_CLIENT_MAX_NODES } from "./relation-predicates";
 export type { THttpErrorEntry } from "./http-errors";

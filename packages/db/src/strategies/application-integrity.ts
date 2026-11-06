@@ -14,6 +14,7 @@ import type {
   TFkLookupTarget,
   TWriteTableResolver,
 } from "../types";
+import { storedValuesFilter } from "../query/normalize-filter";
 import { containsRelationFilter } from "../query/relation-filter";
 import { IntegrityStrategy, type TCascadePin } from "./integrity";
 
@@ -349,7 +350,8 @@ export class ApplicationIntegrity extends IntegrityStrategy {
   }
 
   /**
-   * Builds a filter for child records whose FK matches the deleted parent's PK values.
+   * Builds a filter for child records whose FK matches the deleted parent's
+   * PK values — the stored ones, compared as stored (`storedValuesFilter`).
    */
   private buildCascadeChildFilter(
     parentRecords: Array<Record<string, unknown>>,
@@ -364,9 +366,9 @@ export class ApplicationIntegrity extends IntegrityStrategy {
       if (values.length === 0) {
         return undefined;
       }
-      return values.length === 1
-        ? { [fk.fields[0]]: values[0] }
-        : { [fk.fields[0]]: { $in: values } };
+      return storedValuesFilter(
+        values.length === 1 ? { [fk.fields[0]]: values[0] } : { [fk.fields[0]]: { $in: values } },
+      );
     }
 
     // Composite FK: { $or: [{ fk1: pk1, fk2: pk2 }, ...] }
@@ -389,7 +391,7 @@ export class ApplicationIntegrity extends IntegrityStrategy {
     if (orFilters.length === 0) {
       return undefined;
     }
-    return orFilters.length === 1 ? orFilters[0] : { $or: orFilters };
+    return storedValuesFilter(orFilters.length === 1 ? orFilters[0]! : { $or: orFilters });
   }
 }
 

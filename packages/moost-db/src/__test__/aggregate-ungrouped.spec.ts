@@ -218,10 +218,11 @@ describe("over a real HTTP app", () => {
     @Inherit()
     class OrdersCtrl extends AsDbController {}
     const http = await bootHttp(OrdersCtrl);
-    expect(await http("GET", "/ug-orders/query?$select=sum(amount):total,count(*):n")).toEqual({
-      status: 200,
-      body: [{ total: 100, n: 4 }],
-    });
+    const { status, body } = await http(
+      "GET",
+      "/ug-orders/query?$select=sum(amount):total,count(*):n",
+    );
+    expect({ status, body }).toEqual({ status: 200, body: [{ total: 100, n: 4 }] });
     const bad = await http("GET", "/ug-orders/query?$select=status,count(*):n");
     expect(bad.status).toBe(400);
   });

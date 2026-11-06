@@ -129,7 +129,7 @@ import { getAtscriptDbMate } from "./mate";
 import { READABLE_DEF, resolveBoundReadable } from "./decorators";
 import { FieldCapabilityIndex, writeOnlyVerdict, type TGateOp } from "./meta/field-capabilities";
 import { bits, freezeShared, identityId, metaVariant } from "./meta/meta-cache";
-import { insightError, unknownInsight, unknownRelationError } from "./http-errors";
+import { insightError, notFoundError, unknownInsight, unknownRelationError } from "./http-errors";
 import {
   RelationPredicateGate,
   childrenOf,
@@ -1731,8 +1731,8 @@ export class AsDbReadableController<
    * default). Enforced by the action gate — the action's ids / rows are
    * loaded under {@link rowOverlay}, then checked against this filter (or —
    * without an overlay — the filter joins the load), so an id outside it gets
-   * the same 404 "Row not found for action identifier"
-   * as a missing one — and reflected in `$actions` and
+   * the same coded 404 (`code: "NOT_FOUND"`, see `notFoundError`) as a
+   * missing one — and reflected in `$actions` and
    * `GET /meta/actions`, which list the action only on rows inside it.
    *
    * The hook receives the candidate rows (`ctx`), so a scope can depend on
@@ -4118,7 +4118,7 @@ export class AsDbReadableController<
    */
   async runDelegatedOnQuery(): Promise<TDbActionTargetSummary | { matched: number }> {
     const name = useRouteParams<{ name: string }>().get("name");
-    if (!this._hasDelegations) throw new HttpError(404, `Unknown action "${name}"`);
+    if (!this._hasDelegations) throw notFoundError();
     if (typeof this.prepareRequest === "function") {
       await this.prepareRequest({ endpoint: "delegatedAction", action: name });
     }
@@ -4128,7 +4128,7 @@ export class AsDbReadableController<
       if (active.some((d) => d.names.includes(name))) {
         throw targetInvalid(name, `Action "${name}" does not accept a query target`);
       }
-      throw new HttpError(404, `Unknown action "${name}"`);
+      throw notFoundError();
     }
     const limits = delegation.queryTargets.get(name)!;
     const raw = await useBody(current()).parseBody<unknown>();

@@ -110,6 +110,8 @@ declare global {
     "db.unit": string
     "db.unit.ref": string
     "db.pg.type": string
+    "db.pg.schema": string
+    "db.pg.collate": string
   }
   type AtscriptPrimitiveTags = "never" | "string" | "email" | "phone" | "date" | "isoDate" | "uuid" | "url" | "ipv4" | "ipv6" | "ip" | "char" | "required" | "trimmed" | "number" | "positive" | "negative" | "single" | "double" | "int" | "int8" | "int16" | "int32" | "int64" | "uint8" | "byte" | "uint16" | "port" | "uint32" | "uint64" | "timestamp" | "created" | "updated" | "decimal" | "boolean" | "true" | "false" | "null" | "void" | "undefined" | "unknown" | "phantom" | "db" | "vector" | "geoPoint" | "currencyCode"
 }

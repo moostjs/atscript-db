@@ -797,8 +797,9 @@ export class TableMetadata {
       this._columnFromMap.set(fieldName, columnFrom);
     }
 
-    // @db.default or @db.default.increment/uuid/now
-    const resolvedDefault = resolveDefaultFromMetadata(metadata);
+    // @db.default or @db.default.increment/uuid/now — a value default normalized
+    // like the field's writes (the DDL DEFAULT / backfill store what an insert would)
+    const resolvedDefault = resolveDefaultFromMetadata(metadata, fieldType);
     if (resolvedDefault) {
       this.defaults.set(fieldName, resolvedDefault);
     }
@@ -1714,7 +1715,9 @@ export class TableMetadata {
         isPrimaryKey: targetMetadata?.has("meta.id") ?? false,
         ignored: false,
         storage: "column",
-        defaultValue: targetMetadata ? resolveDefaultFromMetadata(targetMetadata) : undefined,
+        defaultValue: targetMetadata
+          ? resolveDefaultFromMetadata(targetMetadata, targetFieldType)
+          : undefined,
         collate: targetMetadata?.get("db.column.collate") as TDbCollation | undefined,
       };
     }

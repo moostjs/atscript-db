@@ -556,10 +556,24 @@ To validate rows the way a write would — without writing them (imports, dry ru
 
 ```typescript
 const problems = await users.validateRows(rows); // mode: "insert" (default) | "replace" | "patch"
-// [{ index: 3, path: "email", message: "Required field" }, ...]
+// [{ index: 3, path: "email", message: "Expected string, got undefined", code: "TYPE", params: {…} }, ...]
 
 const withFks = await users.validateRows(rows, "insert", { fk: true });
-// also: { index, path: "teamId", message: 'References a non-existent record in "teams" (7)' }
+// also: { index, path: "teamId", message: 'References a non-existent record in "teams" (7)',
+//         code: "FK_MISSING", params: { fields: ["teamId"], target: "teams", values: "7" } }
+```
+
+Each problem carries what the same write's error carries for it (since 0.1.173): the validator's `code` and `params` (`custom: true` when the message is your own annotation text, `details` for a union), a `DbError` code such as `DEPTH_EXCEEDED`, or `FK_MISSING`. A translator renders them like a write's errors. To answer a dry run over HTTP, throw them as a `ValidatorError` with the row index in the path — the same paths a bulk write reports — and moost-db answers the usual `400`, translated per request:
+
+```typescript
+import { ValidatorError } from "@atscript/typescript/utils";
+
+const problems = await this.table.validateRows(rows);
+if (problems.length > 0) {
+  throw new ValidatorError(
+    problems.map(({ index, ...e }) => ({ ...e, path: `[${index}].${e.path}` })),
+  );
+}
 ```
 
 `fk: true` looks every non-null foreign key up — on every adapter, also those that leave foreign keys to the engine at write time. Rows that already failed type validation are not looked up. The lookup reads the existing target keys in chunks of 500 distinct keys, so its cost grows with the number of distinct keys, not with missing ones, and large batches stay under every bind-parameter limit. The caller's rows are not modified.
@@ -608,7 +622,8 @@ What is normalized:
 
 - **Every write path**: `insertOne` / `insertMany` (also with `onConflict: "ignore"`), `replaceOne` / `bulkReplace` / `replaceMany`, `updateOne` / `bulkUpdate` / `updateMany`, and `validateRows`. Over HTTP, moost-db's `POST` / `PUT` / `PATCH` write through these, so they are covered too.
 - **Patches**: plain values, nested objects, and the items of the array operators — `$replace`, `$insert`, `$upsert`, and the `$update` / `$remove` items whose keys find array elements (`$remove: [" RED "]` removes the stored `"red"`). `$inc` / `$dec` / `$mul` are left as they are.
-- **Nested writes**: rows written through `@db.rel.to`, `@db.rel.from` and `@db.rel.via` — on insert and replace, and in patch operators (`$insert` rows, `$update` patches) — once, at the top-level call. Defaults are normalized where they are filled, so a nested row's `@db.default` is stored and validated like a direct insert's.
+- **Nested writes**: rows written through `@db.rel.to`, `@db.rel.from` and `@db.rel.via` — on insert and replace, and in patch operators (`$insert` rows, `$update` patches) — once, at the top-level call.
+- **Defaults**: a field's `@db.default` is normalized once, so a nested row's default is stored and validated like a direct insert's, and the column `DEFAULT` schema sync writes (and the value MongoDB fills a new field with) is the normalized value too — see [Static Defaults](/api/defaults#static-defaults).
 - **Keys**: a patch addressed by a unique field (`{ email: " ANN@example.com", … }`) finds the row by the normalized value, and so do `recordFilter(payload)` and the keys of `touchMany`.
 
 The caller's payload is never changed: the table normalizes a copy, and only the objects that change are copied. The cost is near-zero: a type that reaches no `@normalize.*` annotation is not walked at all; a type that reaches one only through a relation (a `@db.rel.to` to a table with a normalized field) walks each row once, which is small next to the write itself. A [write guard](#write-guards) sees the normalized rows; values it sets are validated but not normalized again.
@@ -624,10 +639,11 @@ await users.findById("ANN@example.com"); // by the unique email
 
 - **Normalized**: the operands of implicit equality, `$eq`, `$ne`, `$in` and `$nin` on a field with `@normalize.*` (an array field's element operand by its element type) — in the filters of reads, counts, aggregates, `updateMany` / `deleteMany`, `$with` filters and relation predicates (`$some` / `$none`); and every id: `findById`, `resolveRowFilter` / `resolveIdFilter` (so `deleteOne` and moost-db's `GET /one/:id`), composite and unique-key ids. moost-db's query string goes through the same filters.
 - **Compared as given**: `$regex`, `$search` / fulltext, range operators (`$gt`, `$gte`, `$lt`, `$lte`), `$exists`, aggregate conditions (`count(*|email=…)`) and `$having`.
+- **Compared as stored**: the keys the table reads from stored rows itself — relation loading (`$with`), application-level cascades and `RESTRICT` checks, and a row it addresses by the primary key it just read (a delete by a unique key, for example). A row written before its key field gained `@normalize.*` is still loaded, cascaded and deleted with the rows that reference it.
 
 Rows written before 0.1.170 are not rewritten — see [Upgrading](/guide/upgrading#v0-1-170) for what that means for lookups and the data step that rewrites them.
 
-`normalizeWritePayload(type, payload, mode, opts?)` from `@atscript/db` (also `@atscript/db/validator`) applies the same rules to one payload — `mode` is `"insert"`, `"replace"` or `"patch"`; `opts` are the validator options the result will be validated with (`dbValidatorOptions(type, mode)`), used to pick between union members.
+`table.normalizePayload(payload, mode)` (since 0.1.173) returns a payload — one row, or an array of rows — as a write of `mode` stores it: copy-on-change, nothing validated and no defaults applied. moost-db's [`onWrite`](/http/customization#onwrite) receives the request body this way. `normalizeWritePayload(type, payload, mode, opts?)` from `@atscript/db` (also `@atscript/db/validator`) applies the same rules to one payload — `mode` is `"insert"`, `"replace"` or `"patch"`; `opts` are the validator options the result will be validated with (`dbValidatorOptions(type, mode)`), used to pick between union members.
 
 ### Stored JSON values under a tightened type {#tightened-json}
 

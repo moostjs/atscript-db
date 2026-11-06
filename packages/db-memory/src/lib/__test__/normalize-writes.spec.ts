@@ -27,6 +27,8 @@ beforeEach(async () => {
     fx.NwCode,
     fx.NwContact,
     fx.NwPair,
+    fx.NwGroup,
+    fx.NwMember,
   ]);
 });
 
@@ -298,5 +300,45 @@ describe("equality lookups are normalized", () => {
       },
     });
     expect(conditional).toEqual([{ n: 0 }]);
+  });
+});
+
+describe("relation filters built from stored values compare them as stored", () => {
+  // Rows stored before `code` gained `@normalize.*` keep "ABC". The keys the
+  // database layer reads from stored rows (relation loading, cascade child
+  // filters, a row pinned by its stored primary key) are the stored values —
+  // normalizing them would look for "abc" and miss the rows they came from.
+  beforeEach(async () => {
+    await space.getAdapter(fx.NwGroup).insertOne({ code: "ABC", name: "Alpha" });
+    await space.getAdapter(fx.NwMember).insertOne({ id: 1, groupCode: "ABC" });
+  });
+
+  it("$with loads FROM and TO relations of legacy keys", async () => {
+    const groups = await t(fx.NwGroup).findMany({
+      filter: {},
+      controls: { $with: [{ name: "members" }] },
+    });
+    expect(groups).toMatchObject([{ code: "ABC", members: [{ id: 1, groupCode: "ABC" }] }]);
+    const members = await t(fx.NwMember).findMany({
+      filter: {},
+      controls: { $with: [{ name: "group" }] },
+    });
+    expect(members).toMatchObject([{ id: 1, group: { code: "ABC", name: "Alpha" } }]);
+  });
+
+  it("an application-level cascade deletes the children of a legacy key", async () => {
+    expect((await t(fx.NwGroup).deleteMany({ name: "Alpha" })).deletedCount).toBe(1);
+    expect(await all(fx.NwMember)).toEqual([]);
+  });
+
+  it("a row found by a unique key is deleted by its stored primary key", async () => {
+    // "Alpha" names the row by its unique name; the delete pins the stored key "ABC"
+    expect((await t(fx.NwGroup).deleteOne("Alpha")).deletedCount).toBe(1);
+    expect(await t(fx.NwGroup).findMany({ filter: {}, controls: {} })).toEqual([]);
+    expect(await all(fx.NwMember)).toEqual([]);
+  });
+
+  it('user lookups are still normalized: "ABC" looks for "abc"', async () => {
+    expect(await t(fx.NwGroup).findById("ABC")).toBeNull();
   });
 });

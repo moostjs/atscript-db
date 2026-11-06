@@ -184,7 +184,8 @@ describe("actionRowScope — enforced by the action gate", () => {
     const { post } = await boot({ scope: everyAction });
     const missing = await post("approve", { id: 99 });
     expect(missing.status).toBe(404);
-    expect(missing.body.message).toBe("Row not found for action identifier");
+    // the coded 404 every moost-db endpoint answers (since 0.1.173)
+    expect(missing.body).toMatchObject({ code: "NOT_FOUND", message: "Not found" });
     expect(await post("approve", { id: 2 })).toEqual(missing);
     expect(await post("archive", { id: 2 })).toEqual(missing);
     expect((await post("approve", { id: 1 })).status).toBe(201);

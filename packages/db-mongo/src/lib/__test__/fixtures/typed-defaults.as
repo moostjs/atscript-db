@@ -22,3 +22,22 @@ export interface TypedDefaults {
     @db.default 10.50
     price: decimal
 }
+
+// Defaults under `@normalize.*`: the backfill is what an insert stores.
+@normalize.trim
+@normalize.lowercase
+export type NormalizedTag = string
+
+@db.table 'normalized_defaults'
+export interface NormalizedDefaults {
+    @meta.id
+    id: number
+
+    @db.default ' Pending '
+    @normalize.trim
+    @normalize.uppercase
+    code: string
+
+    @db.default '[" A ", "b"]'
+    tags: NormalizedTag[]
+}

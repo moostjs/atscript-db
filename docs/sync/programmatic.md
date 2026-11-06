@@ -172,7 +172,7 @@ interface SyncEntry {
   // Plan fields — what will change
   columnsToAdd: TDbFieldMeta[];
   columnsToRename: Array<{ from: string; to: string }>;
-  typeChanges: Array<{ column: string; fromType: string; toType: string }>;
+  typeChanges: Array<{ column: string; fromType: string; toType: string; waitsFor?: string[] }>; // waitsFor (since 0.1.173): removed tables safe mode keeps that still reference the column — the change is skipped ('retype')
   nullableChanges: Array<{ column: string; toNullable: boolean }>;
   defaultChanges: Array<{ column: string; oldDefault?: string; newDefault?: string }>;
   columnsToDrop: string[];
@@ -195,8 +195,8 @@ interface SyncEntry {
   dropGroup?: string[]; // set when a foreign-key cycle is dropped as one group
   refused: boolean; // this `error` entry is a pre-flight refusal — no DDL ran
   skipped: ReadonlyArray<
-    "pk-rebuild" | "recreate" | "table-options" | "nullable-defaults" | "derived"
-  >; // work safe mode skipped ('derived' since 0.1.141)
+    "pk-rebuild" | "recreate" | "table-options" | "nullable-defaults" | "derived" | "retype"
+  >; // work safe mode skipped ('derived' since 0.1.141, 'retype' since 0.1.173)
   toInit(): TSyncEntryInit; // the init object, for deriving a modified copy
 
   // Since 0.1.141

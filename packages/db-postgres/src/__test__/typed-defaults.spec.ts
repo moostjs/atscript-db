@@ -28,3 +28,20 @@ describe("PostgresAdapter — typed @db.default literals", () => {
     );
   });
 });
+
+describe("PostgresAdapter — a @db.default under @normalize.*", () => {
+  // A row the database fills (a write outside the SDK, an added column's
+  // existing rows) holds what an insert through the table stores: the
+  // normalized default, not the raw literal.
+  it("CREATE TABLE and ADD COLUMN emit the normalized DEFAULT", async () => {
+    const driver = createMockDriver();
+    const space = new DbSpace(() => new PostgresAdapter(driver));
+    const table = space.getTable(fx.NormalizedDefaults);
+    await table.dbAdapter.ensureTable();
+    const code = table.fieldDescriptors.find((f: any) => f.path === "code")!;
+    await (table.dbAdapter as any).syncColumns({ added: [code], removed: [], typeChanged: [] });
+    const ddl = driver.calls.map((c) => c.sql).filter((s) => /CREATE TABLE|ADD COLUMN/.test(s));
+    expect(ddl).toHaveLength(2);
+    for (const sql of ddl) expect(sql).toContain("DEFAULT 'PENDING'");
+  });
+});

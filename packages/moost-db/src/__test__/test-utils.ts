@@ -8,13 +8,16 @@ import { Moost } from "moost";
 
 import { validationErrorTransform } from "../validation-interceptor";
 
-/** A JSON request against a {@link bootHttp} app: status + parsed body (`undefined` when empty). */
+/**
+ * A JSON request against a {@link bootHttp} app: status, parsed body
+ * (`undefined` when empty) and the response headers but `date`.
+ */
 export type THttpSend = (
   method: string,
   path: string,
   body?: unknown,
   headers?: Record<string, string>,
-) => Promise<{ status: number; body: any }>;
+) => Promise<{ status: number; body: any; headers: Record<string, string> }>;
 
 /**
  * Boots a real Moost HTTP app around `controllers` and returns a JSON
@@ -33,7 +36,11 @@ export async function bootHttp(...controllers: Function[]): Promise<THttpSend> {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await res!.text();
-    return { status: res!.status, body: text ? JSON.parse(text) : undefined };
+    const head: Record<string, string> = {};
+    res!.headers.forEach((v, k) => {
+      if (k !== "date") head[k] = v;
+    });
+    return { status: res!.status, body: text ? JSON.parse(text) : undefined, headers: head };
   };
 }
 
@@ -179,6 +186,7 @@ export function createMockReadable(
     canSortField: vi.fn().mockReturnValue(true),
     getSearchIndexes: vi.fn().mockReturnValue([]),
     getValidator: vi.fn().mockReturnValue(validator),
+    normalizePayload: vi.fn((payload: unknown) => payload),
     getAdapter: vi.fn(() => adapter),
     resolveIdFilter: vi.fn().mockImplementation((id: unknown) => {
       if (id === null || typeof id !== "object") return { id };

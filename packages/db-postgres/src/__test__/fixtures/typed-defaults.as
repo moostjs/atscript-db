@@ -22,3 +22,15 @@ export interface TypedDefaults {
     @db.default 10.50
     price: decimal
 }
+
+// A default under `@normalize.*`: the DDL DEFAULT is what an insert stores.
+@db.table 'normalized_defaults'
+export interface NormalizedDefaults {
+    @meta.id
+    id: number
+
+    @db.default ' Pending '
+    @normalize.trim
+    @normalize.uppercase
+    code: string
+}

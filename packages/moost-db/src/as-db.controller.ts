@@ -13,6 +13,7 @@ import type {
   TDeleteOptions,
   TTransactionOptions,
   TWriteOptions,
+  ValidatorMode,
 } from "@atscript/db";
 import { DbError, isEmptyObject, isPlainObject, reconcileCas } from "@atscript/db";
 import {
@@ -31,7 +32,7 @@ import { current, Inherit, Inject, Moost, Optional, Param } from "moost";
 
 import { AsDbReadableController } from "./as-db-readable.controller";
 import { TABLE_DEF } from "./decorators";
-import { badRequest } from "./http-errors";
+import { badRequest, notFoundError } from "./http-errors";
 import { dbErrorToHttp } from "./validation-interceptor";
 
 const SHAPE_MESSAGE = "Expected an object";
@@ -59,6 +60,16 @@ function assertWriteShape(payload: unknown): void {
   }
   if (!isPlainObject(payload)) throw badRequest("", SHAPE_MESSAGE);
 }
+
+/** The write mode each write action validates and normalizes its rows in. */
+const WRITE_MODE: Readonly<Record<TDbWriteAction, ValidatorMode>> = {
+  insert: "insert",
+  insertMany: "insert",
+  replace: "replace",
+  replaceMany: "replace",
+  update: "patch",
+  updateMany: "patch",
+};
 
 /** `true` when `data` still has the shape the endpoint received (object, or array of objects for `*Many`). */
 function hasWriteShape(data: unknown, many: boolean): boolean {
@@ -141,7 +152,11 @@ export class AsDbController<
 
   /**
    * Intercepts write operations with the UNTRUSTED body (after the shape gate:
-   * an object, or an array of objects). Runs outside any transaction. Return
+   * an object, or an array of objects), as the write will store it: the
+   * type's `@normalize.*` applied (since 0.1.173; before, the raw body) — not
+   * yet given defaults or validated. The caller's body object is not
+   * modified; what the hook returns is normalized and validated by the
+   * table. Runs outside any transaction. Return
    * the data in the shape received — an object, or an array of objects for
    * the `*Many` actions; anything else (including `undefined`) aborts with
    * 500 "Not saved". Return an `Error` instance to respond with that error
@@ -273,13 +288,21 @@ export class AsDbController<
     return result;
   }
 
-  /** Runs `onWrite` and re-applies the shape gate to its output (a non-object is a 500 "Not saved"). */
+  /**
+   * Runs `onWrite` on the body as the write will store it (`@normalize.*`
+   * applied, since 0.1.173) and re-applies the shape gate to its output (a
+   * non-object is a 500 "Not saved").
+   */
   private async _writeBody(
     action: TDbWriteAction,
     payload: unknown,
     many: boolean,
   ): Promise<Record<string, unknown> | Array<Record<string, unknown>>> {
-    const data = await this._checkHook(this.onWrite(action, payload), "Not saved");
+    const body = this.table.normalizePayload(
+      payload as Record<string, unknown> | Array<Record<string, unknown>>,
+      WRITE_MODE[action],
+    );
+    const data = await this._checkHook(this.onWrite(action, body), "Not saved");
     if (!hasWriteShape(data, many)) {
       throw new HttpError(500, "Not saved");
     }
@@ -350,7 +373,7 @@ export class AsDbController<
       : this._removeArgs;
     const result = await this.table.deleteOne(id as never, ...args);
     if (result.deletedCount < 1) {
-      throw new HttpError(404);
+      throw notFoundError();
     }
     return result;
   }
@@ -528,7 +551,7 @@ export class AsDbController<
       ? ((await table.findOne({ filter, controls: {} } as any)) as Record<string, unknown> | null)
       : null;
     if (row === null) {
-      return new HttpError(404);
+      return notFoundError();
     }
     // NOTE: VERSION_PROPOSAL.md §6.3 specifies `{ error: "version_mismatch",
     // currentVersion: N }`. The Wooks `HttpError.body` getter forcibly

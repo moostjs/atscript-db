@@ -4586,4 +4586,47 @@ describe("SchemaSync — inbound FKs over a retyped column", () => {
     await sync.run([Rk.RkCat, Rk.RkArtRef], { force: true });
     expect(sharedDdl.some((d) => d.startsWith("dropForeignKeys"))).toBe(false);
   });
+
+  // Safe mode keeps the removed rk_refs, whose constraint still references
+  // `slug`: the change cannot run before rk_refs is dropped (the engine
+  // refuses it, ER 3780 on MySQL), so it waits — pending, the hash withheld —
+  // for the run that drops rk_refs first. Since 0.1.173; before, the MODIFY
+  // ran into the constraint and the sync failed with the engine's error.
+  it("safe mode: the type change waits for the kept removed table, in plan and run", async () => {
+    const { space, sync } = await syncReferenced();
+    const plan = await sync.plan([Rk.RkCat], { safe: true });
+    const cats = plan.entries.find((e) => e.name === "rk_cats")!;
+    const waiting = {
+      column: "slug",
+      fromType: "VARCHAR(255)",
+      toType: "string",
+      waitsFor: ["rk_refs"],
+    };
+    expect(cats.typeChanges).toEqual([waiting]);
+    expect(cats.skipped).toEqual(["retype"]);
+    expect(cats.pending).toBe(true);
+    expect(cats.destructive).toBe(false);
+    expect(cats.print("plan").join("\n")).toContain(
+      'skipped (safe mode: "rk_refs" still references it)',
+    );
+
+    const result = await sync.run([Rk.RkCat], { force: true, safe: true });
+    const entry = result.entries.find((e) => e.name === "rk_cats")!;
+    expect([entry.status, entry.typeChanges, entry.skipped]).toEqual([
+      "alter",
+      [waiting],
+      ["retype"],
+    ]);
+    expect(result.status).not.toBe("failed");
+    // no MODIFY of slug, and rk_refs (its constraint included) is left alone
+    expect((space.get(Rk.RkCat).dbAdapter as ModifyMockAdapter).typeModified).toEqual([]);
+    expect(sharedDdl.filter((d) => d.includes("rk_refs"))).toEqual([]);
+
+    // the next run without safe drops rk_refs, then changes the type
+    const next = await sync.run([Rk.RkCat]);
+    expect(next.status).toBe("synced");
+    expect(ddlIndex("dropTableByName rk_refs")).toBeGreaterThanOrEqual(0);
+    expect(ddlIndex("dropTableByName rk_refs")).toBeLessThan(ddlIndex("syncColumns rk_cats"));
+    expect((space.get(Rk.RkCat).dbAdapter as ModifyMockAdapter).typeModified).toEqual(["slug"]);
+  });
 });

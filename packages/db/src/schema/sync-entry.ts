@@ -48,7 +48,40 @@ export type TSyncSkippedWork =
   | "table-options"
   | "nullable-defaults"
   /** A derived column's drop + add (kind / expression / type change) — since 0.1.141. */
-  | "derived";
+  | "derived"
+  /**
+   * A type change over a column a removed table still references (since
+   * 0.1.173): safe mode keeps the removed table, and the change waits for
+   * the run that drops it — see {@link TSyncTypeChange.waitsFor}.
+   */
+  | "retype";
+
+/**
+ * One column type change of an entry. `waitsFor` (since 0.1.173) names the
+ * removed tables safe mode keeps whose foreign key references the column
+ * (or, on a table whose type changes rebuild it, any of its columns): the
+ * change is skipped — pending, `skipped` includes `"retype"` — and the next
+ * run without `safe` drops those tables first, then applies it.
+ */
+export interface TSyncTypeChange {
+  column: string;
+  fromType: string;
+  toType: string;
+  waitsFor?: string[];
+}
+
+/** Whether a type change is pending: it waits for a removed table, or safe mode skipped the recreate. */
+export function isPendingTypeChange(
+  tc: TSyncTypeChange,
+  skipped: readonly TSyncSkippedWork[],
+): boolean {
+  return !!tc.waitsFor || skipped.includes("recreate");
+}
+
+/** `"a", "b"` — names quoted and comma-joined for messages. */
+export function quoteList(names: readonly string[]): string {
+  return names.map((n) => `"${n}"`).join(", ");
+}
 
 /**
  * One derived-column rebuild as plan and run entries report it (since 0.1.141):
@@ -77,7 +110,7 @@ export interface TSyncEntryInit {
   syncMethod?: "drop" | "recreate";
   columnsToAdd?: TDbFieldMeta[];
   columnsToRename?: Array<{ from: string; to: string }>;
-  typeChanges?: Array<{ column: string; fromType: string; toType: string }>;
+  typeChanges?: TSyncTypeChange[];
   nullableChanges?: Array<{ column: string; toNullable: boolean }>;
   defaultChanges?: Array<{ column: string; oldDefault?: string; newDefault?: string }>;
   columnsToDrop?: string[];
@@ -123,8 +156,10 @@ export interface TSyncEntryInit {
   /**
    * The work safe mode skipped on this table: `"pk-rebuild"` (`pkChange`
    * kept with `rebuild: false`), `"recreate"` (`typeChanges` kept),
-   * `"table-options"` (`optionChanges` kept) and `"nullable-defaults"`
-   * (`nullableChanges` / `defaultChanges` kept). Each is pending: the
+   * `"table-options"` (`optionChanges` kept), `"nullable-defaults"`
+   * (`nullableChanges` / `defaultChanges` kept), `"derived"`
+   * (`derivedChanges` kept) and `"retype"` (the `typeChanges` with
+   * `waitsFor`). Each is pending: the
    * table's snapshot and the schema hash are withheld, and the next run
    * without `safe` applies it. Printed as `… — skipped (safe mode)`.
    * Identical in the plan and in the run.
@@ -186,7 +221,7 @@ export class SyncEntry {
   // Plan fields
   readonly columnsToAdd: TDbFieldMeta[];
   readonly columnsToRename: Array<{ from: string; to: string }>;
-  readonly typeChanges: Array<{ column: string; fromType: string; toType: string }>;
+  readonly typeChanges: TSyncTypeChange[];
   readonly nullableChanges: Array<{ column: string; toNullable: boolean }>;
   readonly defaultChanges: Array<{ column: string; oldDefault?: string; newDefault?: string }>;
   readonly columnsToDrop: string[];
@@ -300,7 +335,7 @@ export class SyncEntry {
     }
     return (
       this.columnsToDrop.length > 0 ||
-      (this.typeChanges.length > 0 && !this.skipped.includes("recreate")) ||
+      this.typeChanges.some((tc) => !isPendingTypeChange(tc, this.skipped)) ||
       this.recreated ||
       // A primary-key rebuild recreates the table on SQLite and rewrites the
       // key everywhere else; a skipped (safe-mode) change is not destructive.
@@ -363,21 +398,20 @@ export class SyncEntry {
   /**
    * `! col: t1 → t2 — drop` (plan), `~ col: t1 → t2 — type changed` (result),
    * or `! type col (t1 → t2) — skipped (safe mode)` in plan and result when
-   * the `'drop'` recreate was skipped.
+   * the `'drop'` recreate was skipped — `— skipped (safe mode: "t" still
+   * references it)` when the change waits for a removed table (`waitsFor`).
    */
   private printTypeChanges(c: TSyncColors, mode: "plan" | "result"): string[] {
-    if (this.skipped.includes("recreate")) {
-      return this.typeChanges.map(
-        (tc) =>
-          `      ${c.yellow(`! type ${tc.column} (${tc.fromType} → ${tc.toType}) — skipped (safe mode)`)}`,
-      );
-    }
-    if (mode === "result") {
-      return this.typeChanges.map(
-        (tc) => `      ${c.yellow(`~ ${tc.column}: ${tc.fromType} → ${tc.toType} — type changed`)}`,
-      );
-    }
     return this.typeChanges.map((tc) => {
+      if (isPendingTypeChange(tc, this.skipped)) {
+        const why = tc.waitsFor
+          ? `safe mode: ${quoteList(tc.waitsFor)} still ${tc.waitsFor.length === 1 ? "references" : "reference"} it`
+          : "safe mode";
+        return `      ${c.yellow(`! type ${tc.column} (${tc.fromType} → ${tc.toType}) — skipped (${why})`)}`;
+      }
+      if (mode === "result") {
+        return `      ${c.yellow(`~ ${tc.column}: ${tc.fromType} → ${tc.toType} — type changed`)}`;
+      }
       const action = this.syncMethod ? ` — ${this.syncMethod}` : " — requires migration";
       return `      ${c.red(`! ${tc.column}: ${tc.fromType} → ${tc.toType}${action}`)}`;
     });

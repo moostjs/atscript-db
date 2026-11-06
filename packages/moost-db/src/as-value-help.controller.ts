@@ -14,6 +14,7 @@ import {
   registerAsValueHelpController,
 } from "./actions/controller-registry";
 import { AsReadableController } from "./as-readable.controller";
+import { notFoundError } from "./http-errors";
 import {
   AGGREGATE_ONLY_CONTROLS,
   ONE_CONTROLS,
@@ -237,7 +238,7 @@ export abstract class AsValueHelpController<
     if (item instanceof HttpError) return item;
     if (overlay && !isEmptyObject(overlay)) {
       if (!buildMemoryPredicate(overlay)(item as Record<string, unknown>)) {
-        return new HttpError(404);
+        return notFoundError();
       }
     }
     const projection = this.normalizeSelect(select);

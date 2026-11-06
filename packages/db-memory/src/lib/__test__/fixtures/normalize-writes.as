@@ -136,3 +136,31 @@ export interface NwPair {
 
     label: string
 }
+
+// Keyed by a normalized code that rows stored before the code was normalized
+// hold as written ("ABC"): relation filters built from stored values compare
+// them as stored.
+@db.table 'nw_groups'
+export interface NwGroup {
+    @meta.id
+    code: NwLabel
+
+    @db.index.unique 'nw_group_name_idx'
+    name: string
+
+    @db.rel.from
+    members?: NwMember[]
+}
+
+@db.table 'nw_members'
+export interface NwMember {
+    @meta.id
+    id: number
+
+    @db.rel.FK
+    @db.rel.onDelete 'cascade'
+    groupCode: NwGroup.code
+
+    @db.rel.to
+    group?: NwGroup
+}

@@ -44,6 +44,35 @@ describe("@normalize.* over HTTP", () => {
     expect(await table.findById(1)).toMatchObject({ name: "Ann P" });
   });
 
+  it("onWrite sees the body as the write stores it; the request body is untouched", async () => {
+    // Like guardWrite / checkWrite, onWrite judges the values the table will
+    // store: a policy comparing `email` must not see " Ann@X.io ".
+    const { table } = await bind();
+    const seen: unknown[] = [];
+    class Hooked extends AsDbController {
+      protected override onWrite(action: string, data: unknown) {
+        seen.push(action, structuredClone(data));
+        // what the hook sets is normalized by the table
+        return Array.isArray(data) ? data : { ...(data as object), name: " Set By Hook " };
+      }
+    }
+    const controller = new Hooked(createMockApp(), table as any);
+    const body = { id: 1, email: " Ann@X.io ", name: " Ann " };
+    await controller.insert(body);
+    expect(body).toEqual({ id: 1, email: " Ann@X.io ", name: " Ann " });
+    await controller.update([{ id: 1, email: " ANN@x.io " }]);
+    await controller.replace({ id: 1, email: "ANN@X.IO", name: " R " });
+    expect(seen).toEqual([
+      "insert",
+      { id: 1, email: "ann@x.io", name: "Ann" },
+      "updateMany",
+      [{ id: 1, email: "ann@x.io" }],
+      "replace",
+      { id: 1, email: "ann@x.io", name: "R" },
+    ]);
+    expect(await table.findById(1)).toMatchObject({ email: "ann@x.io", name: "Set By Hook" });
+  });
+
   it("a stale version on a row addressed by its unique key is 409, not 404", async () => {
     const { controller, table } = await bind();
     await table.insertOne({ id: 1, email: "ann@x.io", name: "Ann" });

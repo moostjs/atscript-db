@@ -482,13 +482,13 @@ prepareRequest (when implemented)
 ```
 
 - **Shape gate** — the body must be a plain object (`POST`/`PUT`/`PATCH` with an object) or an array of plain objects (array bodies). `null`, primitives and `[1, "x"]` answer `400` with `errors: [{ path: "" | "[i]", message: "Expected an object" }]` before any hook runs. The gate is applied again to what `onWrite` returns: a hook that returns a non-object (or an object for a `*Many` action) aborts with `500 "Not saved"`, like returning `undefined`.
-- **`onWrite` / `onRemove`** keep their contract and run _outside_ any transaction (they coerce untrusted input; on MongoDB a transaction callback may re-run, so hooks with side effects stay out of it).
+- **`onWrite` / `onRemove`** keep their contract and run _outside_ any transaction (they coerce untrusted input; on MongoDB a transaction callback may re-run, so hooks with side effects stay out of it). `onWrite` receives the body with `@normalize.*` applied — see [onWrite](#onwrite).
 - **`guardWrite` / `guardRemove`** are the table's [write guards](/api/crud#write-guards): the override is passed as the `guard` option of the table call and runs _inside the table's transaction_, after defaults + validation. Overriding a guard is the switch — unmodified controllers pass no guard and pay nothing: the table is called exactly as before, no second validation.
 - **Built-in failures are thrown** as `HttpError` — see [Thrown errors](#thrown-errors).
 
 ### onWrite {#onwrite}
 
-Intercepts all write operations before they reach the database. Return the (possibly modified) data to proceed — in the shape received: an object for the single actions, an array of objects for the `*Many` actions — or `undefined` to abort (HTTP `500 "Not saved"`; any other non-conforming return value aborts the same way). Return an `Error` instance (an `HttpError` for a chosen status) to respond with that error — since 0.1.128; it used to be passed on as data — or throw one.
+Intercepts all write operations before they reach the database. The body arrives as the write will store it: the type's [`@normalize.*`](/api/crud#normalization) applied — `" Ann@X.io "` is `"ann@x.io"` here, as in `guardWrite` and `checkWrite` (since 0.1.173) — but not yet given defaults or validated. The request's own body object is not modified, and what you return is normalized and validated by the table. Return the (possibly modified) data to proceed — in the shape received: an object for the single actions, an array of objects for the `*Many` actions — or `undefined` to abort (HTTP `500 "Not saved"`; any other non-conforming return value aborts the same way). Return an `Error` instance (an `HttpError` for a chosen status) to respond with that error — since 0.1.128; it used to be passed on as data — or throw one.
 
 The `action` parameter identifies the operation:
 
@@ -843,7 +843,7 @@ It runs after [`prepareRequest`](#preparerequest). Names outside `names` are ign
 
 ### authorizeForm {#authorizeform}
 
-Since 0.1.143. `GET /meta/form/:name` serves the schema of an [action input form](./actions#input-form). Override `authorizeForm(name, actionNames)` to refuse it per request: return `false` (or a promise of it) and the response is the same `404 Unknown form "<name>"` an unknown form gets, so a refused form's existence does not leak. `actionNames` lists the discovered actions whose input form is `name` — allow the form when the caller may run at least one of them. Default: `true`.
+Since 0.1.143. `GET /meta/form/:name` serves the schema of an [action input form](./actions#input-form). Override `authorizeForm(name, actionNames)` to refuse it per request: return `false` (or a promise of it) and the response is the same [coded `404`](./crud#not-found) an unknown form gets, so a refused form's existence does not leak. `actionNames` lists the discovered actions whose input form is `name` — allow the form when the caller may run at least one of them. Default: `true`.
 
 ```typescript
 protected override authorizeForm(name: string, actionNames: readonly string[]) {

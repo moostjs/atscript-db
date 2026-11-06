@@ -837,7 +837,8 @@ describe("actionRowScope may return a predicate (server-side, no opt-in needed)"
     expect((await send("POST", "actions/resolve", { ids: { id: 1 } })).status).toBe(201);
     const outside = await send("POST", "actions/resolve", { ids: { id: 3 } });
     expect(outside.status).toBe(404);
-    expect(outside.body.message).toBe("Row not found for action identifier");
+    // the coded 404 every moost-db endpoint answers (since 0.1.173)
+    expect(outside.body).toMatchObject({ code: "NOT_FOUND", message: "Not found" });
     expect((await send("POST", "actions/tag", { ids: { id: 3 } })).status).toBe(201);
 
     const rows = (await send("GET", "query?$actions=true")).body as Array<{

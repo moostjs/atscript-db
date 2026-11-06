@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vite-plus/test";
 import type { AtscriptDbTable, TMetaResponse } from "@atscript/db";
 import { createAdapter } from "@atscript/db-memory";
-import { MoostHttp, Post } from "@moostjs/event-http";
+import { Body, MoostHttp, Post } from "@moostjs/event-http";
+import { ValidatorError } from "@atscript/typescript/utils";
 import { useHeaders } from "@wooksjs/event-http";
 import { Moost, clearGlobalWooks, getMoostInfact, setTranslator } from "moost";
 
@@ -85,6 +86,18 @@ async function boot(opts: { metaTranslation?: boolean; overlay?: boolean } = {})
         byRole.set(role, (v = stableMeta({ ...meta, actions })));
       }
       return v;
+    }
+
+    // A dry-run import: validateRows' problems sent as the 400 a write would answer.
+    @Post("import")
+    async importRows(@Body() rows: Array<Record<string, unknown>>): Promise<unknown> {
+      const problems = await this.table.validateRows(rows);
+      if (problems.length > 0) {
+        throw new ValidatorError(
+          problems.map(({ index, ...e }) => ({ ...e, path: `[${index}].${e.path}` })),
+        );
+      }
+      return { ok: true };
     }
 
     @Post("actions/suspend")
@@ -325,6 +338,34 @@ describe("error bodies in the request's language", () => {
 
     const english = await send("", en, { method: "POST", body: { id: 3, name: "abc" } });
     expect(english.body.errors[0].message).not.toContain("vergeben");
+  });
+});
+
+describe("validateRows problems over HTTP", () => {
+  it("keep their code and params, so moost translates them like a write's errors", async () => {
+    setTranslator({ en: {}, de: DE });
+    const send = await boot();
+    const res = await send("/import", de, {
+      method: "POST",
+      body: [{ id: 1, name: "ab" }, { id: 2, name: "abc", code: "abcdef" }, { id: 3 }],
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual([
+      // the app's own text: translated by its text
+      expect.objectContaining({
+        path: "[0].name",
+        message: "Die Bezeichnung ist zu kurz",
+        custom: true,
+      }),
+      // a built-in message: translated by its code with its params
+      expect.objectContaining({
+        path: "[1].code",
+        code: "MAX_LENGTH",
+        params: expect.objectContaining({ max: 4 }),
+        message: "Höchstens 4 Zeichen",
+      }),
+      expect.objectContaining({ path: "[2].name", code: expect.any(String) }),
+    ]);
   });
 });
 

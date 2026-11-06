@@ -222,7 +222,8 @@ describe("actionRowScope(action, ctx) — the action gate (purpose: execute)", (
     const { send, calls, handled } = await boot();
     const refused = await send("POST", "actions/resolve", { ids: { id: 2 } });
     expect(refused.status).toBe(404);
-    expect(refused.body.message).toBe("Row not found for action identifier");
+    // the coded 404 every moost-db endpoint answers (since 0.1.173)
+    expect(refused.body).toMatchObject({ code: "NOT_FOUND", message: "Not found" });
     expect(calls).toEqual([{ action: "resolve", purpose: "execute", ids: [{ id: 2 }] }]);
     expect((await send("POST", "actions/resolve", { ids: { id: 1 } })).status).toBe(201);
     expect(handled).toEqual([{ id: 1 }]);

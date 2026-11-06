@@ -29,7 +29,12 @@ import { parseUrl } from "@uniqu/url";
 
 import { defaultCacheControl, readHttpResponse, type THttpResponse } from "./http-response";
 import { badRequest, UseValidationErrorTransform } from "./validation-interceptor";
-import { insightError, NESTED_NOT_SUPPORTED_MESSAGE, unknownInsight } from "./http-errors";
+import {
+  insightError,
+  NESTED_NOT_SUPPORTED_MESSAGE,
+  notFoundError,
+  unknownInsight,
+} from "./http-errors";
 import {
   GeoControlsDto,
   GetOneControlsDto,
@@ -680,7 +685,7 @@ export abstract class AsReadableController<
   protected async returnOne(result: Promise<DataType | null>): Promise<DataType | HttpError> {
     const item = await result;
     if (!item) {
-      return new HttpError(404);
+      return notFoundError();
     }
     return item;
   }
@@ -893,7 +898,7 @@ export abstract class AsReadableController<
         envelopes.filter((e) => e.info.inputForm === name).map((e) => e.info.name),
       ))
     ) {
-      throw new HttpError(404, `Unknown form "${name}"`);
+      throw notFoundError();
     }
     const app = await this.currentApp();
     ensurePublished(app);

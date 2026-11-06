@@ -24,9 +24,15 @@ beforeAll(async () => {
 beforeEach(async () => {
   driver = new BetterSqlite3Driver(":memory:");
   space = new DbSpace(() => new SqliteAdapter(driver));
-  const types = [fx.NwUser, fx.NwNote, fx.NwTag, fx.NwUserTag, fx.NwCode, fx.NwContact, fx.NwPair];
-  expect((await new SchemaSync(space).run(types as never, { force: true })).status).toBe("synced");
+  expect((await syncAll()).status).toBe("synced");
 });
+
+/** Syncs every model of the fixture. */
+const syncAll = () =>
+  new SchemaSync(space).run(
+    [fx.NwUser, fx.NwNote, fx.NwTag, fx.NwUserTag, fx.NwCode, fx.NwContact, fx.NwPair] as never,
+    { force: true },
+  );
 
 afterEach(() => {
   driver.close();
@@ -219,6 +225,27 @@ describe("defaults of nested rows are normalized", () => {
       { title: "nested", status: "new" },
       { title: "patched", status: "new" },
     ]);
+  });
+});
+
+describe("the column DEFAULT is the normalized default", () => {
+  // A row the database fills (a write outside the SDK, or an added column's
+  // existing rows) holds what an insert through the table would store —
+  // not the raw `@db.default 'NEW'` literal.
+  it("CREATE TABLE: DEFAULT 'new'; a row inserted outside the SDK gets it", async () => {
+    const col = driver
+      .all<{ name: string; dflt_value: string }>(`PRAGMA table_info("nw_notes")`)
+      .find((c) => c.name === "status");
+    expect(col?.dflt_value).toBe("'new'");
+    driver.run(`INSERT INTO "nw_notes" ("title") VALUES ('raw')`);
+    expect(await all(fx.NwNote)).toMatchObject([{ title: "raw", status: "new" }]);
+  });
+
+  it("ADD COLUMN: existing rows are filled with the normalized default", async () => {
+    driver.exec(`ALTER TABLE "nw_notes" DROP COLUMN "status"`);
+    driver.run(`INSERT INTO "nw_notes" ("title") VALUES ('old')`);
+    expect((await syncAll()).status).toBe("synced");
+    expect(await all(fx.NwNote)).toMatchObject([{ title: "old", status: "new" }]);
   });
 });
 

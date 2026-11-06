@@ -393,7 +393,7 @@ Action ids and rows obey the controller's row overlay — `transformOne({})` (de
 
 | Action                                                   | Id outside the overlay                                                                                                           |
 | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `'row'` with a row load (`@DbActionRow()` or `disabled`) | Overlay ANDed into the load → 404 `Row not found for action identifier` (same as missing).                                       |
+| `'row'` with a row load (`@DbActionRow()` or `disabled`) | Overlay ANDed into the load → the coded 404 `NOT_FOUND` (same as missing, 0.1.173).                                              |
 | `'row'`, `@DbActionID()` only                            | With an overlay or a restricting `actionRowScope`: the row is loaded (`id AND overlay AND scope`) before the handler → same 404. |
 | `'rows'` (`@DbActionIDs()` / `@DbActionRows()`)          | Fails like a missing id: same position in `ids`, `null` reason; `onDisabledRows` applies (`'reject'` → 409, `'skip'` → dropped). |
 

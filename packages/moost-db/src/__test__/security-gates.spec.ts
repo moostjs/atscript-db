@@ -992,8 +992,9 @@ describe("metaForm → authorizeForm", () => {
     expect(denied.seen).toEqual([["CommentForm", ["approve"]]]);
     expect(refused).toBeInstanceOf(HttpError);
     expect((refused as HttpError).body.statusCode).toBe(404);
-    expect((refused as HttpError).body.message).toBe('Unknown form "CommentForm"');
-    expect((unknown as HttpError).body.message).toBe('Unknown form "Nope"');
+    // one coded 404 for both (since 0.1.173): a refused form reads like an unknown one
+    expect((refused as HttpError).body).toMatchObject({ code: "NOT_FOUND", message: "Not found" });
+    expect((unknown as HttpError).body).toEqual((refused as HttpError).body);
 
     const allowed = formController(() => true);
     expect(await allowed.ctrl.metaForm("CommentForm")).toBeDefined();

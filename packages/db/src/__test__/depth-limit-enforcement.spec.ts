@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeAll } from "vite-plus/test";
+import { describe, it, expect, beforeAll, vi } from "vite-plus/test";
 import { ValidatorError } from "@atscript/typescript/utils";
 import type { FilterExpr } from "@uniqu/core";
 
 import { AtscriptDbTable } from "../table/db-table";
 import { DbSpace } from "../table/db-space";
 import { BaseDbAdapter } from "../base-adapter";
-import { DepthLimitExceededError } from "../db-error";
+import { DbError, DepthLimitExceededError } from "../db-error";
 import { prepareFixtures } from "./test-utils";
 import type {
   DbQuery,
@@ -187,6 +187,33 @@ describe("AtscriptDbTable — @db.depth.limit enforcement", () => {
       expect(e.actual).toBe(3);
       expect(e.field).toBe("children[0].grandchildren[0].greatgrandchildren");
     }
+  });
+
+  it("validateRows reports the refusal with the write's DbError code (since 0.1.173)", async () => {
+    const two = newSpace().getTable(DeepZero) as AtscriptDbTable;
+    expect(await two.validateRows([{ name: "a", children: [{ title: "x" }] }])).toEqual([
+      {
+        index: 0,
+        path: "children",
+        message: expect.stringContaining("@db.depth.limit 0"),
+        code: "DEPTH_EXCEEDED",
+      },
+    ]);
+  });
+
+  it("validateRows reports a DbError without entries as a row problem of its own", async () => {
+    // A refusal that names no field (`errors: []`) must not vanish: the row
+    // would read as valid.
+    const two = newSpace().getTable(DeepTwo) as AtscriptDbTable;
+    vi.spyOn(two, "getValidator").mockReturnValue({
+      validate: () => {
+        throw new DbError("INVALID_QUERY", [], "Refused as a whole");
+      },
+      errors: [],
+    } as never);
+    expect(await two.validateRows([{ name: "a" }])).toEqual([
+      { index: 0, path: "", message: "Refused as a whole", code: "INVALID_QUERY" },
+    ]);
   });
 
   it("reports the offending field path in the error", async () => {

@@ -16,14 +16,14 @@ import { fkLookupTargetOf } from "./fk-lookup";
 import type { FilterExpr } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
-import { CasMismatchError, DbError, invalidQuery } from "../db-error";
+import { CasMismatchError, DbError, invalidQuery, type TDbErrorEntry } from "../db-error";
 import type { TGenericLogger } from "../logger";
 import { separateCas, separateFieldOps, type TFieldOps } from "../ops";
 import { resolveArrayOps, getArrayOpsFields } from "../patch/array-ops-resolver";
 import { assertNoVersionWrites, decomposePatch } from "../patch/patch-decomposer";
 import { isVersionExemptPatch } from "../patch/version-exempt";
 import { AtscriptDbReadable } from "./db-readable";
-import { normalizeWriteErrors, remapDeleteFkViolation } from "./error-utils";
+import { fkMissingEntries, normalizeWriteErrors, remapDeleteFkViolation } from "./error-utils";
 import {
   type TNestedWriterHost,
   checkDepthOverflow,
@@ -105,7 +105,7 @@ import {
   uniqueKeyTuple,
 } from "../shared/keys";
 import { soleUnionMember } from "../shared/union-shape";
-import { findAncestorInSet, isEmptyObject, isPlainObject } from "../shared/object";
+import { findAncestorInSet, isEmptyObject, isPlainObject, mapItems } from "../shared/object";
 
 import { guardFilter, guardPaths } from "../query/query-guards";
 import { relGuardState } from "../query/relation-filter";
@@ -573,6 +573,25 @@ export class AtscriptDbTable<
   }
 
   /**
+   * A write payload as a write in `mode` normalizes it (since 0.1.173): the
+   * type's `@normalize.*` applied with this table's validator options — see
+   * `normalizeWritePayload`. An array is normalized row by row. Pure and
+   * copy-on-change: the caller's payload is never modified, and the same
+   * object comes back when nothing changes. Defaults are not applied and
+   * nothing is validated.
+   *
+   * @param mode - `'insert'`, `'replace'` or `'patch'`.
+   */
+  public normalizePayload<P extends Record<string, unknown> | Array<Record<string, unknown>>>(
+    payload: P,
+    mode: ValidatorMode,
+  ): P {
+    this._ensureBuilt();
+    if (!Array.isArray(payload)) return this._normalizeRow(payload, mode) as P;
+    return mapItems(payload, (row) => this._normalizeRow(row, mode)) as P;
+  }
+
+  /**
    * Validates rows exactly as a write in `mode` would, without writing
    * (since 0.1.165): each row is cloned, given the defaults / stamps that
    * write applies, and validated with that write's validator and context.
@@ -613,9 +632,25 @@ export class AtscriptDbTable<
           valid.push({ index, row: row as Record<string, unknown> });
           continue;
         }
-        for (const e of validator.errors) errors.push({ index, path: e.path, message: e.message });
+        // the validator's entries as a write's error carries them: code, params, custom, details
+        for (const e of validator.errors) errors.push({ index, ...e });
       } catch (error) {
         // Depth-limit and other structural refusals the validator throws.
+        if (error instanceof DbError) {
+          // an entry-less DbError still is a problem of this row
+          const entries: TDbErrorEntry[] =
+            error.errors.length > 0 ? error.errors : [{ path: "", message: error.message }];
+          for (const e of entries) {
+            errors.push({
+              index,
+              path: e.path,
+              message: e.message,
+              code: e.code ?? error.code,
+              ...(e.params === undefined ? {} : { params: e.params }),
+            });
+          }
+          continue;
+        }
         errors.push({
           index,
           path: (error as { field?: string }).field ?? "",
@@ -681,13 +716,11 @@ export class AtscriptDbTable<
         }
         for (const tuple of missing) {
           const shown = tuple.values.map((v) => String(v)).join(", ");
+          const message = `References a non-existent record in "${fk.targetTable}" (${shown})`;
           for (const index of tuple.indexes) {
-            for (const field of fk.fields) {
-              out.push({
-                index,
-                path: field,
-                message: `References a non-existent record in "${fk.targetTable}" (${shown})`,
-              });
+            // the write's FK_MISSING entries, plus the values the message names (as text)
+            for (const { path, code, params } of fkMissingEntries(fk.fields, fk.targetTable)) {
+              out.push({ index, path, message, code, params: { ...params, values: shown } });
             }
           }
         }
@@ -2234,7 +2267,7 @@ export class AtscriptDbTable<
       const filter = this._isPkFilter(rowFilters[i]!)
         ? rowFilters[i]!
         : target
-          ? this._pkFilterFrom(target)
+          ? this._storedPkFilter(target)
           : null;
       if (filter) out.push(filter);
     }
@@ -2590,20 +2623,16 @@ export class AtscriptDbTable<
 
   /**
    * The JS value for a `@db.default` literal — see {@link parseDefaultLiteral}:
-   * the same value the SQL adapters put into the DDL `DEFAULT` clause, with
-   * the field's `@normalize.*` applied (the DDL clause keeps the literal).
+   * the same value the SQL adapters put into the DDL `DEFAULT` clause. The
+   * literal already carries the field's `@normalize.*` (the table metadata
+   * normalizes it once), so every level of a nested write fills the value a
+   * direct insert stores.
    */
   private _valueDefault(field: string, literal: string): unknown {
     const cache = (this._primitiveDefaults ??= new Map());
     if (cache.has(field)) return cache.get(field);
     const fieldType = this._meta.flatMap?.get(field);
-    const parsed = parseDefaultLiteral(
-      fieldType ? resolveDesignType(fieldType) : "string",
-      literal,
-    );
-    // Normalized where it is produced: every level of a nested write fills
-    // it, after the root normalized the payload.
-    const value = fieldType ? normalizeForType(fieldType, parsed) : parsed;
+    const value = parseDefaultLiteral(fieldType ? resolveDesignType(fieldType) : "string", literal);
     if (value === null || typeof value !== "object") cache.set(field, value);
     return value;
   }

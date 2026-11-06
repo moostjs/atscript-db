@@ -88,6 +88,30 @@ describe("AsJsonValueHelpController — basic plumbing", () => {
     expect((result as HttpError).body.statusCode).toBe(404);
   });
 
+  it("an out-of-scope row answers the missing row's coded 404 (since 0.1.173)", async () => {
+    const type = makeValueHelpType({
+      props: {
+        id: { designType: "string", annotations: { "meta.id": true } },
+        label: { designType: "string" },
+      },
+    });
+    class Scoped extends AsJsonValueHelpController<typeof type, Status> {
+      protected override transformFilter(filter: any) {
+        return { $and: [filter, { id: { $ne: "archived" } }] } as any;
+      }
+    }
+    const controller = new Scoped(type, STATUSES, makeApp());
+    const missing = (await controller.runGetOne("does-not-exist")) as HttpError;
+    const outside = (await controller.runGetOne("archived")) as HttpError;
+    expect(missing.body).toEqual({
+      statusCode: 404,
+      code: "NOT_FOUND",
+      message: "Not found",
+      error: "Not Found",
+    });
+    expect(outside.body).toEqual(missing.body);
+  });
+
   it("query returns all rows when no controls", async () => {
     const type = makeValueHelpType({
       props: {

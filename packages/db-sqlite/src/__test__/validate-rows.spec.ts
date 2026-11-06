@@ -55,9 +55,22 @@ describe("[sqlite] validateRows", () => {
       { id: 2, severity: "high" },
     ]);
     expect(errors).toEqual([
-      { index: 1, path: "title", message: expect.any(String) },
-      { index: 1, path: "severity", message: expect.any(String) },
+      expect.objectContaining({ index: 1, path: "title", code: "TYPE" }),
+      expect.objectContaining({ index: 1, path: "severity", code: expect.any(String) }),
     ]);
+  });
+
+  it("each entry is the entry a write's error carries: code, params (since 0.1.173)", async () => {
+    // A translator renders a validator entry by its code + params; without
+    // them a dry run's problems could only be shown in English.
+    const row = { id: 2, severity: "high" };
+    const write = await t(fx.WsIssue)
+      .insertOne(row)
+      .catch((e: unknown) => e);
+    expect(write.errors.length).toBeGreaterThan(0);
+    const dryRun = await t(fx.WsIssue).validateRows([row]);
+    expect(dryRun).toEqual(write.errors.map((e: object) => Object.assign({ index: 0 }, e)));
+    for (const e of dryRun) expect(e.code).toEqual(expect.any(String));
   });
 
   it("does not touch the caller's rows (defaults are applied to a clone)", async () => {
@@ -74,7 +87,14 @@ describe("[sqlite] validateRows", () => {
     ];
     expect(await t(fx.WsIssue).validateRows(rows)).toEqual([]);
     expect(await t(fx.WsIssue).validateRows(rows, "insert", { fk: true })).toEqual([
-      { index: 1, path: "ticketKey", message: expect.stringContaining("NOPE") },
+      {
+        index: 1,
+        path: "ticketKey",
+        message: expect.stringContaining("NOPE"),
+        // the code a write's FK error carries (since 0.1.173)
+        code: "FK_MISSING",
+        params: { fields: ["ticketKey"], target: "ws_tickets", values: "NOPE" },
+      },
     ]);
   });
 

@@ -159,7 +159,7 @@ Since 0.1.143, action ids and rows obey the controller's row overlay. The overla
 
 | Action                                                       | Id outside the overlay                                                                                                                                                      |
 | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `'row'`: `@DbActionRow()` or a `disabled` gate               | The row load includes the overlay. The request gets the same 404 as a missing row: `"Row not found for action identifier"`.                                                 |
+| `'row'`: `@DbActionRow()` or a `disabled` gate               | The row load includes the overlay. The request gets the same [404](./crud#not-found) as a missing row (`code: "NOT_FOUND"`).                                                |
 | `'row'`: `@DbActionID()` only                                | With an overlay or a restricting `actionRowScope`, the row is loaded (`id AND overlay AND scope`) before the handler, like `@DbActionRow()`. The request gets the same 404. |
 | `'rows'`: `@DbActionIDs()` / `@DbActionRows()`, gated or not | The id fails like a missing id: same position in `ids`, `null` reason. `onDisabledRows` then applies (`'reject'` → 409, `'skip'` → dropped).                                |
 
@@ -214,7 +214,7 @@ export class OrdersController extends AsDbController<typeof OrderTable> {
 }
 ```
 
-- **Enforced by the action gate.** The action's ids and rows load under the row overlay above and must match this filter (without an overlay the filter joins the load — see the [gate table](#gate-table)), with the same outcomes as the table: an out-of-scope id gets `404 "Row not found for action identifier"` on `'row'` actions and fails like a missing id on `'rows'` actions. You need no `transformOne` override for this.
+- **Enforced by the action gate.** The action's ids and rows load under the row overlay above and must match this filter (without an overlay the filter joins the load — see the [gate table](#gate-table)), with the same outcomes as the table: an out-of-scope id gets the [404](./crud#not-found) of a missing row on `'row'` actions and fails like a missing id on `'rows'` actions. You need no `transformOne` override for this.
 - **Reflected in reads.** [`$actions`](#actions-row-scope) and [`GET /meta/actions/:id`](#available-actions) list the action only on rows inside its scope.
 - It runs after [`prepareRequest`](#preparerequest-on-actions), at most once per action per evaluation, and may be async. Equal filters share one query: the same object, or (since 0.1.147) structurally equal ones.
 - Give it no side effects a caller could observe (headers, logs they can read, external calls). It runs for an existing row outside the scope but not for a missing one, so a visible effect would reveal that the row exists.

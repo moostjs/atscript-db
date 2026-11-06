@@ -32,7 +32,7 @@ import { computeForeignKeyDiff, fkColumns, hasForeignKeyChanges, fkKey } from ".
 import { computeTableOptionDiff } from "./table-option-diff";
 import { topoOrder, reachable, stableTopo, type TDependencyEdge } from "./dependency-order";
 import { SyncStore } from "./sync-store";
-import { SyncEntry, type TSyncEntryInit, type TSyncSkippedWork } from "./sync-entry";
+import { quoteList, SyncEntry, type TSyncEntryInit, type TSyncSkippedWork } from "./sync-entry";
 import {
   executeSyncTable,
   executeSyncView,
@@ -58,6 +58,7 @@ import {
   mergeLiveForeignKeyChanges,
   plannedIndexOptions,
   columnDiffOptions,
+  deferRetainedRetypes,
   type TDeferredConstraints,
   type TSyncExecutorDeps,
   type TTableFacts,
@@ -329,6 +330,7 @@ const SKIPPED_LABELS: Record<TSyncSkippedWork, string> = {
   "table-options": "table-option recreate",
   "nullable-defaults": "nullable/default change",
   derived: "derived-column rebuild",
+  retype: "type change waiting for a removed table",
 };
 
 /**
@@ -1031,6 +1033,12 @@ export class SchemaSync {
       }
     }
     const dropOrder = topoOrder(removedTableSet, dropEdges).toReversed();
+
+    // Safe mode keeps the removed tables: a type change over a column one of
+    // them references waits for the run that drops them (since 0.1.173).
+    if (safe) {
+      for (const t of tableFacts) deferRetainedRetypes(t, removedTableSet);
+    }
 
     // A table the run drops never blocks an operation it depends on: the
     // removed tables that reference a table whose execution drops its
@@ -1886,7 +1894,7 @@ export class SchemaSync {
               .get(view.tableName)!
               .filter((n) => failedViews.has(n));
             if (failedUpstream.length > 0) {
-              msg = `Upstream view ${failedUpstream.map((n) => `"${n}"`).join(", ")} failed — "${view.tableName}" was not created over it`;
+              msg = `Upstream view ${quoteList(failedUpstream)} failed — "${view.tableName}" was not created over it`;
               this.logger.error?.(`[schema-sync] ${msg}`);
             }
           }

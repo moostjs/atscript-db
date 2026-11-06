@@ -1,5 +1,33 @@
 import { ValidatorError } from "@atscript/typescript/utils";
 import { HttpError } from "@moostjs/event-http";
+import { registerMessages } from "moost";
+
+/**
+ * moost-db's own code-keyed English templates (since 0.1.173), registered
+ * with moost's `registerMessages` on import: `MoostHttp` translates an error
+ * body by its `code`, and a translated `/meta` serves the templates as
+ * `$i18n`.
+ *
+ * - `NOT_FOUND` — every 404 moost-db answers: a missing row, a row outside
+ *   the caller's scope (the same answer on purpose), an unknown or refused
+ *   form, an unknown delegated action. Neutral text: other libraries (e.g.
+ *   a permission layer) answer their 404s with the same id.
+ */
+export const MOOST_DB_MESSAGES = {
+  NOT_FOUND: "Not found",
+} as const;
+
+registerMessages(MOOST_DB_MESSAGES);
+
+/**
+ * The 404 every moost-db endpoint answers (since 0.1.173):
+ * `{ statusCode: 404, code: "NOT_FOUND", message: "Not found" }`. A row that
+ * is missing and a row outside the caller's scope answer these same bytes,
+ * so a permission layer refusing a row should throw this too.
+ */
+export function notFoundError(): HttpError {
+  return new HttpError(404, { message: MOOST_DB_MESSAGES.NOT_FOUND, code: "NOT_FOUND" });
+}
 
 /** One entry of the structured error envelope's `errors` array. */
 export interface THttpErrorEntry {

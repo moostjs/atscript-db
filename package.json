@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "ready": "vp fmt && vp lint && vp run --filter './packages/*' test && vp run --filter './packages/*' build",
+    "ready": "vp fmt && pnpm run lint && vp run --filter './packages/*' test && vp run --filter './packages/*' build",
+    "lint": "pnpm run prepare:fixtures && vp lint",
+    "prepare:fixtures": "vp run --filter './packages/*' prepare",
     "build": "vp run --filter './packages/*' build",
     "test": "vp run --filter './packages/*' test",
     "release": "node scripts/release.js patch",

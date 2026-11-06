@@ -21,6 +21,9 @@ import {
   type TSyncEntryInit,
   type TSyncEntryStatus,
   type TSyncSkippedWork,
+  type TSyncTypeChange,
+  isPendingTypeChange,
+  quoteList,
 } from "./sync-entry";
 import { computeColumnDiff, type TColumnDiffOptions } from "./column-diff";
 import { fkColumns, hasForeignKeyChanges, fkKey } from "./fk-diff";
@@ -103,6 +106,8 @@ export interface TTableFacts {
    * those a child no longer declares before the walk (`execute()` step 2b).
    */
   retypedInboundFks?: TReferencingForeignKey[];
+  /** Safe mode only (since 0.1.173): the type changes {@link deferRetainedRetypes} held back. */
+  deferredRetypes?: TSyncTypeChange[];
   /** Physical object kind under `dbName` (`undefined` = absent or not introspectable). */
   objectKind?: TDbObjectKind;
   /** The data migration from the ≤ 0.1.154 union layout (Path A, since 0.1.155). */
@@ -188,7 +193,7 @@ export function planTableInit(
     ...init,
     ...(diff && describeNullableDefaults(diff)),
     columnsToDrop: [],
-    typeChanges: skipped.includes("recreate") ? init.typeChanges : [],
+    typeChanges: skipped.includes("recreate") ? init.typeChanges : (facts.deferredRetypes ?? []),
     derivedChanges: skipped.includes("derived") ? init.derivedChanges : [],
     skipped: skipped.length > 0 ? skipped : undefined,
     recreated: false,
@@ -244,7 +249,7 @@ export function typeChangeErrors(readable: AtscriptDbReadable, diff: TColumnDiff
 
 /** A derived-column rebuild on an adapter without `dropColumns` / `syncColumns`. */
 export function derivedRebuildUnsupported(name: string, columns: readonly string[]): string {
-  return `Derived column${columns.length === 1 ? "" : "s"} ${columns.map((c) => `"${c}"`).join(", ")} of "${name}" changed but the adapter cannot drop and re-add columns. Migrate manually and re-run.`;
+  return `Derived column${columns.length === 1 ? "" : "s"} ${quoteList(columns)} of "${name}" changed but the adapter cannot drop and re-add columns. Migrate manually and re-run.`;
 }
 
 /** `(a, b → c)` — the key change as the messages print it. */
@@ -398,6 +403,19 @@ export async function executeSyncTable(
         if (!existed) {
           init.status = "create";
         }
+      }
+    }
+
+    // Type changes safe mode holds back for a removed table it keeps
+    // (`deferRetainedRetypes`): pending, reported like the plan reports them.
+    if (facts.deferredRetypes && init.status !== "error" && init.status !== "create") {
+      init.typeChanges = [...(init.typeChanges ?? []), ...facts.deferredRetypes];
+      markSkipped(init, "retype");
+      init.status = "alter";
+      for (const tc of facts.deferredRetypes) {
+        deps.logger.warn?.(
+          `[schema-sync] Type change on "${name}.${tc.column}" (${tc.fromType} → ${tc.toType}) — skipped (safe mode): it waits for the removed ${quoteList(tc.waitsFor!)}, kept by safe mode, which the next run without safe drops first`,
+        );
       }
     }
 
@@ -700,15 +718,14 @@ export function columnDiffOptions(
   };
 }
 
+/** The plan-shaped summary of one type change (an `entry.typeChanges` item). */
+function describeTypeChange(tc: TColumnDiff["typeChanged"][number]): TSyncTypeChange {
+  return { column: tc.field.physicalName, fromType: tc.existingType, toType: tc.field.designType };
+}
+
 /** The plan-shaped summary of a diff's type changes (`entry.typeChanges`). */
-export function describeTypeChanges(
-  diff: TColumnDiff,
-): Array<{ column: string; fromType: string; toType: string }> {
-  return diff.typeChanged.map((tc) => ({
-    column: tc.field.physicalName,
-    fromType: tc.existingType,
-    toType: tc.field.designType,
-  }));
+export function describeTypeChanges(diff: TColumnDiff): TSyncTypeChange[] {
+  return diff.typeChanged.map(describeTypeChange);
 }
 
 /**
@@ -825,21 +842,22 @@ export function plannedIndexOptions(
     name: facts.name,
     status: "alter",
     skipped: safeModeSkips(facts),
-    typeChanges: diff ? describeTypeChanges(diff) : [],
+    typeChanges: [...(diff ? describeTypeChanges(diff) : []), ...(facts.deferredRetypes ?? [])],
   });
 }
 
 /**
  * The indexes `syncIndexes` keeps as they are because safe mode skipped
  * the change they depend on — a skipped key rebuild, the columns of a
- * skipped type-change recreate (see `TSyncIndexesOptions`).
+ * skipped type-change recreate or of a type change that waits for a
+ * removed table (see `TSyncIndexesOptions`).
  */
 function keptIndexes(init: TSyncEntryInit): TSyncIndexesOptions | undefined {
   const skipped = init.skipped ?? [];
   const keepPrimaryKey = skipped.includes("pk-rebuild");
-  const keepColumns = skipped.includes("recreate")
-    ? (init.typeChanges ?? []).map((tc) => tc.column)
-    : [];
+  const keepColumns = (init.typeChanges ?? [])
+    .filter((tc) => isPendingTypeChange(tc, skipped))
+    .map((tc) => tc.column);
   if (!keepPrimaryKey && keepColumns.length === 0) {
     return undefined;
   }
@@ -885,10 +903,59 @@ export function safeModeSkips(facts: TTableFacts): TSyncSkippedWork[] {
   if (diff?.primaryKeyChanged) {
     out.push("pk-rebuild");
   }
+  if (facts.deferredRetypes) {
+    out.push("retype");
+  }
   if (optionDiff?.changed.some((c) => c.destructive)) {
     out.push("table-options");
   }
   return out;
+}
+
+/**
+ * Safe mode keeps removed tables, so a type change over a column one of them
+ * still references cannot run the way the run without `safe` runs it (that
+ * run drops the removed table first — `earlyDrops`): the engine may refuse
+ * the change while the constraint is in place (MySQL / PostgreSQL, unless
+ * the old and new types stay compatible). The change waits for that run:
+ * taken out of `facts.diff` — every type change of a table whose type
+ * changes rebuild it (`'recreate'`), the referenced columns' otherwise —
+ * and reported with `waitsFor` (`skipped: "retype"`, pending). A `'drop'`
+ * type change is skipped by safe mode anyway, and a recreate an FK change
+ * forces carries every change with it.
+ *
+ * @since 0.1.173
+ */
+export function deferRetainedRetypes(facts: TTableFacts, removedTables: ReadonlySet<string>): void {
+  const { readable, fkDiff, diff } = facts;
+  const blockers = facts.retypedInboundFks?.filter((fk) => removedTables.has(fk.table));
+  if (!diff || !blockers?.length || facts.planEntry.status === "error") return;
+  const adapter = readable.dbAdapter;
+  if (fkDiff && hasForeignKeyChanges(fkDiff) && !adapter.syncForeignKeys && adapter.recreateTable) {
+    return;
+  }
+  const strategy = typeChangeStrategy(readable, diff);
+  if (strategy !== "modify" && strategy !== "recreate") return;
+  const liveName = new Map(diff.renamed.map((r) => [r.field.physicalName, r.oldName]));
+  const waitsFor = (tc: TColumnDiff["typeChanged"][number]) => {
+    const names = new Set([tc.field.physicalName, liveName.get(tc.field.physicalName)]);
+    return [
+      ...new Set(
+        blockers.filter((fk) => fk.targetFields.some((f) => names.has(f))).map((fk) => fk.table),
+      ),
+    ].toSorted();
+  };
+  const held = new Map(
+    diff.typeChanged.map((tc) => [tc, waitsFor(tc)] as const).filter(([, w]) => w.length > 0),
+  );
+  if (held.size === 0) return;
+  const all = [...new Set(blockers.map((fk) => fk.table))].toSorted();
+  const deferred = strategy === "recreate" ? diff.typeChanged : [...held.keys()];
+  facts.deferredRetypes = deferred.map((tc) => ({
+    ...describeTypeChange(tc),
+    waitsFor: strategy === "recreate" ? all : held.get(tc)!,
+  }));
+  facts.diff = { ...diff, typeChanged: diff.typeChanged.filter((tc) => !deferred.includes(tc)) };
 }
 
 /** The plan-shaped summary of a {@link TJsonColumnMigration}. */

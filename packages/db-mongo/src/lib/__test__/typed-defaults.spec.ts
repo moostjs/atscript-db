@@ -45,3 +45,28 @@ describe("[mongo] typed @db.default literals", () => {
     });
   });
 });
+
+describe("[mongo] a @db.default under @normalize.*", () => {
+  // Existing documents get what an insert through the table would store —
+  // the normalized default, not the raw literal.
+  it("backfills added fields with the normalized default", async () => {
+    const { NormalizedDefaults } = await import("./fixtures/typed-defaults.as");
+    const table = mongo.getTable(NormalizedDefaults);
+    const adapter = mongo.getAdapter(NormalizedDefaults) as unknown as MongoAdapter;
+    const updateMany = vi.fn().mockResolvedValue({ matchedCount: 0, modifiedCount: 0 });
+    vi.spyOn(adapter, "collection", "get").mockReturnValue({ updateMany } as any);
+
+    const added = table.fieldDescriptors.filter((f: TDbFieldMeta) => f.defaultValue);
+    await syncColumnsImpl(adapter as any, {
+      added,
+      removed: [],
+      renamed: [],
+      typeChanged: [],
+      nullableChanged: [],
+      defaultChanged: [],
+      conflicts: [],
+    });
+    const sets = Object.assign({}, ...updateMany.mock.calls.map(([, update]) => update.$set));
+    expect(sets).toEqual({ code: "PENDING", tags: ["a", "b"] });
+  });
+});

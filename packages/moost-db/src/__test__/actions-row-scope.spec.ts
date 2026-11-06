@@ -176,7 +176,8 @@ describe("'row' actions under a row overlay", () => {
     const foreign = await call("actions/approve", { ids: { id: 3 } });
     expect(missing.status).toBe(404);
     expect(foreign).toEqual(missing);
-    expect(foreign.body.message).toBe("Row not found for action identifier");
+    // the coded 404 every moost-db endpoint answers (since 0.1.173)
+    expect(foreign.body).toMatchObject({ code: "NOT_FOUND", message: "Not found" });
     expect(handlerCalls).toEqual([]);
 
     const own = await call("actions/approve", { ids: { id: 1 } });

@@ -2,6 +2,7 @@ import { nestDottedWith } from "../shared/with-nesting";
 import {
   isAnnotatedType,
   normalizeForType,
+  typeHasNormalizers,
   type FlatOf,
   type PrimaryKeyOf,
   type OwnPropsOf,
@@ -97,6 +98,7 @@ import { NullsSource } from "../query/nulls";
 import { geoIndexNotFoundMessage } from "../shared/index-messages";
 import { deletePath, isEmptyObject, selfOrAncestor } from "../shared/object";
 import { rowMatchesKey } from "../shared/keys";
+import { storedValuesFilter } from "../query/normalize-filter";
 import { unionValueMembers } from "../shared/union-shape";
 
 /** A read translated for the adapter, with what finishing its rows needs — see `_translateRead`. */
@@ -196,11 +198,34 @@ export function parseDefaultLiteral(designType: string, literal: string): unknow
 }
 
 /**
+ * A `@db.default` literal with the `@normalize.*` of a field of `fieldType`
+ * applied, in the same text form (see {@link parseDefaultLiteral}). A literal
+ * the normalizers do not change comes back as written, so its schema hash
+ * stays the same.
+ */
+function normalizeDefaultLiteral(fieldType: TAtscriptAnnotatedType, literal: string): string {
+  if (!typeHasNormalizers(fieldType)) return literal;
+  const parsed = parseDefaultLiteral(resolveDesignType(fieldType), literal);
+  const normalized = normalizeForType(fieldType, parsed);
+  // the text itself: a string / decimal field's literal, or a literal that is
+  // not JSON (the validator reports it against the field)
+  if (parsed === literal) return typeof normalized === "string" ? normalized : literal;
+  const text = JSON.stringify(normalized);
+  return text === JSON.stringify(parsed) ? literal : text;
+}
+
+/**
  * Resolves `@db.default.*` annotations from a metadata map into a {@link TDbDefaultValue}.
  * Used both during normal field descriptor construction and for FK target field resolution.
+ *
+ * With `fieldType`, a value default is the one a write stores: the field's
+ * `@normalize.*` applied to the literal (`@db.default 'NEW'` under
+ * `@normalize.lowercase` → `"new"`), so the DDL `DEFAULT`, the Mongo
+ * backfill of a new field and the SDK's filled default are one value.
  */
 export function resolveDefaultFromMetadata(
   metadata: TMetadataMap<any>,
+  fieldType?: TAtscriptAnnotatedType,
 ): TDbDefaultValue | undefined {
   const defaultValue = metadata.get("db.default") as string | number | boolean | undefined;
   if (defaultValue !== undefined) {
@@ -208,7 +233,7 @@ export function resolveDefaultFromMetadata(
     // literal form `@db.default "0"` / `"true"` always had (strings as-is,
     // others JSON), so both spellings give the same DDL and schema hash.
     const value = typeof defaultValue === "string" ? defaultValue : JSON.stringify(defaultValue);
-    return { kind: "value", value };
+    return { kind: "value", value: fieldType ? normalizeDefaultLiteral(fieldType, value) : value };
   }
   if (metadata.has("db.default.increment")) {
     const startValue = metadata.get("db.default.increment");
@@ -2314,7 +2339,7 @@ export class AtscriptDbReadable<
     if (rows.length === 0) return candidates[0]!;
     for (const candidate of candidates) {
       const row = rows.find((r) => rowMatchesKey(r, candidate as Record<string, unknown>));
-      if (row) return this._pkFilterFrom(row) ?? candidate;
+      if (row) return this._storedPkFilter(row) ?? candidate;
     }
     // Values the store compares differently than the key (e.g. a
     // case-insensitive collation) — probe the candidates one by one.
@@ -2351,6 +2376,16 @@ export class AtscriptDbReadable<
   }
 
   /**
+   * {@link _pkFilterFrom} of a row read from the store: its key compared as
+   * stored, never normalized (a key stored before its field gained
+   * `@normalize.*` still addresses its row).
+   */
+  protected _storedPkFilter(row: Record<string, unknown>): FilterExpr | null {
+    const filter = this._pkFilterFrom(row);
+    return filter && storedValuesFilter(filter);
+  }
+
+  /**
    * Reads the row `filter` (AND `scope`) matches and returns its exact
    * primary-key filter (`filter` itself on a table without one); `undefined`
    * when no row matches.
@@ -2364,7 +2399,7 @@ export class AtscriptDbReadable<
       filter: this._andScope(filter, scope),
       controls: pkFields.length > 0 ? { $select: [...pkFields] } : {},
     } as Uniquery<OwnProps, NavType>)) as Record<string, unknown> | null;
-    return row ? (this._pkFilterFrom(row) ?? filter) : undefined;
+    return row ? (this._storedPkFilter(row) ?? filter) : undefined;
   }
 
   /** `filter` AND a row scope — `filter` itself when the scope is absent or empty. */

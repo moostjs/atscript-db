@@ -1,7 +1,7 @@
 import { cached, defineWook, type EventContext } from "@wooksjs/event-core";
-import { HttpError } from "@moostjs/event-http";
 import type { FilterExpr } from "@atscript/db";
 
+import { notFoundError } from "../http-errors";
 import { getActionTable, noTableError } from "./controller-access";
 import { readCurrentActionMeta } from "./current-action";
 import { dbActionIdSlot, dbActionIdsSlot } from "./id-cache";
@@ -144,7 +144,7 @@ async function loadRow(ctx: EventContext): Promise<unknown> {
     [row] = await applyActionScope(ctx, table, [row]);
   }
   if (row === undefined) {
-    throw new HttpError(404, "Row not found for action identifier");
+    throw notFoundError();
   }
   return row;
 }
