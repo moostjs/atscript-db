@@ -216,9 +216,7 @@ describe("buildColumnDefinition", () => {
       isPrimaryKey: true,
       defaultValue: { kind: "fn", fn: "uuid" },
     });
-    expect(buildColumnDefinition(uuid, ctx("create")).def).toBe(
-      "`id` VARCHAR(255) DEFAULT (UUID())",
-    );
+    expect(buildColumnDefinition(uuid, ctx("create")).def).toBe("`id` CHAR(36) DEFAULT (UUID())");
 
     const collated = field({ physicalName: "name", collate: "nocase", type: maxLen(40) });
     expect(buildColumnDefinition(collated, ctx("modify")).def).toBe(

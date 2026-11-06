@@ -285,7 +285,7 @@ export function buildColumnDefinition(
   ctx: TMysqlColumnContext,
 ): TMysqlColumnDefinition {
   const sqlType = ctx.typeMapper?.(field) ?? mysqlTypeFromField(field);
-  const { charsetClause, collateClause } = columnCharsetClauses(field, sqlType, ctx);
+  const { charsetClause, collateClause } = mysqlColumnCharsetClauses(field, sqlType, ctx);
   if (field.derived) {
     const def = `${qi(field.physicalName)} ${sqlType}${charsetClause}${collateClause} GENERATED ALWAYS AS (${derivedColumnExpr(mysqlDialect, field)}) VIRTUAL`;
     return { def, inventedDefault: false };
@@ -365,7 +365,7 @@ export function mysqlColumnCharset(
  * {@link mysqlColumnCharset}); a foreign-key column's collation is the
  * referenced field's own, else its table's.
  */
-function columnCharsetClauses(
+export function mysqlColumnCharsetClauses(
   field: TDbFieldMeta,
   sqlType: string,
   ctx: TMysqlColumnContext,
@@ -898,7 +898,7 @@ function intTypeFromTags(tags: Set<string> | undefined, unsigned: boolean): stri
  *
  * `keyed` marks a column a foreign key references (the adapter knows it
  * from its space); a referencing column takes its type through
- * `field.fkTargetField`. A keyed string is `VARCHAR`: a foreign key needs
+ * `field.fkTargetField`. A keyed string is never TEXT: a foreign key needs
  * both sides indexed in full, and MySQL indexes TEXT only by a prefix.
  */
 export function mysqlTypeFromField(field: TDbFieldMeta, keyed = false): string {
@@ -975,7 +975,12 @@ export function mysqlTypeFromField(field: TDbFieldMeta, keyed = false): string {
       if (maxLen !== undefined && maxLen > 65535) {
         return "LONGTEXT";
       }
-      // MySQL requires VARCHAR for primary keys and columns with DEFAULT values;
+      // A uuid-defaulted string holds a 36-character UUID — as a primary key,
+      // a referenced key or a plain column (since 0.1.170; VARCHAR(255) before)
+      if (field.defaultValue?.kind === "fn" && field.defaultValue.fn === "uuid") {
+        return "CHAR(36)";
+      }
+      // MySQL rejects TEXT for primary keys and columns with DEFAULT values;
       // a derived (generated) string column is VARCHAR too, so a plain index
       // on it needs no key-length prefix, and so is a keyed one (declare
       // @expect.maxLength to size it)

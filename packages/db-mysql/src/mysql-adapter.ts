@@ -126,6 +126,7 @@ import {
   mysqlDialect,
   mysqlDefaultCollation,
   mysqlColumnCharset,
+  mysqlColumnCharsetClauses,
   type TMysqlCharset,
   type TMysqlColumnContext,
   type TMysqlTableOptions,
@@ -248,6 +249,77 @@ type TZeroIsExplicit = () => Promise<boolean>;
 
 /** The statement surface the adapter runs CRUD through (pool or a dedicated connection). */
 type TMysqlExecutor = Pick<TMysqlDriver, "run" | "all" | "get" | "exec">;
+
+/** A live foreign-key constraint, as `syncColumns` drops and re-creates it. */
+interface TLiveForeignKey {
+  schema: string;
+  tableName: string;
+  /** Quoted `schema`.`table` the constraint is on. */
+  table: string;
+  name: string;
+  columns: string[];
+  refSchema: string;
+  refTableName: string;
+  /** Quoted `schema`.`table` it references. */
+  refTable: string;
+  refColumns: string[];
+  onDelete: string;
+  onUpdate: string;
+  /** On the adapter's table (its own constraint). */
+  own: boolean;
+  /** Referencing the adapter's table. */
+  ref: boolean;
+}
+
+/** The `ALTER TABLE` that re-creates `fks`, all on `table`, as they were. */
+function addForeignKeysSql(table: string, fks: readonly TLiveForeignKey[]): string {
+  const adds = fks.map(
+    (fk) =>
+      `ADD CONSTRAINT ${qi(fk.name)} FOREIGN KEY (${fk.columns.map(qi).join(", ")}) REFERENCES ${fk.refTable} (${fk.refColumns.map(qi).join(", ")}) ON DELETE ${fk.onDelete} ON UPDATE ${fk.onUpdate}`,
+  );
+  return `ALTER TABLE ${table} ${adds.join(", ")}`;
+}
+
+/** One end of a foreign key's column pair; `ours` — a column `syncColumns` retypes. */
+interface TFkEnd {
+  schema: string;
+  table: string;
+  column: string;
+  ours: boolean;
+}
+
+/** A map key of a live column. */
+const columnKey = (c: Pick<TFkEnd, "schema" | "table" | "column">) =>
+  `${c.schema}\0${c.table}\0${c.column}`;
+
+/** Which ends of `fk`'s `i`-th column pair are among `columns` (of the adapter's table). */
+function touchedEnds(
+  fk: TLiveForeignKey,
+  i: number,
+  columns: ReadonlySet<string>,
+): { child: boolean; parent: boolean } {
+  return {
+    child: fk.own && columns.has(fk.columns[i]),
+    parent: fk.ref && columns.has(fk.refColumns[i]),
+  };
+}
+
+const INTEGER_TYPE_RE =
+  /^(tinyint|smallint|mediumint|int|integer|bigint)(?:\(\d+\))?(\s+unsigned)?(?:\s+zerofill)?$/;
+const CHAR_TYPE_RE = /^(?:var)?char\(\d+\)$/i;
+
+/**
+ * What the two sides of a foreign key must share: an integer's type and
+ * signedness (display width aside), a `CHAR` / `VARCHAR`'s collation (any
+ * length), anything else the type.
+ */
+function fkTypeKey(column: { type: string; collation?: string }): string {
+  const type = column.type.trim().toLowerCase().replace(/\s+/g, " ");
+  const int = INTEGER_TYPE_RE.exec(type);
+  if (int) return `int:${int[1] === "integer" ? "int" : int[1]}:${!!int[2]}`;
+  if (CHAR_TYPE_RE.test(type)) return `char:${(column.collation ?? "").toLowerCase()}`;
+  return type;
+}
 
 /**
  * How `insertManyIgnore` handles a group: `precheck` — look up stored keys
@@ -2123,6 +2195,10 @@ export class MysqlAdapter extends BaseDbAdapter {
         return entering.has(field.physicalName);
       };
       const modified = new Map<string, TDbFieldMeta>();
+      // MySQL refuses to change the type of a column a live foreign key uses,
+      // on either side (ER 1832 / 1833 / 3780): those constraints are dropped
+      // around the MODIFYs (see `_withForeignKeysLifted`).
+      const retyped: TDbFieldMeta[] = [];
       for (const { field, existingType } of diff.typeChanged ?? []) {
         const epoch = epochSource(field, existingType);
         if (epoch) {
@@ -2156,6 +2232,7 @@ export class MysqlAdapter extends BaseDbAdapter {
           continue;
         }
         modified.set(field.physicalName, field);
+        retyped.push(field);
       }
       for (const { field } of diff.nullableChanged ?? []) {
         if (rekeyed(field)) {
@@ -2181,14 +2258,327 @@ export class MysqlAdapter extends BaseDbAdapter {
         }
       }
       await this._dropIndexesOutgrown(conn, [...modified.values()]);
-      for (const field of modified.values()) {
-        const ddl = `ALTER TABLE ${quotedTable} MODIFY COLUMN ${buildColumnDefinition(field, this._columnCtx("modify")).def}`;
-        this._log(ddl);
-        await conn.exec(ddl);
-      }
+      await this._withForeignKeysLifted(conn, retyped, async () => {
+        for (const field of modified.values()) {
+          const ddl = `ALTER TABLE ${quotedTable} MODIFY COLUMN ${buildColumnDefinition(field, this._columnCtx("modify")).def}`;
+          this._log(ddl);
+          await conn.exec(ddl);
+        }
+      });
 
       return { added, renamed };
     });
+  }
+
+  /**
+   * Runs `fn` (the MODIFYs of `fields`) with the live foreign keys over those
+   * columns dropped — this table's own and those of any table referencing
+   * them, its own included — and re-creates them, as they were, after: also
+   * when `fn` throws. Nothing is dropped when a constraint could not be
+   * re-created over the new types (see {@link _liftable}): MySQL then refuses
+   * the MODIFY as it always did. A constraint that cannot be re-created is
+   * named, with its DDL, in the error (after `fn`'s own).
+   */
+  private async _withForeignKeysLifted(
+    conn: TMysqlConnection,
+    fields: readonly TDbFieldMeta[],
+    fn: () => Promise<void>,
+  ): Promise<void> {
+    if (fields.length === 0) return fn();
+    const found = await this._foreignKeysOver(
+      conn,
+      fields.map((f) => f.physicalName),
+    );
+    const lifted = found.length > 0 && (await this._liftable(conn, found, fields)) ? found : [];
+    const dropped: TLiveForeignKey[] = [];
+    let failure: Error | undefined;
+    try {
+      for (const fk of lifted) {
+        const ddl = `ALTER TABLE ${fk.table} DROP FOREIGN KEY ${qi(fk.name)}`;
+        this._log(ddl);
+        await conn.exec(ddl);
+        dropped.push(fk);
+        this.logger.info(
+          `[mysql] foreign key ${qi(fk.name)} on ${fk.table} dropped for the type change of ${quoteTableName(this.resolveTableName())}`,
+        );
+      }
+      await fn();
+    } catch (error) {
+      failure = error as Error;
+    }
+    const lost = await this._restoreForeignKeys(conn, dropped);
+    if (lost.length > 0) {
+      const named = lost
+        .map(
+          (fk) =>
+            `${qi(fk.name)} on ${fk.table} (re-create it with: ${addForeignKeysSql(fk.table, [fk])})`,
+        )
+        .join("; ");
+      const message = failure
+        ? `${failure.message} — and foreign keys not restored: ${named}`
+        : `Foreign keys not restored after the type change: ${named}`;
+      throw new Error(message, { cause: failure });
+    }
+    if (failure) throw failure;
+  }
+
+  /**
+   * Re-creates `fks` (dropped by {@link _withForeignKeysLifted}) — one
+   * `ALTER TABLE` per table, with `foreign_key_checks` off on this connection
+   * so MySQL adds them in place instead of rebuilding the table (the rows
+   * met them before the change). A table whose statement fails has its
+   * constraints re-tried one by one. Returns those that could not be
+   * re-created.
+   */
+  private async _restoreForeignKeys(
+    conn: TMysqlConnection,
+    fks: readonly TLiveForeignKey[],
+  ): Promise<TLiveForeignKey[]> {
+    if (fks.length === 0) return [];
+    const byTable = new Map<string, TLiveForeignKey[]>();
+    for (const fk of fks) {
+      const group = byTable.get(fk.table);
+      if (group) group.push(fk);
+      else byTable.set(fk.table, [fk]);
+    }
+    // Re-creates `group` on `table`; MySQL's error when it refuses
+    const add = async (table: string, group: readonly TLiveForeignKey[]) => {
+      const ddl = addForeignKeysSql(table, group);
+      this._log(ddl);
+      try {
+        await conn.exec(ddl);
+      } catch (error) {
+        return error as Error;
+      }
+      for (const fk of group) {
+        this.logger.info(`[mysql] foreign key ${qi(fk.name)} on ${fk.table} restored`);
+      }
+      return undefined;
+    };
+    const lost: TLiveForeignKey[] = [];
+    await conn.exec(
+      "SET @atscript_fk_checks = @@SESSION.foreign_key_checks, SESSION foreign_key_checks = 0",
+    );
+    try {
+      for (const [table, group] of byTable) {
+        const error = await add(table, group);
+        if (!error) continue;
+        for (const fk of group) {
+          const single = group.length === 1 ? error : await add(table, [fk]);
+          if (single) {
+            this.logger.error(
+              `[mysql] foreign key ${qi(fk.name)} on ${table} could not be re-created: ${single.message}`,
+            );
+            lost.push(fk);
+          }
+        }
+      }
+    } finally {
+      await conn.exec("SET SESSION foreign_key_checks = @atscript_fk_checks");
+    }
+    return lost;
+  }
+
+  /**
+   * Whether every constraint of `fks` can be re-created once `fields` have
+   * their new types: each column pair of a constraint that the change touches
+   * stays compatible — the new type against the other side's live column (or
+   * its new type, on this table): integers of the same type and signedness,
+   * `CHAR` / `VARCHAR` either way with the same collation, anything else the
+   * same type. Otherwise nothing is lifted (and MySQL refuses the change, as
+   * it did before foreign keys were lifted) — a dropped constraint must
+   * never be lost to a column outside this run.
+   */
+  private async _liftable(
+    conn: TMysqlConnection,
+    fks: readonly TLiveForeignKey[],
+    fields: readonly TDbFieldMeta[],
+  ): Promise<boolean> {
+    const changed = new Map(fields.map((f) => [f.physicalName, f]));
+    const columns = new Set(changed.keys());
+    // The two ends of every touched column pair
+    const pairs: Array<[TFkEnd, TFkEnd]> = [];
+    for (const fk of fks) {
+      fk.columns.forEach((column, i) => {
+        const { child, parent } = touchedEnds(fk, i, columns);
+        if (!child && !parent) return;
+        pairs.push([
+          { schema: fk.schema, table: fk.tableName, column, ours: child },
+          { schema: fk.refSchema, table: fk.refTableName, column: fk.refColumns[i], ours: parent },
+        ]);
+      });
+    }
+    // The live columns at the other ends, each once
+    const liveEnds = new Map<string, TFkEnd>();
+    for (const end of pairs.flat()) if (!end.ours) liveEnds.set(columnKey(end), end);
+    const live = [...liveEnds.values()];
+    const liveRows =
+      live.length === 0
+        ? []
+        : await conn.all<{
+            TABLE_SCHEMA: string;
+            TABLE_NAME: string;
+            COLUMN_NAME: string;
+            COLUMN_TYPE: string;
+            COLLATION_NAME: string | null;
+          }>(
+            `SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, COLLATION_NAME
+             FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE ${live.map(() => "(TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?)").join(" OR ")}`,
+            live.flatMap((end) => [end.schema, end.table, end.column]),
+          );
+    const liveOf = new Map(
+      liveRows.map((r) => [
+        columnKey({ schema: r.TABLE_SCHEMA, table: r.TABLE_NAME, column: r.COLUMN_NAME }),
+        { type: r.COLUMN_TYPE, collation: r.COLLATION_NAME ?? undefined },
+      ]),
+    );
+    // A collation matters only for a string column of this table's
+    const collations = await this._newCollations(conn, [
+      ...new Set(
+        pairs
+          .flat()
+          .flatMap((end) => (end.ours ? [changed.get(end.column)!] : []))
+          .filter((field) => CHAR_TYPE_RE.test(this.typeMapper(field).trim())),
+      ),
+    ]);
+    const typeOf = (end: TFkEnd) => {
+      if (!end.ours) return liveOf.get(columnKey(end));
+      const field = changed.get(end.column)!;
+      return { type: this.typeMapper(field), collation: collations.get(field.physicalName) };
+    };
+    for (const [child, parent] of pairs) {
+      const a = typeOf(child);
+      const b = typeOf(parent);
+      if (!a || !b || fkTypeKey(a) !== fkTypeKey(b)) {
+        this.logger.warn(
+          `[mysql] ${qi(child.table)}.${qi(child.column)} → ${qi(parent.table)}.${qi(parent.column)} would not match after the type change (${a?.type ?? "?"} / ${b?.type ?? "?"}) — its foreign key stays in place, and MySQL decides on the change`,
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * The collation each of `fields` (string columns) has after its MODIFY:
+   * the definition's own `COLLATE`, else the default of its `CHARACTER SET`,
+   * else the table's.
+   */
+  private async _newCollations(
+    conn: TMysqlConnection,
+    fields: readonly TDbFieldMeta[],
+  ): Promise<Map<string, string | undefined>> {
+    const out = new Map<string, string | undefined>();
+    if (fields.length === 0) return out;
+    const ctx = this._columnCtx("modify");
+    const charsetDefaults = new Map<string, string | undefined>();
+    let tableCollation: string | undefined | null = null;
+    for (const field of fields) {
+      const { charsetClause, collateClause } = mysqlColumnCharsetClauses(
+        field,
+        this.typeMapper(field),
+        ctx,
+      );
+      const collate = /COLLATE\s+`?(\w+)`?/i.exec(collateClause)?.[1];
+      const charset = /CHARACTER SET\s+`?(\w+)`?/i.exec(charsetClause)?.[1];
+      if (collate) {
+        out.set(field.physicalName, collate);
+      } else if (charset) {
+        if (!charsetDefaults.has(charset)) {
+          const row = await conn.get<{ COLLATION_NAME: string }>(
+            `SELECT COLLATION_NAME FROM INFORMATION_SCHEMA.COLLATIONS
+             WHERE CHARACTER_SET_NAME = ? AND IS_DEFAULT = 'Yes'`,
+            [charset],
+          );
+          charsetDefaults.set(charset, row?.COLLATION_NAME);
+        }
+        out.set(field.physicalName, charsetDefaults.get(charset));
+      } else {
+        if (tableCollation === null) {
+          const row = await conn.get<{ TABLE_COLLATION: string | null }>(
+            `SELECT TABLE_COLLATION FROM INFORMATION_SCHEMA.TABLES
+             WHERE TABLE_NAME = ? AND TABLE_SCHEMA = COALESCE(?, DATABASE())`,
+            [this._table.tableName, this._schema],
+          );
+          tableCollation = row?.TABLE_COLLATION ?? undefined;
+        }
+        out.set(field.physicalName, tableCollation);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The live foreign keys over any of `columns` of this table: its own (by
+   * their columns) and those referencing them (by the referenced columns),
+   * each with every column, in key order.
+   */
+  private async _foreignKeysOver(
+    conn: TMysqlConnection,
+    columns: readonly string[],
+  ): Promise<TLiveForeignKey[]> {
+    const target = [this._schema, this._table.tableName];
+    const rows = await conn.all<{
+      TABLE_SCHEMA: string;
+      TABLE_NAME: string;
+      CONSTRAINT_NAME: string;
+      COLUMN_NAME: string;
+      REFERENCED_TABLE_SCHEMA: string;
+      REFERENCED_TABLE_NAME: string;
+      REFERENCED_COLUMN_NAME: string;
+      UPDATE_RULE: string;
+      DELETE_RULE: string;
+      IS_OWN: number | boolean;
+      IS_REF: number | boolean;
+    }>(
+      `SELECT k.TABLE_SCHEMA, k.TABLE_NAME, k.CONSTRAINT_NAME, k.COLUMN_NAME,
+              k.REFERENCED_TABLE_SCHEMA, k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME,
+              r.UPDATE_RULE, r.DELETE_RULE,
+              (k.TABLE_SCHEMA = COALESCE(?, DATABASE()) AND k.TABLE_NAME = ?) AS IS_OWN,
+              (k.REFERENCED_TABLE_SCHEMA = COALESCE(?, DATABASE()) AND k.REFERENCED_TABLE_NAME = ?) AS IS_REF
+       FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k
+       JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS r
+         ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+        AND r.TABLE_NAME = k.TABLE_NAME
+       WHERE k.REFERENCED_TABLE_NAME IS NOT NULL
+         AND ((k.TABLE_SCHEMA = COALESCE(?, DATABASE()) AND k.TABLE_NAME = ?)
+          OR (k.REFERENCED_TABLE_SCHEMA = COALESCE(?, DATABASE()) AND k.REFERENCED_TABLE_NAME = ?))
+       ORDER BY k.TABLE_SCHEMA, k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION`,
+      [...target, ...target, ...target, ...target],
+    );
+    const byConstraint = new Map<string, TLiveForeignKey>();
+    for (const r of rows) {
+      const key = `${r.TABLE_SCHEMA}\0${r.TABLE_NAME}\0${r.CONSTRAINT_NAME}`;
+      let fk = byConstraint.get(key);
+      if (!fk) {
+        fk = {
+          schema: r.TABLE_SCHEMA,
+          tableName: r.TABLE_NAME,
+          table: `${qi(r.TABLE_SCHEMA)}.${qi(r.TABLE_NAME)}`,
+          name: r.CONSTRAINT_NAME,
+          columns: [],
+          refSchema: r.REFERENCED_TABLE_SCHEMA,
+          refTableName: r.REFERENCED_TABLE_NAME,
+          refTable: `${qi(r.REFERENCED_TABLE_SCHEMA)}.${qi(r.REFERENCED_TABLE_NAME)}`,
+          refColumns: [],
+          onDelete: r.DELETE_RULE,
+          onUpdate: r.UPDATE_RULE,
+          own: Boolean(Number(r.IS_OWN)),
+          ref: Boolean(Number(r.IS_REF)),
+        };
+        byConstraint.set(key, fk);
+      }
+      fk.columns.push(r.COLUMN_NAME);
+      fk.refColumns.push(r.REFERENCED_COLUMN_NAME);
+    }
+    const over = new Set(columns);
+    return [...byConstraint.values()].filter((fk) =>
+      fk.columns.some((_, i) => {
+        const { child, parent } = touchedEnds(fk, i, over);
+        return child || parent;
+      }),
+    );
   }
 
   /**

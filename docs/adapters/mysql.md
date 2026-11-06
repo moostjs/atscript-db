@@ -151,34 +151,59 @@ The editor completes the common engines and character sets, but the lists are no
 
 ## Type Mapping
 
-| Atscript Type                         | MySQL Type                                | Notes                                                                                                                                      |
-| ------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `string`                              | `TEXT`                                    | `VARCHAR(N)` when `@expect.maxLength` is set; `VARCHAR(255)` for PKs, fields with defaults and [foreign-key columns](#string-foreign-keys) |
-| `string` with `char` tag              | `CHAR(1)`                                 |                                                                                                                                            |
-| `string` with maxLength > 65535       | `LONGTEXT`                                |                                                                                                                                            |
-| `number`                              | `DOUBLE`                                  |                                                                                                                                            |
-| `number` (integer tags)               | `TINYINT` / `SMALLINT` / `INT` / `BIGINT` | Based on int8/int16/int32/int64 tags                                                                                                       |
-| `number` with `@db.mysql.unsigned`    | `INT UNSIGNED` / `BIGINT UNSIGNED` / etc. | Appends `UNSIGNED` to the integer type                                                                                                     |
-| `number` with `@db.column.precision`  | `DECIMAL(p,s)`                            |                                                                                                                                            |
-| `number` with `@db.default.increment` | `BIGINT`                                  | `AUTO_INCREMENT`                                                                                                                           |
-| `number` with `@db.default.now`       | `TIMESTAMP`                               | `DEFAULT CURRENT_TIMESTAMP`; whole seconds — see [Fractional seconds](#fractional-seconds)                                                 |
-| `boolean`                             | `TINYINT(1)`                              | Stored as `0` / `1`                                                                                                                        |
-| `decimal`                             | `DECIMAL(p,s)`                            | Defaults to `DECIMAL(10,2)`                                                                                                                |
-| Nested objects                        | Flattened `__` columns                    | `address.city` becomes `address__city`                                                                                                     |
-| `T \| null`                           | The column of `T`, nullable               | Unions of objects are flattened; see [Nullable and Union Fields](/api/storage#unions)                                                      |
-| `@db.json`                            | `JSON`                                    | Stored as a single JSON column; descendant paths are not queryable (400 since 0.1.128)                                                     |
-| Arrays                                | `JSON`                                    | Same — select the column as a whole; filters accept only `$exists` (since 0.1.132)                                                         |
-| `@db.default.uuid`                    | `CHAR(36)`                                | Generated client-side via `crypto.randomUUID()`                                                                                            |
-| `@db.search.vector`                   | `VECTOR(N)`                               | MySQL 9.0+; falls back to `JSON` on older versions                                                                                         |
-| `db.geoPoint`                         | `POINT SRID 4326`                         | Native geographic point. See [Geo Search](/search/geo-search)                                                                              |
+| Atscript Type                         | MySQL Type                                | Notes                                                                                                                                                         |
+| ------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `string`                              | `TEXT`                                    | `VARCHAR(N)` when `@expect.maxLength` is set; `VARCHAR(255)` for PKs, fields with a default other than `uuid` and [foreign-key columns](#string-foreign-keys) |
+| `string` with `char` tag              | `CHAR(1)`                                 |                                                                                                                                                               |
+| `string` with maxLength > 65535       | `LONGTEXT`                                |                                                                                                                                                               |
+| `number`                              | `DOUBLE`                                  |                                                                                                                                                               |
+| `number` (integer tags)               | `TINYINT` / `SMALLINT` / `INT` / `BIGINT` | Based on int8/int16/int32/int64 tags                                                                                                                          |
+| `number` with `@db.mysql.unsigned`    | `INT UNSIGNED` / `BIGINT UNSIGNED` / etc. | Appends `UNSIGNED` to the integer type                                                                                                                        |
+| `number` with `@db.column.precision`  | `DECIMAL(p,s)`                            |                                                                                                                                                               |
+| `number` with `@db.default.increment` | `BIGINT`                                  | `AUTO_INCREMENT`                                                                                                                                              |
+| `number` with `@db.default.now`       | `TIMESTAMP`                               | `DEFAULT CURRENT_TIMESTAMP`; whole seconds — see [Fractional seconds](#fractional-seconds)                                                                    |
+| `boolean`                             | `TINYINT(1)`                              | Stored as `0` / `1`                                                                                                                                           |
+| `decimal`                             | `DECIMAL(p,s)`                            | Defaults to `DECIMAL(10,2)`                                                                                                                                   |
+| Nested objects                        | Flattened `__` columns                    | `address.city` becomes `address__city`                                                                                                                        |
+| `T \| null`                           | The column of `T`, nullable               | Unions of objects are flattened; see [Nullable and Union Fields](/api/storage#unions)                                                                         |
+| `@db.json`                            | `JSON`                                    | Stored as a single JSON column; descendant paths are not queryable (400 since 0.1.128)                                                                        |
+| Arrays                                | `JSON`                                    | Same — select the column as a whole; filters accept only `$exists` (since 0.1.132)                                                                            |
+| `@db.default.uuid`                    | `CHAR(36)`                                | Generated client-side via `crypto.randomUUID()`; `VARCHAR(N)` with `@expect.maxLength` — see [uuid columns](#uuid-columns)                                    |
+| `@db.search.vector`                   | `VECTOR(N)`                               | MySQL 9.0+; falls back to `JSON` on older versions                                                                                                            |
+| `db.geoPoint`                         | `POINT SRID 4326`                         | Native geographic point. See [Geo Search](/search/geo-search)                                                                                                 |
 
 To filter, sort or group by a leaf inside a `@db.json` column, expose it as a [typed view field](/views/#reading-json-leaves).
+
+### uuid columns {#uuid-columns}
+
+A string field with `@db.default.uuid` is `CHAR(36)` — as a primary key, a unique key or a plain column — and so is every `@db.rel.FK` column that references it (composite keys and `@db.rel.via` junction keys included). `@expect.maxLength` makes it `VARCHAR(N)`, and `@db.mysql.type` overrides both.
+
+Before 0.1.170 these columns were `VARCHAR(255)`. The next schema sync changes an existing one to `CHAR(36)` in place, together with the foreign-key columns that reference it:
+
+- The foreign keys over a changing column are dropped first and re-created after, with their names and `ON DELETE` / `ON UPDATE` rules. They are re-created also when the change fails. A constraint that cannot be re-created makes the sync fail, and the error names it with the `ALTER TABLE … ADD CONSTRAINT` statement that restores it.
+- While a foreign key is dropped, writes to the referencing table are not checked against the key, and the rows written meanwhile are not checked when it is re-created. Sync while the tables are not being written, or check those rows afterwards.
+- When a foreign key would not fit the new type — its other column is not changed by the sync, say a table outside it — nothing is dropped, and MySQL refuses the change as before.
+- MySQL rebuilds each table whose columns change, so writes to a large table wait until its rebuild is done. Re-creating the foreign keys rebuilds nothing.
+- Once a column is `CHAR(36)`, a write of a longer value into it fails (under strict mode, the driver's default).
+- A stored value longer than 36 characters fails the sync of that table: the entry is an `error`, and no value is cut. Shorten or remove such values and sync again, or keep the earlier type.
+- The earlier type is kept by declaring it:
+
+  ```atscript
+  @meta.id
+  @db.default.uuid
+  @db.mysql.type 'VARCHAR(255)'
+  id: string
+  ```
+
+  A foreign-key column takes the referenced column's type, so it stays `VARCHAR(255)` as well.
+
+`CHAR` drops trailing spaces: a stored id that ends in spaces loses them in the change, and two ids that differ only in trailing spaces collide in a unique key or the primary key, failing the sync of that table.
 
 ### Foreign keys over string columns {#string-foreign-keys}
 
 A MySQL foreign key needs both of its sides indexed in full, and a `TEXT` column can only be indexed by a prefix. So both string columns of a foreign key are `VARCHAR`:
 
-- the referenced field — any string field a `@db.rel.FK` of any table points at, its own table included (the primary key already is): `VARCHAR(N)` from its `@expect.maxLength`, else `VARCHAR(255)`;
+- the referenced field — any string field a `@db.rel.FK` of any table points at, its own table included (the primary key already is): `VARCHAR(N)` from its `@expect.maxLength`, `CHAR(36)` with `@db.default.uuid` (see [uuid columns](#uuid-columns)), else `VARCHAR(255)`;
 - the `@db.rel.FK` column: the referenced column's type and its character set and collation — the column's own `@db.mysql.charset` / `@db.mysql.collate` / `@db.column.collate`, else its table's when it differs from the referencing table's. MySQL refuses a string foreign key whose sides differ in either, so a foreign-key column's own declarations are not used (schema sync logs a warning when it has some).
 
 The same holds for composite foreign keys and for the keys of a `@db.rel.via` junction. A string field nothing references keeps `TEXT` — a unique index on it takes a `(255)` prefix (see [Limitations](#limitations)).
