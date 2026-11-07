@@ -98,7 +98,13 @@ interface TSyncResult {
   status: "up-to-date" | "synced" | "failed" | "synced-by-peer" | "refused";
   schemaHash: string;
   entries: SyncEntry[];
-  dataSteps?: { ran: string[]; pending: string[] }; // since 0.1.165, when dataSteps were passed
+  // since 0.1.165, when dataSteps were passed; notes and failed since 0.1.175
+  dataSteps?: {
+    ran: string[];
+    pending: string[];
+    notes?: Record<string, string>; // by step id — present when a step returned a note
+    failed?: Array<{ id: string; error: unknown }>; // onError: "warn" steps that failed
+  };
 }
 ```
 
@@ -136,6 +142,43 @@ await syncSchema(db, types, {
 - `result.dataSteps` reports `{ ran, pending }`: `ran` lists the steps this call ran, `pending` the steps still not recorded after it — the ones a later sync runs. A step an earlier sync recorded is in neither list, so `pending` is empty once every step has run (also on an `'up-to-date'` or `'synced-by-peer'` result). `plan()` reports the same `pending` list as `pendingDataSteps`, and a pending step makes the plan `'changes-needed'`.
 - Never change what a recorded step does — add a new step with a new id. Duplicate or empty ids throw.
 
+### Step notes {#data-steps-notes}
+
+A step can return `{ note }` (since 0.1.175) to keep a short record of what it did — which rows it merged, which users it raised:
+
+```typescript
+{
+  id: "2026-11-raise-limits",
+  async run(space) {
+    const { modifiedCount } = await space.getTable(User).updateMany({ limit: 5 }, { limit: 10 });
+    return { note: `raised ${modifiedCount} users` };
+  },
+}
+```
+
+- The note is stored with the step's record in `__atscript_control` (`data_step:<id>`, a JSON value `{ ranAt, podId, note }`), in the same transaction as the step.
+- `result.dataSteps.notes` holds the notes of the steps this call ran, by step id.
+- A note is kept up to 4096 characters; a longer one is cut and ends in `… [truncated]`.
+
+### Continue after a failed step {#data-steps-on-error}
+
+By default a failing step stops the run. With `onError: "warn"` (since 0.1.175) the sync logs the error and goes on with the next step:
+
+```typescript
+{
+  id: "2026-11-merge-legacy-tags",
+  onError: "warn",
+  async run(space) {
+    await mergeLegacyTags(space); // may fail on data nobody has cleaned up yet
+  },
+}
+```
+
+- The failed step is rolled back (on adapters with transactions) and **not recorded**, so the next sync runs it again. Without transactions its writes so far stay — write such a step so it can run again.
+- The error is logged through the sync's `logger` (`console` when none is set) and listed in `result.dataSteps.failed` as `{ id, error }`; the step stays in `pending`.
+- The steps after it run and are recorded **without** it. Use `"warn"` only for a step no later step depends on.
+- `"throw"` is the default. `"warn"` on a `beforeConstraints` step throws when the sync starts: the indexes and foreign keys after it need its work.
+
 ### Fix rows before a new constraint {#data-steps-before-constraints}
 
 A new `@db.index.unique` or `@db.rel.FK` cannot be created over rows that break it, and a default step runs after the DDL — too late to merge the duplicates first. Give the step `phase: "beforeConstraints"` (since 0.1.168):
@@ -159,6 +202,32 @@ await syncSchema(db, types, {
 - All `beforeConstraints` steps run before the `"after"` (default) ones. When the schema is already up to date they simply run first.
 - A `beforeConstraints` step that throws (rolled back, not recorded) stops the run there. What the run already applied — renamed and created tables, new columns — is recorded; every table still waiting for its indexes and foreign keys gets an `error` entry (`Data step "<id>" failed: …`), views are not synced (a view this run dropped to change it stays dropped), removed tables are not dropped, and the schema hash is withheld. The sync then throws the step's error after releasing the lock. The next sync picks up from there: it runs the step again and applies the constraints and views. A renamed table is not renamed twice: when the old name is gone and the new one exists, the adapters treat the rename as done.
 - On SQLite a new foreign key rebuilds the table during the DDL, **before** the step runs — the rows are copied with foreign-key checks off, and SQLite never checks existing rows against a new constraint. Dangling references survive that rebuild, so clear them in the step anyway. The step still runs before the new unique indexes. Other values of `phase` throw.
+
+### Rewrite stored rows after a type change {#rewrite-rows}
+
+Tightening a type does not touch the rows already stored. Lower `@expect.maxLength` on a `@db.json` array from 50 to 20, and the old rows still hold 50 items: they read fine, but the next update of such a row fails validation. `rewriteRowsStep` (since 0.1.175) builds a data step that brings the stored rows in line:
+
+```typescript
+import { rewriteRowsStep, syncSchema } from "@atscript/db/sync";
+
+await syncSchema(db, types, {
+  dataSteps: [
+    // keep the last 20 turns of every stored chat
+    rewriteRowsStep(Chat, { field: "turns", map: (turns) => turns.slice(-20) }),
+  ],
+});
+```
+
+- **The id follows the validation rules.** It is `rewrite:<table>.<field>@<hash>`, where the hash covers what decides which values are valid: the field's kind and primitive type, optional / nullable, the structure of objects and arrays by property name, and the `@expect.*` (their messages excluded), `@meta.required`, `@normalize.*` and `@db.json` annotations. When you change the limit again, the hash changes, the step is pending again and the next sync runs it once more. Renaming a nested type, labels, descriptions, `@ui.*`, other annotations and upgrading `@atscript/typescript` do not change it. Pass `id` to choose the part before `@` — change it to run the step again after changing `map`.
+- **`map` must be idempotent**, so that `map(map(x))` equals `map(x)`. The step runs again when its id changes, and after a failed attempt on an adapter without transactions the retry sees the rows the first attempt already rewrote. A clamp (`turns.slice(-20)`) or a trim is idempotent; `v => v * 100` is not and corrupts the data on a rerun. Derive the new value from other fields, or guard it: `v => (v < 1000 ? v * 100 : v)`.
+- **Not a key, not a relation.** `field` cannot be a primary-key column (the patch would address the wrong row) or a relation; the step refuses it when you create it.
+- **`field` form:** `map(value, row)` returns the field's new value; `undefined` leaves the row as it is. A dotted `field` reaches into a nested object.
+- **Whole-row form:** without `field`, `map(row)` returns the row with your changes and the hash covers every column of the table, so adding or removing a column (or changing a column's validation) runs the step again. Top-level fields left out of the result are not changed; the primary key never is.
+- It reads the rows in primary-key order, `batchSize` (default 500) at a time, and writes only the rows `map` changed, as a patch validated against the current type. A row `map` leaves invalid fails the step: it is rolled back (on adapters with transactions) and runs again on the next sync.
+- The note it stores says how many rows it rewrote.
+- `phase` and `onError` are passed through to the step.
+
+The rewrite runs **at sync**, once per type change — not at read time. There are no read hooks that fix values on the way out on purpose: filters, sorts, aggregates and exports run in the database on the stored values, so a value fixed only when read would still be found, sorted and counted by its stored form.
 
 ## SyncEntry
 
@@ -344,11 +413,12 @@ A `@db.alias` type in the list is skipped by the sync itself; any other non-enti
 
 The `@atscript/db/sync` sub-entry exports the building blocks used by the CLI:
 
-| Export         | Purpose                                                |
-| -------------- | ------------------------------------------------------ |
-| `SchemaSync`   | Full sync class with `plan()` and `run()`              |
-| `SyncEntry`    | Plan/result entry with `print()` and computed flags    |
-| `syncSchema()` | One-liner convenience: `new SchemaSync(db).run(types)` |
+| Export              | Purpose                                                                                                              |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `SchemaSync`        | Full sync class with `plan()` and `run()`                                                                            |
+| `SyncEntry`         | Plan/result entry with `print()` and computed flags                                                                  |
+| `syncSchema()`      | One-liner convenience: `new SchemaSync(db).run(types)`                                                               |
+| `rewriteRowsStep()` | A data step that rewrites stored rows when a type changes (since 0.1.175) — see [Rewrite stored rows](#rewrite-rows) |
 
 Lower-level diff/snapshot helpers are also exported for building custom dashboards or sync UIs — consult the package source if you need them.
 

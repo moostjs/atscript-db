@@ -106,3 +106,24 @@ describe("MongoDB: $with joins through keys $select omits", () => {
     expect(row).not.toHaveProperty("id");
   });
 });
+
+describe("MongoDB: unknown $with relation", () => {
+  it("is a coded INVALID_QUERY naming only the requested relation", async () => {
+    const error = await accounts()
+      .findMany({ filter: {}, controls: { $with: [{ name: "nope" }] } })
+      .then(
+        () => undefined,
+        (e: unknown) => e as any,
+      );
+    expect(error?.code).toBe("INVALID_QUERY");
+    expect(error.message).toBe('Unknown relation "nope" in $with');
+    expect(error.errors).toEqual([
+      {
+        path: "$with",
+        message: 'Unknown relation "nope"',
+        code: "UNKNOWN_RELATION",
+        params: { relation: "nope" },
+      },
+    ]);
+  });
+});

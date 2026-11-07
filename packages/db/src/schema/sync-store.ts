@@ -31,11 +31,15 @@ export class SyncStore {
    * (in-memory adapter, MongoDB without a replica set) the record is checked
    * before `fn` and inserted after it; a peer that records it while `fn`
    * runs here leaves `"ran-twice"`.
+   *
+   * `fn` may resolve a note (since 0.1.175): the record is then `value(note)`
+   * — in a real transaction the inserted record is updated to it in the same
+   * transaction.
    */
   async runOnce(
     _id: string,
-    value: () => string,
-    fn: () => Promise<void> | void,
+    value: (note?: string) => string,
+    fn: () => Promise<string | undefined> | string | undefined,
   ): Promise<"ran" | "recorded" | "ran-twice"> {
     try {
       return await this.controlTable!.dbAdapter.withTransaction(async () => {
@@ -43,12 +47,15 @@ export class SyncStore {
           // Thrown, not returned: a failed insert can abort the transaction
           // (PostgreSQL, MongoDB), which must roll back, never commit.
           if (!(await this.insertControlValue(_id, value()))) throw RECORDED_BY_PEER;
-          await fn();
+          const note = await fn();
+          if (note !== undefined) {
+            await this.controlTable!.updateOne({ _id, value: value(note) } as any);
+          }
           return "ran";
         }
         if ((await this.presentControlIds([_id])).has(_id)) return "recorded";
-        await fn();
-        return (await this.insertControlValue(_id, value())) ? "ran" : "ran-twice";
+        const note = await fn();
+        return (await this.insertControlValue(_id, value(note))) ? "ran" : "ran-twice";
       });
     } catch (error) {
       if (error === RECORDED_BY_PEER) return "recorded";

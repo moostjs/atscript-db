@@ -954,6 +954,11 @@ describe("@DbActionsFrom — delegated runs: failures, exclusions, visibility (r
       query: { q: "teamId=a", dryRun: true },
     });
     expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({
+      code: "ACTION_FORBIDDEN",
+      params: { action: "close" },
+      message: 'Action "close" is not allowed',
+    });
     expect(log).toEqual([]);
   });
 

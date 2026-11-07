@@ -26,6 +26,7 @@ import {
   resolveDesignType,
 } from "@atscript/db";
 import { BUCKET_UNITS } from "@uniqu/core";
+import { unknownFieldMessage } from "../http-errors";
 
 /**
  * Per-path HTTP capability of a DB readable — the single source that both the
@@ -85,10 +86,20 @@ export interface TFieldCapability {
   numeric: boolean;
 }
 
-/** One rejected path: `path` is the offending logical path, `message` the full sentence. */
+/**
+ * One rejected path: `path` is the offending logical path, `message` the
+ * full sentence, `code` / `params` (since 0.1.175) its machine-readable
+ * reason — `UNKNOWN_FIELD`, `NAVIGATION_PATH`, `FIELD_NOT_PERMITTED`,
+ * `FIELD_DISPLAY_ONLY`, `FIELD_NESTED_OBJECT`, `FIELD_IN_JSON`,
+ * `FIELD_ENCRYPTED` or `FIELD_WRITE_ONLY` (see `MOOST_DB_MESSAGES`), with
+ * `{ field, op }` (`{ field }` for `UNKNOWN_FIELD`, plus `column` for
+ * `FIELD_IN_JSON`).
+ */
 export interface TCapabilityVerdict {
   path: string;
   message: string;
+  code: string;
+  params?: Record<string, unknown>;
 }
 
 /**
@@ -157,6 +168,13 @@ const REASON_ANNOTATION_FILTER = "add @db.column.filterable to enable.";
 const REASON_ANNOTATION_SORT = "add @db.column.sortable to enable.";
 /** A stored leaf never takes `$some` / `$none` (the HTTP gate answers relation refs before reaching it). */
 const REASON_NOT_RELATION = "$some / $none apply to navigation relations only.";
+/** The code of a leaf refusal: write-only / encrypted / not-a-relation reasons keep their own. */
+function reasonCode(reason: string | undefined): string {
+  if (reason === REASON_WRITE_ONLY) return "FIELD_WRITE_ONLY";
+  if (reason === REASON_ENCRYPTED) return "FIELD_ENCRYPTED";
+  if (reason === REASON_NOT_RELATION) return "NOT_A_RELATION";
+  return "FIELD_NOT_PERMITTED";
+}
 /** The predicate alternative named by a filter on a navigation path (since 0.1.147). */
 const PREDICATE_HINT = "to filter by related rows (requires @db.rel.filterable)";
 
@@ -191,12 +209,40 @@ export function writeOnlyVerdict(path: string, op: "filter" | "sort"): TCapabili
   return {
     path,
     message: `${OP_SUBJECT[op]} field "${path}" is not permitted — ${REASON_WRITE_ONLY}`,
+    code: "FIELD_WRITE_ONLY",
+    params: { field: path, op },
   };
 }
 
 /** The one "nonexistent path" verdict — hidden paths answer with it byte for byte. */
 function unknownField(path: string): TCapabilityVerdict {
-  return { path, message: `Unknown field "${path}"` };
+  return {
+    path,
+    message: unknownFieldMessage(path),
+    code: "UNKNOWN_FIELD",
+    params: { field: path },
+  };
+}
+
+/** A leaf refusal: the code follows the reason (see {@link reasonCode}). */
+function notPermitted(
+  path: string,
+  op: TGateOp,
+  message: string,
+  reason: string | undefined,
+): TCapabilityVerdict {
+  return refused(path, op, reasonCode(reason), message);
+}
+
+/** A verdict on an existing path, coded `code` with `{ field, op }`. */
+function refused(
+  path: string,
+  op: TGateOp,
+  code: string,
+  message: string,
+  extra?: Record<string, unknown>,
+): TCapabilityVerdict {
+  return { path, message, code, params: { field: path, op, ...extra } };
 }
 
 /**
@@ -572,10 +618,12 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     if (requires) {
       if (!requires.every(exists)) return unknownField(path);
       if (gateOp === "select") return undefined;
-      return {
+      return refused(
         path,
-        message: `Field "${path}" is display-only and cannot be used in ${DISPLAY_ONLY_POSITION[gateOp]}`,
-      };
+        gateOp,
+        "FIELD_DISPLAY_ONLY",
+        `Field "${path}" is display-only and cannot be used in ${DISPLAY_ONLY_POSITION[gateOp]}`,
+      );
     }
     // Past the decoration rule `groupedSelect` is a plain `$select`.
     const op: TQueryPathOp = gateOp === "groupedSelect" ? "select" : gateOp;
@@ -585,7 +633,12 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     const { kind, parent: localParent } = classifyQueryPath(this, local);
     const parent = localParent === undefined ? undefined : prefix + localParent;
     if (kind === "nav") {
-      return { path, message: navMessage(path, op, localParent, local, prefix !== "") };
+      return refused(
+        path,
+        op,
+        "NAVIGATION_PATH",
+        navMessage(path, op, localParent, local, prefix !== ""),
+      );
     }
     if (kind === "leaf") {
       const entry = this._entries.get(local)!;
@@ -593,41 +646,54 @@ export class FieldCapabilityIndex implements TQueryPathSource {
         case "select":
           return entry.cap.selectable
             ? undefined
-            : { path, message: `Selecting field "${path}" is not permitted.` };
+            : notPermitted(path, op, `Selecting field "${path}" is not permitted.`, undefined);
         case "filter": {
           const reason = entry.filterBy[predicate];
           return reason === undefined
             ? undefined
-            : { path, message: `Filtering on field "${path}" is not permitted — ${reason}` };
+            : notPermitted(
+                path,
+                op,
+                `Filtering on field "${path}" is not permitted — ${reason}`,
+                reason,
+              );
         }
         case "sort":
           return entry.cap.sortable
             ? undefined
-            : {
+            : notPermitted(
                 path,
-                message: `Sorting on field "${path}" is not permitted — ${entry.cap.sortReason}`,
-              };
+                op,
+                `Sorting on field "${path}" is not permitted — ${entry.cap.sortReason}`,
+                entry.cap.sortReason,
+              );
         case "bucket":
           return entry.cap.bucketable
             ? undefined
-            : {
+            : notPermitted(
                 path,
-                message: `Bucketing field "${path}" is not permitted — ${entry.cap.bucketReason}`,
-              };
+                op,
+                `Bucketing field "${path}" is not permitted — ${entry.cap.bucketReason}`,
+                entry.cap.bucketReason,
+              );
         case "groupBy":
           return entry.cap.groupable
             ? undefined
-            : {
+            : notPermitted(
                 path,
-                message: `${OP_SUBJECT[op]} field "${path}" is not permitted — ${entry.cap.groupReason}`,
-              };
+                op,
+                `${OP_SUBJECT[op]} field "${path}" is not permitted — ${entry.cap.groupReason}`,
+                entry.cap.groupReason,
+              );
         default:
           return entry.physicalFilterable
             ? undefined
-            : {
+            : notPermitted(
                 path,
-                message: `${OP_SUBJECT[op]} field "${path}" is not permitted — ${entry.physicalReason}`,
-              };
+                op,
+                `${OP_SUBJECT[op]} field "${path}" is not permitted — ${entry.physicalReason}`,
+                entry.physicalReason,
+              );
       }
     }
     switch (kind) {
@@ -655,25 +721,31 @@ export class FieldCapabilityIndex implements TQueryPathSource {
         ) {
           return undefined;
         }
-        return {
+        return refused(
           path,
-          message: `"${path}" is a nested object — filter or sort on one of its leaves (${leafHint(leaves)})`,
-        };
+          op,
+          "FIELD_NESTED_OBJECT",
+          `"${path}" is a nested object — filter or sort on one of its leaves (${leafHint(leaves)})`,
+        );
       }
       case "jsonDescendant":
-        return {
+        return refused(
           path,
-          message:
-            `"${path}" is inside JSON-stored column "${parent}" — this adapter cannot ${OP_VERB[op]} ` +
+          op,
+          "FIELD_IN_JSON",
+          `"${path}" is inside JSON-stored column "${parent}" — this adapter cannot ${OP_VERB[op]} ` +
             `JSON paths; select "${parent}" and read the value client-side.`,
-        };
+          { column: parent },
+        );
       case "encryptedDescendant":
-        return op === "select"
-          ? {
-              path,
-              message: `"${path}" is inside encrypted field "${parent}" — select the encrypted parent "${parent}" instead.`,
-            }
-          : { path, message: `Cannot ${OP_VERB[op]} encrypted field "${path}"` };
+        return refused(
+          path,
+          op,
+          "FIELD_ENCRYPTED",
+          op === "select"
+            ? `"${path}" is inside encrypted field "${parent}" — select the encrypted parent "${parent}" instead.`
+            : `Cannot ${OP_VERB[op]} encrypted field "${path}"`,
+        );
       default:
         return unknownField(path);
     }

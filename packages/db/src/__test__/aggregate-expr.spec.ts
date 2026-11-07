@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { describe, it, expect, beforeAll } from "vite-plus/test";
 
-import { evaluateExpr } from "../query/query-tree";
+import { assertExprArity, assertExprTreeArity, evaluateExpr } from "../query/query-tree";
 import { arithToExprNode, numericOperandProblem } from "../query/aggregate-expr";
 import { numericTypeProblem } from "../shared/numeric-operand";
 import { collectQueryPaths } from "../query/query-guards";
@@ -21,6 +21,16 @@ import { MockAdapter, prepareFixtures } from "./test-utils";
  */
 
 const KEYS = { k1: randomBytes(32) };
+
+function catchError(fn: () => unknown): DbError {
+  try {
+    fn();
+  } catch (e) {
+    if (e instanceof DbError) return e;
+    throw e;
+  }
+  throw new Error("expected a DbError");
+}
 
 class ExprAdapter extends MockAdapter {
   override aggregateFns() {
@@ -110,6 +120,27 @@ describe("evaluateExpr — the shared evaluator", () => {
   it("Number()s a numeric-looking leaf", () => {
     expect(evaluateExpr({ op: "+", args: [f, 1] }, leaf({ a: "2" }))).toBe(3);
   });
+
+  it("an operator with a third argument is INVALID_QUERY, not a dropped term (checked once, not per row)", () => {
+    const err = catchError(() => assertExprTreeArity({ op: "+", args: [f, g, 1] } as never));
+    expect(err.code).toBe("INVALID_QUERY");
+    expect(err.errors[0]).toMatchObject({ path: "$select" });
+    expect(err.errors[0].message).toMatch(/Operator "\+" takes 2 arguments, got 3/);
+    expect(catchError(() => assertExprTreeArity({ op: "neg", args: [f, g] } as never)).code).toBe(
+      "INVALID_QUERY",
+    );
+    expect(catchError(() => assertExprTreeArity({ op: "coalesce", args: [f] })).code).toBe(
+      "INVALID_QUERY",
+    );
+    // nested, and reported at the path the caller names
+    const nested = { op: "-", args: [1, { op: "+", args: [f, g, 1] }] } as never;
+    expect(catchError(() => assertExprTreeArity(nested, "$having")).errors[0].path).toBe("$having");
+    expect(catchError(() => assertExprArity({ op: "/", args: [1] }, "$sort")).errors[0].path).toBe(
+      "$sort",
+    );
+    // the evaluator trusts its tree: it does not re-check every row
+    expect(evaluateExpr({ op: "+", args: [f, g] }, leaf({ a: 1, b: 2 }))).toBe(3);
+  });
 });
 
 describe("arithToExprNode", () => {
@@ -136,6 +167,30 @@ describe("arithToExprNode", () => {
       op: "*",
       args: [{ field: "p_price" }, { field: "p_qty" }],
     });
+  });
+
+  it("more than two arguments to + or * is INVALID_QUERY (never a dropped term)", () => {
+    for (const op of ["+", "*"] as const) {
+      const err = catchError(() => arithToExprNode({ $op: op, $args: ["a", "b", "c"] } as never));
+      expect(err.code).toBe("INVALID_QUERY");
+      expect(err.errors[0].path).toBe("$select");
+      expect(err.errors[0].message).toContain(`takes 2 arguments, got 3`);
+    }
+    // the path a caller names is reported
+    expect(
+      catchError(() =>
+        arithToExprNode({ $op: "+", $args: ["a", "b", "c"] } as never, undefined, "$having"),
+      ).errors[0].path,
+    ).toBe("$having");
+    // nested inside a valid node too
+    expect(
+      catchError(() =>
+        arithToExprNode({ $op: "-", $args: ["x", { $op: "+", $args: ["a", "b", "c"] }] } as never),
+      ).code,
+    ).toBe("INVALID_QUERY");
+    expect(catchError(() => arithToExprNode({ $op: "/", $args: ["a"] } as never)).code).toBe(
+      "INVALID_QUERY",
+    );
   });
 });
 

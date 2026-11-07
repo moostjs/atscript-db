@@ -14,7 +14,7 @@ import {
   registerAsValueHelpController,
 } from "./actions/controller-registry";
 import { AsReadableController } from "./as-readable.controller";
-import { notFoundError } from "./http-errors";
+import { invalidQuery, notFoundError } from "./http-errors";
 import {
   AGGREGATE_ONLY_CONTROLS,
   ONE_CONTROLS,
@@ -344,11 +344,11 @@ export abstract class AsValueHelpController<
     await this.parseRequest("one", "");
     const pk = this.primaryKey;
     if (!pk) {
-      return new HttpError(400, "No primary key (@meta.id) on value-help interface");
+      return invalidQuery("", "No primary key (@meta.id) on value-help interface");
     }
     const id = query[pk];
     if (id === undefined) {
-      return new HttpError(400, `Missing PK field "${pk}"`);
+      return invalidQuery(pk, `Missing PK field "${pk}"`);
     }
     return this._scopedOne(id);
   }

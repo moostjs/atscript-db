@@ -6,6 +6,8 @@ import type {
 } from "@atscript/typescript/utils";
 import type { FilterExpr } from "@uniqu/core";
 
+import { DbError } from "../db-error";
+
 export type {
   AtscriptQueryNode,
   AtscriptQueryFieldRef,
@@ -134,10 +136,56 @@ export function walkViewExpr(expr: AtscriptExprNode, leaf: (path: string) => voi
 }
 
 /**
+ * Throws `INVALID_QUERY` unless an operation node of a computed expression
+ * has the arguments its operator takes: `+ - * /` two, `neg` one, `coalesce`
+ * at least two. The renderers and the query translation call it, so a
+ * hand-built node with a third argument fails instead of losing it (the
+ * operators are binary: nest a longer sum as `(a + b) + c`). `path` is the
+ * control (or view column) the entry reports — `$select` by default. Checks
+ * one node; {@link assertExprTreeArity} checks a whole tree.
+ * @since 0.1.175
+ */
+export function assertExprArity(
+  node: { op: string; args: readonly unknown[] },
+  path = "$select",
+): void {
+  const n = node.args.length;
+  let expected: string | undefined;
+  if (node.op === "neg") expected = n === 1 ? undefined : "1 argument";
+  else if (node.op === "coalesce") expected = n >= 2 ? undefined : "at least 2 arguments";
+  else expected = n === 2 ? undefined : "2 arguments";
+  if (expected === undefined) return;
+  const nest =
+    node.op === "+" || node.op === "*"
+      ? ` — nest longer chains: (a ${node.op} b) ${node.op} c`
+      : "";
+  throw new DbError("INVALID_QUERY", [
+    {
+      path,
+      message: `Operator "${node.op}" takes ${expected}, got ${n}${nest}`,
+    },
+  ]);
+}
+
+/**
+ * {@link assertExprArity} over every operation node of a computed expression.
+ * Run it once when the expression is translated — not per row in
+ * {@link evaluateExpr}, which trusts its tree.
+ * @since 0.1.175
+ */
+export function assertExprTreeArity(expr: AtscriptExprNode, path = "$select"): void {
+  if (typeof expr === "number" || "field" in expr) return;
+  assertExprArity(expr, path);
+  for (const arg of expr.args) assertExprTreeArity(arg, path);
+}
+
+/**
  * Evaluates a computed expression in process (the memory adapter, a test, a
  * third-party adapter) with the semantics every adapter shares: IEEE double,
  * a leaf is `Number()`-ed, NULL / undefined propagates as `null`, `/` by zero
- * is `null`, `coalesce` returns its first non-null value.
+ * is `null`, `coalesce` returns its first non-null value. The tree must be
+ * well-formed (operators with their arguments): check it once with
+ * {@link assertExprTreeArity} when you build it, not per row here.
  * @since 0.1.148
  */
 export function evaluateExpr(

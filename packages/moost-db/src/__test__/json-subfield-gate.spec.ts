@@ -115,7 +115,14 @@ describe("JSON descendant paths — relational adapter", () => {
       expect(err.body.statusCode).toBe(400);
       expect(err.message).toContain("address");
       expect(err.message).toContain("JSON");
-      expect(errorsOf(err)).toEqual([{ path: "address.city", message: err.message }]);
+      expect(errorsOf(err)).toMatchObject([
+        {
+          path: "address.city",
+          message: err.message,
+          code: "FIELD_IN_JSON",
+          params: { field: "address.city", column: "address" },
+        },
+      ]);
       expect(table.findMany).not.toHaveBeenCalled();
       expect(table.aggregate).not.toHaveBeenCalled();
       expect(table.count).not.toHaveBeenCalled();

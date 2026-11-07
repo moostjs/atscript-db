@@ -13,6 +13,7 @@ import {
 import type { AtscriptExprNode } from "@atscript/typescript/utils";
 
 import { DbError } from "../db-error";
+import { assertExprArity } from "./query-tree";
 import { isFirstLast } from "./aggregate-fns";
 import { numericTypeProblem } from "../shared/numeric-operand";
 import type { TableMetadata } from "../table/table-metadata";
@@ -64,19 +65,25 @@ export function numericOperandProblem(fd: TDbFieldMeta): string | undefined {
  * the SQL / MongoDB / memory renderers consume: a name becomes a
  * `{ field }` leaf, unary `-` becomes `neg`. `rename` maps each name (the
  * mapper makes row-level names physical; group-level names stay aliases).
+ * An operator with the wrong number of arguments (`+` with three) throws
+ * `INVALID_QUERY` ({@link assertExprArity}) at `path` (`$select`). This is
+ * where a query's expression is checked — once, at translation.
  *
  * @since 0.1.148
  */
 export function arithToExprNode(
   expr: ArithExpr,
   rename: (name: string) => string = (n) => n,
+  path = "$select",
 ): AtscriptExprNode {
   if (typeof expr === "number") return expr;
   if (typeof expr === "string") return { field: rename(expr) };
-  const args = expr.$args.map((a) => arithToExprNode(a, rename));
-  if (expr.$op === "-" && args.length === 1) return { op: "neg", args: [args[0]] };
-  if (expr.$op === "coalesce") return { op: "coalesce", args };
-  return { op: expr.$op, args: [args[0], args[1]] } as AtscriptExprNode;
+  // Unary `-` is uniqu's negation; any other arity mismatch (`+` with three
+  // arguments) throws rather than dropping an argument.
+  const op = expr.$op === "-" && expr.$args.length === 1 ? "neg" : expr.$op;
+  assertExprArity({ op, args: expr.$args }, path);
+  const args = expr.$args.map((a) => arithToExprNode(a, rename, path));
+  return { op, args } as AtscriptExprNode;
 }
 
 /**

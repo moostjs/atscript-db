@@ -246,13 +246,34 @@ export interface TGuardedQuery {
   };
 }
 
+/**
+ * A query-path rejection: one entry for `path` with its own machine-readable
+ * `reason` (since 0.1.175) — `UNKNOWN_FIELD` `{ field }`, `NOT_A_RELATION`
+ * `{ field }`, `NAVIGATION_PATH` / `FIELD_NOT_PERMITTED` /
+ * `FIELD_NESTED_OBJECT` / `FIELD_ENCRYPTED` `{ field, op }`, `FIELD_IN_JSON`
+ * `{ field, column, op }`, or `INVALID_QUERY` — the same codes moost-db's
+ * HTTP gate answers with, under the error's own `code`.
+ */
 function pathError(
   path: string,
   message: string,
+  reason: { code: string; params?: Record<string, unknown> },
   code: "INVALID_QUERY" | "BUCKET_NOT_SUPPORTED" = "INVALID_QUERY",
 ): DbError {
-  return new DbError(code, [{ path, message }]);
+  return new DbError(code, [{ path, message, ...reason }]);
 }
+
+/** The `reason` of a {@link pathError} on an existing `field` used in `op`. */
+function fieldReason(
+  code: string,
+  field: string,
+  op: TQueryPathOp,
+  extra?: Record<string, unknown>,
+): { code: string; params: Record<string, unknown> } {
+  return { code, params: { field, op, ...extra } };
+}
+
+const INVALID = { code: "INVALID_QUERY" } as const;
 
 /**
  * The one wording for a filter-node `$`-key that is not `$and` / `$or` /
@@ -824,6 +845,7 @@ export function guardPath(
     throw pathError(
       path,
       `"$some" / "$none" are only valid on a navigation relation — "${path}" is not one`,
+      { code: "NOT_A_RELATION", params: { field: path } },
     );
   }
   // `{ obj: null }` / `$ne: null` / `$exists` on a stored object test its
@@ -833,7 +855,11 @@ export function guardPath(
     case "nav":
       // A relational predicate sits on the navigation field itself (one hop per level).
       if (op === "filter" && predicate === "relation" && parent === undefined) return;
-      throw pathError(path, navPathMessage(path, verb, op, parent));
+      throw pathError(
+        path,
+        navPathMessage(path, verb, op, parent),
+        fieldReason("NAVIGATION_PATH", path, op),
+      );
     case "leaf": {
       if (op === "select") return;
       const fd = meta.descriptorByPath.get(path)!;
@@ -844,6 +870,7 @@ export function guardPath(
           throw pathError(
             path,
             `Cannot bucket "${path}" — ${verdict.reason}`,
+            fieldReason("FIELD_NOT_PERMITTED", path, op),
             verdict.code === "noBuckets" ? "BUCKET_NOT_SUPPORTED" : "INVALID_QUERY",
           );
         }
@@ -854,6 +881,7 @@ export function guardPath(
           throw pathError(
             path,
             `Cannot sort by "${path}" — adapter cannot sort on this storage type`,
+            fieldReason("FIELD_NOT_PERMITTED", path, op),
           );
         }
         return;
@@ -861,24 +889,40 @@ export function guardPath(
       if (!canFilterLeaf(fd, predicate, adapter)) {
         // Name the narrower predicates that WOULD pass (a JSON column's `$exists`).
         const hint = op === "filter" ? acceptedOperatorsHint(narrowerFilterOps(fd, adapter)) : "";
-        throw pathError(path, `Cannot ${verb} "${path}" — ${ADAPTER_FILTER_REASON}${hint}`);
+        throw pathError(
+          path,
+          `Cannot ${verb} "${path}" — ${ADAPTER_FILTER_REASON}${hint}`,
+          fieldReason("FIELD_NOT_PERMITTED", path, op),
+        );
       }
       return;
     }
     case "objectParent":
       if (op === "select" && meta.selectExpansion.has(path)) return;
-      throw pathError(path, `Cannot ${verb} "${path}" — nested object; use one of its leaf fields`);
+      throw pathError(
+        path,
+        `Cannot ${verb} "${path}" — nested object; use one of its leaf fields`,
+        fieldReason("FIELD_NESTED_OBJECT", path, op),
+      );
     case "jsonDescendant":
-      throw pathError(path, `Cannot ${verb} "${path}" — inside JSON-stored column "${parent}"`);
+      throw pathError(
+        path,
+        `Cannot ${verb} "${path}" — inside JSON-stored column "${parent}"`,
+        fieldReason("FIELD_IN_JSON", path, op, { column: parent }),
+      );
     case "encryptedDescendant":
       throw pathError(
         path,
         op === "select"
           ? `Cannot select "${path}" — inside encrypted field "${parent}"; select "${parent}" instead`
           : `Cannot ${verb} encrypted field "${path}"`,
+        fieldReason("FIELD_ENCRYPTED", path, op),
       );
     default:
-      throw pathError(path, `Unknown field "${path}"`);
+      throw pathError(path, `Unknown field "${path}"`, {
+        code: "UNKNOWN_FIELD",
+        params: { field: path },
+      });
   }
 }
 
@@ -969,7 +1013,11 @@ export function guardPaths(
   }
   const refs = collectQueryPaths(query, aggregate);
   if (refs.unsupportedOperator !== undefined) {
-    throw pathError(refs.unsupportedOperator, unsupportedOperatorMessage(refs.unsupportedOperator));
+    throw pathError(
+      refs.unsupportedOperator,
+      unsupportedOperatorMessage(refs.unsupportedOperator),
+      INVALID,
+    );
   }
   let relState = state;
   for (const ref of refs.filter) {
@@ -1005,7 +1053,7 @@ export function guardQuery(
   // A two-level aggregate is `aggregate()`'s only: a read that ignored `$from`
   // would run its root controls against the table (since 0.1.168).
   if (query.controls?.$from !== undefined) {
-    throw pathError("$from", "$from is only valid in an aggregate query");
+    throw pathError("$from", "$from is only valid in an aggregate query", INVALID);
   }
   guardFilter(meta, adapter, query.filter);
   guardSort(meta, query.controls?.$sort);

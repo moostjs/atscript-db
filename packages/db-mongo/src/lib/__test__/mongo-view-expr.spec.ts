@@ -98,6 +98,22 @@ describe("exprToMongo", () => {
     });
   });
 
+  it("an operator with a third argument is INVALID_QUERY ($add would sum all three)", () => {
+    const node = { op: "+", args: [{ field: "a" }, { field: "b" }, { field: "c" }] } as never;
+    expect(() => exprToMongo(node, leaf)).toThrow(/takes 2 arguments, got 3/);
+    try {
+      exprToMongo(node, leaf);
+    } catch (e) {
+      expect((e as { code?: string }).code).toBe("INVALID_QUERY");
+    }
+    // a view column's definition reports the column
+    try {
+      exprToMongo(node, leaf, "total");
+    } catch (e) {
+      expect((e as { errors: Array<{ path: string }> }).errors[0].path).toBe("total");
+    }
+  });
+
   it("nests two-argument $ifNull for coalesce", () => {
     expect(
       exprToMongo({ op: "coalesce", args: [{ field: "a" }, { field: "b" }, 0] }, leaf),

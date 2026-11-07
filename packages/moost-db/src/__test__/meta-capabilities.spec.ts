@@ -234,7 +234,7 @@ describe("/meta contract per adapter family", () => {
     ]) {
       const res = await controller.query(url);
       expect(res, url).toBeInstanceOf(HttpError);
-      expect(errorsOf(res)[0], url).toEqual({
+      expect(errorsOf(res)[0], url).toMatchObject({
         path: "prefs",
         message:
           'Filtering on field "prefs" is not permitted — adapter cannot filter on this storage type (accepted operators: $exists).',
@@ -285,7 +285,7 @@ describe("/meta contract per adapter family", () => {
     });
     expect(await accepted(() => controller.query("?$exists=prefs"))).toBe(true);
     const other = await controller.query("?$exists=other");
-    expect(errorsOf(other)[0]).toEqual({
+    expect(errorsOf(other)[0]).toMatchObject({
       path: "other",
       message: 'Filtering on field "other" is not permitted — add @db.column.filterable to enable.',
     });

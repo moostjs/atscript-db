@@ -127,6 +127,16 @@ await shipments.aggregate({
 
 `parseArith` checks the syntax only (a `SyntaxError` with the offset); node and depth limits and name resolution are checked when the query runs, as for a hand-built tree.
 
+To build a sum or product from a list of terms in code, use `arithAdd(...terms)` / `arithMul(...terms)` from `@uniqu/core` (since 0.2.2). They nest the terms exactly as `parseArith` does for `a+b+c+d`, and throw a `RangeError` past the depth limit of 16:
+
+```typescript
+import { arithAdd, arithMul } from "@uniqu/core";
+
+const load = arithAdd(...sizes.map((s) => arithMul(s.column, s.weight)));
+```
+
+A node with more arguments than its operator takes, such as `{ $op: "+", $args: ["a", "b", "c"] }`, is rejected with `INVALID_QUERY` (`400`, `Operator "+" takes 2 arguments, got 3`) on every adapter. No term is dropped.
+
 `$as` is required on both. An expression is a number literal, a name, or a node: `{ $op: '+' \| '-' \| '*' \| '/', $args: [a, b] }`, unary minus `{ $op: '-', $args: [a] }`, or `{ $op: 'coalesce', $args: [a, b, …] }`. This is the grammar of [`@db.compute`](/views/computed-columns) and it has the same semantics on every adapter:
 
 - values are IEEE double (`7 / 2` is `3.5`);

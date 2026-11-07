@@ -103,7 +103,14 @@ async function expectCoreAgrees(table: any, path: string, gate: unknown): Promis
     errorsOf(gate)?.[0]?.message ?? "",
   );
   if (!reason || core?.code === "ENC_FIELD_AGG") return false;
-  expect(core?.errors, path).toEqual([{ path, message: `Cannot bucket "${path}" — ${reason[1]}` }]);
+  expect(core?.errors, path).toEqual([
+    {
+      path,
+      message: `Cannot bucket "${path}" — ${reason[1]}`,
+      code: "FIELD_NOT_PERMITTED",
+      params: { field: path, op: "bucket" },
+    },
+  ]);
   return true;
 }
 
@@ -164,7 +171,7 @@ describe("/meta ⇔ gate parity for calendar buckets", () => {
     expect(Object.values(meta.fields).some((f) => "bucketable" in f)).toBe(false);
     const res = await rejected(controller.query(bucketUrl("openedAt")));
     expect(await expectCoreAgrees(table, "openedAt", res)).toBe(true);
-    expect(errorsOf(res)).toEqual([
+    expect(errorsOf(res)).toMatchObject([
       {
         path: "openedAt",
         message: 'Bucketing field "openedAt" is not permitted — adapter has no calendar buckets.',
@@ -188,7 +195,7 @@ describe("gate wording", () => {
     for (const [field, message] of cases) {
       const res = await rejected(controller.query(bucketUrl(field)));
       expect(res.body.statusCode, field).toBe(400);
-      expect(errorsOf(res), field).toEqual([{ path: field, message }]);
+      expect(errorsOf(res), field).toMatchObject([{ path: field, message }]);
     }
     expect(adapter.calls.some((c) => c.method === "aggregate")).toBe(false);
   });
@@ -237,12 +244,13 @@ describe("gate wording", () => {
     ];
     for (const [url, issue] of cases) {
       const res = await rejected(controller.query(url));
-      expect(errorsOf(res), url).toEqual([issue]);
+      expect(errorsOf(res), url).toEqual([{ code: "INVALID_QUERY", ...issue }]);
     }
     for (const url of ["?$select=bucket(openedAt,day):d", "?$select=bucket(openedAt,day)"]) {
       const res = await rejected(controller.pages(url));
       expect(errorsOf(res)[0], url).toEqual({
         path: "$select",
+        code: "INVALID_QUERY",
         message: "Calendar buckets are only valid in grouped queries",
       });
     }

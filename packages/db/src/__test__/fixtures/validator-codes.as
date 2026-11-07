@@ -17,3 +17,15 @@ export interface VcProfile {
     @db.rel.FK
     parentId: VcParent.id
 }
+
+// A @db.json array: written whole, so array patch operators are ARRAY_OP_ON_JSON.
+@db.table 'vc_docs'
+export interface VcDoc {
+    @meta.id
+    id: number
+
+    @db.json
+    tags: string[]
+
+    labels: string[]
+}

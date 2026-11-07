@@ -435,7 +435,15 @@ await table.updateOne({
 });
 ```
 
-The same applies to `@db.json` arrays — use a plain array value instead of patch operators.
+The same applies to `@db.json` arrays — send the whole array instead of patch operators. An array operator (`$insert`, `$remove`, `$upsert`, `$update`, `$replace`) on a `@db.json` field fails with the code `ARRAY_OP_ON_JSON` (since 0.1.175), on the server and in the [db-client preflight](/http/client) alike:
+
+```typescript
+// ❌ ARRAY_OP_ON_JSON — tags is `@db.json string[]`
+await table.updateOne({ id: 1, tags: { $insert: ["new"] } });
+
+// ✅ Read, change, send the whole array
+await table.updateOne({ id: 1, tags: [...row.tags, "new"] });
+```
 
 ## Combining Operators
 

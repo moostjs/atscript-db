@@ -230,8 +230,14 @@ export interface ServerErrorEntry {
 export interface ServerError {
   message: string;
   statusCode: number;
-  /** The `DbError` code (`CONFLICT`, `FK_VIOLATION`, …) or a handler's own. @since 0.1.165 */
+  /**
+   * The `DbError` code (`CONFLICT`, `FK_VIOLATION`, …), moost-db's own
+   * (`UNKNOWN_FIELD`, `INVALID_QUERY`, `VERSION_MISMATCH`, … — every 400 /
+   * 403 / 409 is coded since 0.1.175) or a handler's own. @since 0.1.165
+   */
   code?: string;
+  /** Values the top-level message names, for translating it. @since 0.1.175 */
+  params?: Record<string, unknown>;
   errors?: ServerErrorEntry[];
   [key: string]: unknown;
 }

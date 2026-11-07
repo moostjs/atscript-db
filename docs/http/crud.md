@@ -498,15 +498,19 @@ When the row's stored version no longer matches what the client submitted, the c
   "statusCode": 409,
   "error": "Conflict",
   "message": "version_mismatch",
+  "code": "VERSION_MISMATCH",
+  "params": { "currentVersion": 6 },
   "kind": "version_mismatch",
   "currentVersion": 6,
 }
 ```
 
-::: warning Discriminate on `kind`, not `error`
+`code` (since 0.1.175) is the discriminator to branch on, like every other moost-db error; `kind` stays for older clients.
+
+::: warning Discriminate on `code` or `kind`, not `error`
 The proposal called for `{ error: "version_mismatch", currentVersion: N }`. The actual response carries `error: "Conflict"` — the Wooks framework that powers Moost overrides the `error` field with the standard HTTP reason phrase, and `@atscript/moost-db` cannot reclaim it. The OCC discriminator lives in **`kind`** instead, and `currentVersion` is preserved at the top level.
 
-Clients should test `kind === "version_mismatch"` and read `currentVersion` to refresh their view of the row, then retry.
+Clients should test `code === "VERSION_MISMATCH"` (or `kind === "version_mismatch"`) and read `currentVersion` to refresh their view of the row, then retry.
 :::
 
 Clients using `@atscript/db-client` get a typed `VersionMismatchError` subclass thrown automatically — no need to inspect `body.kind`. See the [client doc](./client#writes) for the pattern.
@@ -625,7 +629,8 @@ The controller automatically transforms errors into appropriate HTTP responses:
 | `DbError` (LOCK_NOT_SUPPORTED / ISOLATION_NOT_SUPPORTED)                                    | 501         | `{ message, statusCode, errors }` — the adapter cannot lock rows on read or open the requested isolation level; see [Transactions](/api/transactions#locking-reads) (since 0.1.162)                      |
 | `DbError` (CAS_MISMATCH — `touchMany`)                                                      | 409         | `{ message, statusCode, errors: [{ path: "$cas", message }] }` — see [Versioning — Batch touch](/api/versioning#touch-many)                                                                              |
 | `DbError` (other, incl. BUCKET_NOT_SUPPORTED, AGG_FN_NOT_SUPPORTED, AGG_EXPR_NOT_SUPPORTED) | 400         | `{ message, statusCode, errors }`                                                                                                                                                                        |
-| Version mismatch (OCC)                                                                      | 409         | `{ statusCode, error, message: "version_mismatch", kind, currentVersion }` — see [OCC over HTTP](#occ-over-http)                                                                                         |
+| Version mismatch (OCC)                                                                      | 409         | `{ statusCode, error, message: "version_mismatch", code: "VERSION_MISMATCH", kind, currentVersion }` — see [OCC over HTTP](#occ-over-http)                                                               |
+| A request the gates refuse (unknown field, field not permitted, malformed query, …)         | 400 / 403   | `{ message, statusCode, code, params?, errors: [{ path, message, code, params? }] }` — every one coded since 0.1.175, see [Request error codes](/http/i18n#request-error-codes)                          |
 | `version` + differing `$cas`                                                                | 400         | `{ message, statusCode, errors: [{ path: "$cas", message }] }`                                                                                                                                           |
 | Not found — a missing row, a row outside the caller's scope, an unknown form or action      | 404         | `code: "NOT_FOUND"`, the same body everywhere — see [Not found](#not-found)                                                                                                                              |
 

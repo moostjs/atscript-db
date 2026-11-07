@@ -91,7 +91,9 @@ describe("the field gate covers every operand", () => {
         "?$groupBy=ticketId&$select=ticketId,sum(estimate*2):x",
       ),
     );
-    expect(errorsOf(res)).toEqual([{ path: "estimate", message: 'Unknown field "estimate"' }]);
+    expect(errorsOf(res)).toMatchObject([
+      { path: "estimate", message: 'Unknown field "estimate"' },
+    ]);
     expect(adapter.calls.some((c) => c.method === "aggregate")).toBe(false);
   });
 
@@ -101,11 +103,17 @@ describe("the field gate covers every operand", () => {
     const first = await rejected(
       ctrl.query("?$groupBy=ticketId&$select=ticketId,first(estimate):e&$rowOrder=id"),
     );
-    expect(errorsOf(first)[0]).toEqual({ path: "estimate", message: 'Unknown field "estimate"' });
+    expect(errorsOf(first)[0]).toMatchObject({
+      path: "estimate",
+      message: 'Unknown field "estimate"',
+    });
     const order = await rejected(
       ctrl.query("?$groupBy=ticketId&$select=ticketId,first(price):p&$rowOrder=estimate"),
     );
-    expect(errorsOf(order)[0]).toEqual({ path: "estimate", message: 'Unknown field "estimate"' });
+    expect(errorsOf(order)[0]).toMatchObject({
+      path: "estimate",
+      message: 'Unknown field "estimate"',
+    });
   });
 
   it("a write-only operand, first() field or $rowOrder key cannot be aggregated", async () => {
@@ -138,7 +146,7 @@ describe("the field gate covers every operand", () => {
     const res = await rejected(
       bind(new ExprAdapter()).query("?$groupBy=ticketId&$select=ticketId,sum(nope*2):x"),
     );
-    expect(errorsOf(res)).toEqual([{ path: "nope", message: 'Unknown field "nope"' }]);
+    expect(errorsOf(res)).toMatchObject([{ path: "nope", message: 'Unknown field "nope"' }]);
   });
 
   it("non-numeric operands are 400 from the core's type rule", async () => {
@@ -152,6 +160,7 @@ describe("the field gate covers every operand", () => {
       expect(errorsOf(res)).toEqual([
         {
           path: "$select",
+          code: "INVALID_QUERY",
           message: `Field "${field}" is not numeric — arithmetic needs a number field (not decimal, timestamp or text)`,
         },
       ]);
@@ -174,7 +183,11 @@ describe("the field gate covers every operand", () => {
     const ctrl = bind(new ExprAdapter());
     const grouped = await rejected(ctrl.query("?$groupBy=ticketId&$select=ticketId&$rowOrder=id"));
     expect(errorsOf(grouped)).toEqual([
-      { path: "$rowOrder", message: "$rowOrder orders rows for first()/last() only" },
+      {
+        path: "$rowOrder",
+        code: "INVALID_QUERY",
+        message: "$rowOrder orders rows for first()/last() only",
+      },
     ]);
     const plain = await rejected(ctrl.query("?$rowOrder=id"));
     expect(plain.body.statusCode).toBe(400);
@@ -185,11 +198,13 @@ describe("the field gate covers every operand", () => {
     expect(errorsOf(res)).toEqual([
       {
         path: "$select",
+        code: "INVALID_QUERY",
         message: "Expressions and first()/last() are only valid in grouped queries",
       },
       // every issue the core reports, not only the first
       {
         path: "$select",
+        code: "INVALID_QUERY",
         message: 'Expression "x" references "price" — name an aggregate alias or a $groupBy field',
       },
     ]);

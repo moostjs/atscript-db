@@ -175,6 +175,20 @@ const db = createAdapter("./data.db", {
 - Every connection that writes the table must load the extension too: the triggers that keep the FTS5 table current run the tokenizer on each insert, update and delete.
 - Search terms go through the same tokenizer as the indexed text, so a stemming tokenizer matches other forms of a word.
 
+#### Prefix indexes {#fulltext-prefix}
+
+_Since 0.1.175._ A search term with a trailing `*` (`$search: "quo*"`) is a prefix search. It works without any setting, but on a large table FTS5 scans its term list for every prefix. The `ftsPrefix` adapter option builds FTS5 prefix indexes of the lengths you list, so prefix searches of those lengths read a prebuilt index, which suits search-as-you-type:
+
+```typescript
+const db = createAdapter("./data.db", { ftsPrefix: [2, 3] });
+// or: new SqliteAdapter(driver, { ftsPrefix: [2, 3] })
+```
+
+- The lengths are in characters: `[2, 3]` serves `qu*` and `quo*` from the prefix index. A longer prefix still works, through the main index.
+- It applies to every FTS5 table of the adapter, so to every fulltext index of the space. Each length makes the index larger. To give only some tables prefix indexes, put them in a [space of their own](/sync/model-manifest#multi-database-apps-db-space).
+- Each value is an integer from 1 to 999, with at most 31 values. Order and duplicates do not matter. Anything else is rejected when the adapter is created.
+- The setting is part of the schema: adding, changing or removing it recreates the FTS5 tables on the next schema sync. Without it (or with `[]`) the FTS5 tables are built as before, and existing tables are left alone.
+
 **Integer members** are left out of the FTS5 table (SQLite stores integers in `REAL` columns, so FTS5 would index `29461277.0` and a term `0` would match every row). They are matched by exact number instead: `(rowid IN (SELECT rowid FROM <fts> WHERE <fts> MATCH ?) OR "ref_no" = ?)`, which SQLite serves from the FTS5 lookup and the member's btree. A text-only search keeps the JOIN form. An index of integer members only creates no FTS5 table. Schema sync compares an existing FTS5 table's columns with the index's text members and recreates it on drift (for example, a table built before integers were excluded). See [Text Search — Integer fields](/search/#integer-fields-exact-number-match).
 
 `$regex` on an integer column compares the number's decimal text (`CAST(CAST(col AS INTEGER) AS TEXT) LIKE …`; the inner cast is needed because the column stores a `REAL`).
@@ -294,6 +308,52 @@ await syncSchema(db, types, { dataSteps });
 
 The target file must not exist yet. There is no adapter API for it — run it on the driver you created.
 ::: Before, a failure left a `<table>__tmp_<ts>` table behind. Foreign key checks are temporarily disabled during recreation to avoid constraint errors on intermediate states. To opt a table into this behavior, annotate it with `@db.sync.method 'recreate'`. See [Schema Sync](/sync/) for details.
+
+### Read-Only Database Files {#read-only-files}
+
+An app can serve a prebuilt SQLite file next to its own database, for example a reference catalog or a knowledge pack with fulltext search that ships with each release. Open the file in a second `DbSpace` over a read-only driver. `BetterSqlite3Driver` passes `better-sqlite3`'s own options through, so `readonly` and `fileMustExist` work as they do there:
+
+```atscript
+@db.table 'pack_articles'
+@db.space 'pack'
+@db.index.fulltext.language "english"
+export interface PackArticle {
+    @meta.id
+    id: number
+
+    @db.index.fulltext 'ft_text'
+    title: string
+
+    @db.index.fulltext 'ft_text'
+    body: string
+}
+```
+
+```typescript
+import { DbSpace } from "@atscript/db";
+import { syncSchema } from "@atscript/db/sync";
+import { BetterSqlite3Driver, SqliteAdapter, createAdapter } from "@atscript/db-sqlite";
+import { modelsBySpace } from "./atscript.models";
+
+// The app's own database: synced as usual
+const db = createAdapter("./app.db");
+await syncSchema(db, modelsBySpace.default);
+
+// The prebuilt file: read-only, never synced
+const packDriver = new BetterSqlite3Driver("./pack.db", { readonly: true, fileMustExist: true });
+const pack = new DbSpace(() => new SqliteAdapter(packDriver, { ftsPrefix: [2, 3] }), {
+  onClose: () => packDriver.close(),
+});
+
+const articles = pack.getTable(PackArticle);
+await articles.search("quo*", {});
+```
+
+- Bind the file's models with `@db.space`, so the [model manifest](/sync/model-manifest#multi-database-apps-db-space) keeps them out of the app's own list and moost-db controllers find the space you register with `provideDbSpace(pack, "pack")`.
+- Never run schema sync against the read-only space. Sync writes its own bookkeeping rows and would fail.
+- Build the file with atscript-db: a build script that opens it with `createAdapter(path, options)`, runs `syncSchema` for the pack models and inserts the rows. The FTS5 tables and the triggers that keep them current then match what the adapter queries. Use the same models and the same `ftsTokenizers` / `ftsPrefix` when you build the file and when you serve it. A hand-written FTS5 schema is not supported.
+- Reads, `search()` and aggregates work as on any space. Writes fail with SQLite's `attempt to write a readonly database` error.
+- To update the data, ship a new file and reopen the space on it.
 
 ### In-Memory Databases
 

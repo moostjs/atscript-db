@@ -58,7 +58,7 @@ describe("computed view columns over HTTP", () => {
       ["$sort=total", "total"],
       ["total>5", "total"],
     ]) {
-      expect(errorsOf(await controller.query(`?${qs}`))?.[0], qs).toEqual({
+      expect(errorsOf(await controller.query(`?${qs}`))?.[0], qs).toMatchObject({
         path,
         message: `Unknown field "${path}"`,
       });
@@ -82,7 +82,10 @@ describe("computed view columns over HTTP", () => {
     for (const qs of ["$sort=total", "total>5", "$select=total"]) {
       const res = await controller.query(`?${qs}`);
       expect((res as any).body.statusCode, qs).toBe(400);
-      expect(errorsOf(res)?.[0], qs).toEqual({ path: "total", message: 'Unknown field "total"' });
+      expect(errorsOf(res)?.[0], qs).toMatchObject({
+        path: "total",
+        message: 'Unknown field "total"',
+      });
     }
   });
 

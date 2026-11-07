@@ -154,8 +154,8 @@ describe("a condition's fields pass the filter gate", () => {
     const ctrl = sales(HidingController);
     const hidden = await rejected(ctrl.query("?$groupBy=region&$select=count(*|cost>2):n"));
     const missing = await rejected(ctrl.query("?$groupBy=region&$select=count(*|nope>2):n"));
-    expect(errorsOf(hidden)).toEqual([{ path: "cost", message: 'Unknown field "cost"' }]);
-    expect(errorsOf(missing)).toEqual([{ path: "nope", message: 'Unknown field "nope"' }]);
+    expect(errorsOf(hidden)).toMatchObject([{ path: "cost", message: 'Unknown field "cost"' }]);
+    expect(errorsOf(missing)).toMatchObject([{ path: "nope", message: 'Unknown field "nope"' }]);
   });
 
   it("a write-only field is refused like in a filter", async () => {
@@ -197,7 +197,7 @@ describe("a condition's fields pass the filter gate", () => {
     const err = await rejected(
       sales(HidingController).query("?$select=countDistinct(region,cost)"),
     );
-    expect(errorsOf(err)).toEqual([{ path: "cost", message: 'Unknown field "cost"' }]);
+    expect(errorsOf(err)).toMatchObject([{ path: "cost", message: 'Unknown field "cost"' }]);
   });
 });
 
@@ -212,14 +212,14 @@ describe("the inner level of $from is gated like a standalone query, before reso
     ],
   ])("a hidden field in the inner %s is Unknown field", async (_, url) => {
     const err = await rejected(sales(HidingController).query(url));
-    expect(errorsOf(err)).toEqual([{ path: "cost", message: 'Unknown field "cost"' }]);
+    expect(errorsOf(err)).toMatchObject([{ path: "cost", message: 'Unknown field "cost"' }]);
   });
 
   it("an outer sum over a hidden inner key never answers NOT_NUMERIC; a visible text key does", async () => {
     const hidden = await rejected(
       sales(HidingController).query("?$from=($groupBy=region,cost)&$select=sum(cost):t"),
     );
-    expect(errorsOf(hidden)).toEqual([{ path: "cost", message: 'Unknown field "cost"' }]);
+    expect(errorsOf(hidden)).toMatchObject([{ path: "cost", message: 'Unknown field "cost"' }]);
     const text = await rejected(
       sales().query("?$from=($groupBy=region,status)&$select=sum(status):t"),
     );

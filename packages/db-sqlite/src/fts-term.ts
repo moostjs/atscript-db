@@ -66,6 +66,50 @@ export function validateFtsTokenizers(tokenizers: SqliteAdapterOptions["ftsToken
   }
 }
 
+/** FTS5's limits on the `prefix` option: lengths 1–999, at most 31 prefix indexes. */
+const FTS_PREFIX_MAX_LENGTH = 999;
+const FTS_PREFIX_MAX_COUNT = 31;
+
+/**
+ * Checks `ftsPrefix` (since 0.1.175) and returns its canonical FTS5 `prefix`
+ * value — the distinct lengths ascending, space-separated (`"2 3"`) — or
+ * `undefined` when unset or empty. Throws on anything but integers 1–999
+ * (at most 31 distinct).
+ */
+export function ftsPrefixSpec(prefix: SqliteAdapterOptions["ftsPrefix"]): string | undefined {
+  if (prefix === undefined) return undefined;
+  if (!Array.isArray(prefix)) {
+    throw new Error(
+      `[sqlite] ftsPrefix: ${JSON.stringify(prefix)} is not an array of prefix lengths`,
+    );
+  }
+  for (const length of prefix) {
+    if (!Number.isInteger(length) || length < 1 || length > FTS_PREFIX_MAX_LENGTH) {
+      throw new Error(
+        `[sqlite] ftsPrefix: ${JSON.stringify(length)} is not a prefix length — use integers from 1 to ${FTS_PREFIX_MAX_LENGTH}`,
+      );
+    }
+  }
+  const lengths = [...new Set(prefix)].toSorted((a, b) => a - b);
+  if (lengths.length > FTS_PREFIX_MAX_COUNT) {
+    throw new Error(
+      `[sqlite] ftsPrefix: ${lengths.length} prefix lengths — FTS5 allows at most ${FTS_PREFIX_MAX_COUNT}`,
+    );
+  }
+  return lengths.length > 0 ? lengths.join(" ") : undefined;
+}
+
+/** Whether an FTS5 table's `CREATE` statement has exactly the prefix indexes `spec` ({@link ftsPrefixSpec}) asks for. */
+export function ftsPrefixMatch(createSql: string, spec: string | undefined): boolean {
+  const live = /\bprefix\s*=\s*'([^']*)'/i.exec(createSql)?.[1];
+  const lengths = live
+    ?.split(/[\s,]+/)
+    .filter(Boolean)
+    .map(Number)
+    .toSorted((a, b) => a - b);
+  return (lengths && lengths.length > 0 ? lengths.join(" ") : undefined) === spec;
+}
+
 /**
  * The FTS5 `tokenize` option of a fulltext index: `configured` — the
  * `ftsTokenizers` entry of its `@db.index.fulltext.language` (since 0.1.175)

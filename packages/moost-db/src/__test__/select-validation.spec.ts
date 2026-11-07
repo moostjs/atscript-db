@@ -91,7 +91,7 @@ describe("$select — navigation paths", () => {
     const err = result as HttpError;
     expect(err.message).toContain("$with=assignee");
     expect(err.message).toContain("navigation path");
-    expect(errorsOf(err)).toEqual([{ path: "assignee.name", message: err.message }]);
+    expect(errorsOf(err)).toMatchObject([{ path: "assignee.name", message: err.message }]);
     expect(table.findMany).not.toHaveBeenCalled();
   });
 
@@ -165,6 +165,10 @@ describe("$select — composite /one, writeOnly, encrypted descendants, object p
     expect((result as HttpError).message).toBe(
       '"credentials.user" is inside encrypted field "credentials" — select the encrypted parent "credentials" instead.',
     );
+    expect((result as HttpError).body).toMatchObject({
+      code: "FIELD_ENCRYPTED",
+      params: { field: "credentials.user", op: "select" },
+    });
     // The encrypted column itself is selectable.
     expect(
       await new AsDbController(makeApp(), makeMockTable()).query("?$select=credentials"),

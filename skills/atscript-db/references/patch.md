@@ -27,7 +27,7 @@ The `separateFieldOps()` helper strips these from the data payload before regula
 
 ## Typing (0.1.168)
 
-`DbPatch<Row>` (update payloads; `PatchOf<T>` in db-client) types top-level ops: number field → `n | TDbFieldOp` (`{ $inc | $dec | $mul: n }`), array field → `A | TDbArrayOps<E>` (`$replace/$insert/$upsert: E[]`, `$update/$remove: Partial<E>[]` or the values for primitive arrays), payload → `$cas?`. Op on another type = type error. `DbInsert<Row>` (inserts) has no ops and no `$cas`. Types cannot see `@db.json` (ops there are a runtime 400). Nested merge-strategy ops are untyped (cast). No `Record<string, unknown>` index signature → interface values fit; untyped table → `object`. `DbInsert` is all-optional: it does not catch missing required or server-set fields (validation does).
+`DbPatch<Row>` (update payloads; `PatchOf<T>` in db-client) types top-level ops: number field → `n | TDbFieldOp` (`{ $inc | $dec | $mul: n }`), array field → `A | TDbArrayOps<E>` (`$replace/$insert/$upsert: E[]`, `$update/$remove: Partial<E>[]` or the values for primitive arrays), payload → `$cas?`. Op on another type = type error. `DbInsert<Row>` (inserts) has no ops and no `$cas`. Types cannot see `@db.json` (ops there are a runtime 400, code `ARRAY_OP_ON_JSON` since 0.1.175 — client preflight too; send the whole array). Nested merge-strategy ops are untyped (cast). No `Record<string, unknown>` index signature → interface values fit; untyped table → `object`. `DbInsert` is all-optional: it does not catch missing required or server-set fields (validation does).
 
 ## Array ops
 

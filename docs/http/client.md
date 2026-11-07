@@ -863,7 +863,7 @@ try {
 
 With a translator on the server, `message`s come in the requested [`locale`](./i18n#client-locale), and preflight errors are translated with the served templates; `code` and `params` stay the same in every language.
 
-A `DbError` reaches the client with its code (since 0.1.165): `e.body.code` is `CONFLICT`, `FK_VIOLATION`, …, and each entry of `e.errors` carries a `code` (`UNIQUE`, `FK_MISSING`, `FK_RESTRICT`) and `params` to build a translated message from — see [Constraint violations](/api/crud#constraint-errors).
+A `DbError` reaches the client with its code (since 0.1.165): `e.body.code` is `CONFLICT`, `FK_VIOLATION`, …, and each entry of `e.errors` carries a `code` (`UNIQUE`, `FK_MISSING`, `FK_RESTRICT`) and `params` to build a translated message from — see [Constraint violations](/api/crud#constraint-errors). moost-db's own refusals are coded the same way (since 0.1.175): `e.body.code` / `e.body.params` and each entry's `code` / `params` — `UNKNOWN_FIELD`, `FIELD_NOT_PERMITTED`, `INVALID_QUERY`, `VERSION_MISMATCH`, … (see [Request error codes](/http/i18n#request-error-codes)). Branch on `code`, never on the message.
 
 A handler may answer an error body with fields of its own (`quota`, `tier`, …). `ServerError` admits extra fields, and `ClientError<B>` types them (since 0.1.165):
 

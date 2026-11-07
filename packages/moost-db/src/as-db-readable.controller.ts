@@ -129,7 +129,13 @@ import { getAtscriptDbMate } from "./mate";
 import { READABLE_DEF, resolveBoundReadable } from "./decorators";
 import { FieldCapabilityIndex, writeOnlyVerdict, type TGateOp } from "./meta/field-capabilities";
 import { bits, freezeShared, identityId, metaVariant } from "./meta/meta-cache";
-import { insightError, notFoundError, unknownInsight, unknownRelationError } from "./http-errors";
+import {
+  controlsRefusal,
+  insightError,
+  notFoundError,
+  unknownInsight,
+  unknownRelationError,
+} from "./http-errors";
 import {
   RelationPredicateGate,
   childrenOf,
@@ -141,7 +147,15 @@ import {
   snapshotClientWith,
   type TClientWithSnapshot,
 } from "./relation-predicates";
-import { badRequest, NESTED_NOT_SUPPORTED_MESSAGE, validatorErrorToHttp } from "./http-errors";
+import {
+  badRequest,
+  errorEnvelope,
+  invalidQuery,
+  NESTED_NOT_SUPPORTED_MESSAGE,
+  unknownFieldError,
+  validatorErrorToHttp,
+  verdictError,
+} from "./http-errors";
 import { dbErrorToHttp } from "./validation-interceptor";
 import { controllerOf } from "./actions/controller-access";
 
@@ -325,8 +339,7 @@ function nestedNotSupported(): HttpError {
 
 /** The 400 of a filter / sort on a `@db.writeOnly` field. */
 function writeOnlyError(path: string, op: "filter" | "sort"): HttpError {
-  const verdict = writeOnlyVerdict(path, op);
-  return badRequest(verdict.path, verdict.message);
+  return verdictError(writeOnlyVerdict(path, op));
 }
 
 /** Read controls with every projection level sealed — see `_sealControls`. */
@@ -879,7 +892,7 @@ export class AsDbReadableController<
       for (const ref of collectQueryPaths({ filter: where as FilterExpr }).filter) {
         if (!keys.has(ref.path)) continue;
         const verdict = capabilities.check(ref.path, "filter", isVisible, ref.predicate);
-        if (verdict) return badRequest(verdict.path, verdict.message);
+        if (verdict) return verdictError(verdict);
       }
     }
     const ordered = [
@@ -891,7 +904,7 @@ export class AsDbReadableController<
     for (const key of ordered) {
       if (!keys.has(key)) continue;
       const verdict = capabilities.check(key, "sort", isVisible);
-      if (verdict) return badRequest(verdict.path, verdict.message);
+      if (verdict) return verdictError(verdict);
     }
     return undefined;
   }
@@ -940,7 +953,7 @@ export class AsDbReadableController<
     const refs =
       shared?.parsed === parsed ? shared.refs : collectQueryPaths(parsed, computedMode(parsed));
     if (refs.unsupportedOperator !== undefined) {
-      return badRequest(
+      return invalidQuery(
         refs.unsupportedOperator,
         unsupportedOperatorMessage(refs.unsupportedOperator),
       );
@@ -965,7 +978,7 @@ export class AsDbReadableController<
         "",
         ref.nullTest,
       );
-      if (verdict) return badRequest(verdict.path, verdict.message);
+      if (verdict) return verdictError(verdict);
     }
     // `$with` sub-filters: the CLIENT's tree as recorded before
     // `validateControls` — row scopes a server hook conjoined there are not
@@ -983,13 +996,13 @@ export class AsDbReadableController<
       const gateOp: TGateOp = op === "select" && refs.aggregateMode ? "groupedSelect" : op;
       for (const path of refs[op]) {
         const verdict = capabilities.check(path, gateOp, isVisible);
-        if (verdict) return badRequest(verdict.path, verdict.message);
+        if (verdict) return verdictError(verdict);
       }
     }
     // `$having` keys exist (checked above); they must also be aliases or
     // `$groupBy` fields — the core rule, answered here with the same wording.
     const having = checkHavingKeys(refs);
-    if (having) return badRequest(having.path, having.message);
+    if (having) return invalidQuery(having.path, having.message);
     return (
       this.checkGates(parsed) ??
       this._checkIndexGate((parsed.controls ?? {}) as Record<string, unknown>)
@@ -1119,7 +1132,7 @@ export class AsDbReadableController<
     // (since 0.1.155 one 400 naming the reason; before, the controls DTO rejected both).
     if (type === "pages" && (controls?.$groupBy !== undefined || computedMode(parsed))) {
       // (`$from` counts: computedMode)
-      return badRequest(
+      return invalidQuery(
         controls?.$groupBy === undefined ? "$select" : "$groupBy",
         "Aggregate queries are only valid on /query",
       );
@@ -1131,7 +1144,7 @@ export class AsDbReadableController<
     }
     const controlsError = this.validateControls(controls, type);
     if (controlsError) {
-      return new HttpError(400, controlsError);
+      return controlsRefusal(controlsError);
     }
     // The inner level of a two-level aggregate is validated on its own, so a
     // per-control policy (an override of `validateControls`) sees its
@@ -1142,7 +1155,7 @@ export class AsDbReadableController<
         "nested",
       );
       if (nestedError) {
-        return new HttpError(400, nestedError);
+        return controlsRefusal(nestedError, "$from");
       }
     }
     const withRelations = controls.$with as Array<{ name: string }> | undefined;
@@ -1490,7 +1503,7 @@ export class AsDbReadableController<
         (e) => e.type === "vector" && (vectorName ? e.name === vectorName : e.isDefault),
       );
       if (entry && this._indexVisible(entry)) return undefined;
-      return badRequest("$vector", vectorIndexNotFoundMessage(vectorName || undefined));
+      return invalidQuery("$vector", vectorIndexNotFoundMessage(vectorName || undefined));
     }
     if (!this.readable.isSearchable()) return undefined; // the searchable-column fallback
     if (name) {
@@ -1499,7 +1512,7 @@ export class AsDbReadableController<
       const entry =
         text.find((e) => e.name === name) ?? text.find((e) => e.aliases?.includes(name) === true);
       if (!entry || !this._indexVisible(entry)) {
-        return badRequest("$index", searchIndexNotFoundMessage(name));
+        return invalidQuery("$index", searchIndexNotFoundMessage(name));
       }
       return undefined;
     }
@@ -1508,7 +1521,7 @@ export class AsDbReadableController<
     // over it would be a value oracle). `/meta` hides it by the same rule.
     const def = this.indexFieldPaths().find((e) => e.type === "text" && e.isDefault);
     if (def && !this._indexVisible(def)) {
-      return badRequest("$search", searchIndexNotFoundMessage());
+      return invalidQuery("$search", searchIndexNotFoundMessage());
     }
     return undefined;
   }
@@ -1931,7 +1944,7 @@ export class AsDbReadableController<
     const included = new Set(shape.included);
     const excluded = new Set(shape.excluded);
     if (included.size > 0 && excluded.size > 0) {
-      return new HttpError(400, "Mixed inclusion/exclusion $select maps are not supported");
+      return invalidQuery("$select", "Mixed inclusion/exclusion $select maps are not supported");
     }
 
     if (excluded.size === 0) {
@@ -2016,7 +2029,7 @@ export class AsDbReadableController<
     const included = new Set(shape.included);
     const excluded = new Set(shape.excluded);
     if (included.size > 0 && excluded.size > 0) {
-      return new HttpError(400, "Mixed inclusion/exclusion $select maps are not supported");
+      return invalidQuery("$select", "Mixed inclusion/exclusion $select maps are not supported");
     }
 
     if (excluded.size === 0) {
@@ -2458,7 +2471,7 @@ export class AsDbReadableController<
       let sealed: Set<string> | undefined;
       const readableLeaf = (leaf: string): boolean => !(sealed ??= sealedSet()).has(leaf);
       const controlsError = this.validateControls(controls, "query");
-      if (controlsError) throw new HttpError(400, controlsError);
+      if (controlsError) throw controlsRefusal(controlsError);
       const gateError = this.checkCapabilities({ filter: parsed.filter, controls });
       if (gateError) throw gateError;
       if (exclude.length > 0) {
@@ -2484,19 +2497,21 @@ export class AsDbReadableController<
         // A declared decoration is display-only (computed by a hook, not a
         // column) and a navigation path is no column here: neither can be read.
         if (this.capabilities.decorationCap(path) || selfOrAncestor(path, nav) !== undefined) {
-          throw badRequest(path, `Unknown field "${path}"`);
+          throw unknownFieldError(path);
         }
         // Visibility first: a hidden write-only field is just unknown.
         const verdict = this.capabilities.check(path, "select", this.fieldVisibility.isVisible);
-        if (verdict) throw badRequest(verdict.path, verdict.message);
+        if (verdict) throw verdictError(verdict);
         if (this._writeOnlySet.has(path)) {
-          throw badRequest(path, `Field "${path}" is @db.writeOnly`);
+          throw badRequest(path, `Field "${path}" is @db.writeOnly`, "FIELD_WRITE_ONLY", {
+            params: { field: path, op: "select" },
+          });
         }
         // An object parent stands for its leaves: it needs one a caller may read.
         const prefix = `${path}.`;
         const leaves = this._leavesOf(this.readable).filter((leaf) => leaf.startsWith(prefix));
         if (leaves.length > 0 && !leaves.some((leaf) => readableLeaf(leaf))) {
-          throw badRequest(path, `Unknown field "${path}"`);
+          throw unknownFieldError(path);
         }
       }
       // Ordering fields the server picked (no identity): sortable like `$sort`.
@@ -3492,7 +3507,7 @@ export class AsDbReadableController<
       if (allPresent) return idObj;
     }
 
-    return new HttpError(400, "Query params do not match any primary key or unique index");
+    return invalidQuery("", "Query params do not match any primary key or unique index");
   }
 
   // ── REST Endpoints (read-only) ──────────────────────────────────────────
@@ -3520,13 +3535,13 @@ export class AsDbReadableController<
       return nestedNotSupported();
     }
     if (aggregate && (controls.$with as unknown[])?.length) {
-      return new HttpError(400, "Cannot combine $with and $groupBy in the same query");
+      return invalidQuery("$with", "Cannot combine $with and $groupBy in the same query");
     }
     // `$vector` consumes `$search` as an embedding and no adapter can group by
     // similarity. Rejecting beats the silent alternative, where the term falls
     // through to `$search` and is matched as ordinary text instead.
     if (aggregate && controls.$vector !== undefined) {
-      return new HttpError(400, "Cannot combine $vector and $groupBy in the same query");
+      return invalidQuery("$vector", "Cannot combine $vector and $groupBy in the same query");
     }
 
     // Aggregate and regular paths share validation: subclass `validateControls`
@@ -3556,7 +3571,12 @@ export class AsDbReadableController<
         ...refs.sort,
       ].find((path) => this._writeOnlySet.has(path) && this.fieldVisibility.isVisible(path));
       if (sealed) {
-        return new HttpError(400, `Field "${sealed}" is @db.writeOnly and cannot be aggregated`);
+        return badRequest(
+          sealed,
+          `Field "${sealed}" is @db.writeOnly and cannot be aggregated`,
+          "FIELD_WRITE_ONLY",
+          { params: { field: sealed, op: "aggregate" } },
+        );
       }
     }
 
@@ -3775,7 +3795,7 @@ export class AsDbReadableController<
       if (controls[key] !== undefined) {
         const num = Number(controls[key]);
         if (!Number.isFinite(num) || num < 0) {
-          return new HttpError(400, `${key} must be a non-negative number of meters`);
+          return invalidQuery(key, `${key} must be a non-negative number of meters`);
         }
         controls[key] = num;
       }
@@ -3872,7 +3892,7 @@ export class AsDbReadableController<
       lat = Number(raw[1]);
     }
     if (lng === undefined || lat === undefined || !Number.isFinite(lng) || !Number.isFinite(lat)) {
-      return new HttpError(400, "$center is required: $center=lng,lat (GeoJSON order)");
+      return invalidQuery("$center", "$center is required: $center=lng,lat (GeoJSON order)");
     }
     return [lng, lat];
   }
@@ -3886,7 +3906,7 @@ export class AsDbReadableController<
   async getOne(@Param("id") id: string, @Url() url: string): Promise<DataType | HttpError> {
     const { parsed, controls, hasNonControl } = await this.parseRequest("one", url);
     if (hasNonControl) {
-      return new HttpError(400, 'Filtering is not allowed for "one" endpoint');
+      return invalidQuery("", 'Filtering is not allowed for "one" endpoint');
     }
     return this._readOne(id, parsed, controls);
   }
@@ -4151,7 +4171,20 @@ export class AsDbReadableController<
       [] as readonly string[],
     );
     if (!allowed.includes(name)) {
-      throw new HttpError(403, `Action "${name}" is not allowed`);
+      throw errorEnvelope(
+        403,
+        `Action "${name}" is not allowed`,
+        [
+          {
+            path: "",
+            message: `Action "${name}" is not allowed`,
+            code: "ACTION_FORBIDDEN",
+            params: { action: name },
+          },
+        ],
+        "ACTION_FORBIDDEN",
+        { action: name },
+      );
     }
 
     const viewIds = this.readable.preferredId;

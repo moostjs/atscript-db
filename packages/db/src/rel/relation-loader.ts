@@ -1,6 +1,7 @@
 import type { FilterExpr, Uniquery, WithRelation } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
+import { unknownWithRelation } from "../db-error";
 import type { TGenericLogger } from "../logger";
 import type { TDbForeignKey, TDbRelation, TTableResolver } from "../types";
 import { storedValuesFilter } from "../query/normalize-filter";
@@ -94,9 +95,8 @@ export async function loadRelationsImpl(
 
     const relation = host._meta.relations.get(relName);
     if (!relation) {
-      throw new Error(
-        `Unknown relation "${relName}" in $with. Available relations: ${[...host._meta.relations.keys()].join(", ") || "(none)"}`,
-      );
+      // `UNKNOWN_RELATION` like moost-db's gate (since 0.1.175; a plain `Error` before).
+      throw unknownWithRelation(relName);
     }
 
     const targetType = relation.targetType();

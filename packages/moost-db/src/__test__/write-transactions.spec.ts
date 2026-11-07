@@ -257,7 +257,11 @@ describe("CAS reconciliation (shared reconcileCas)", () => {
       400,
     );
     expect(errorsOf(single)).toEqual([
-      { path: "$cas", message: 'Ambiguous version: "version" and "$cas.version" differ' },
+      {
+        path: "$cas",
+        code: "INVALID_QUERY",
+        message: 'Ambiguous version: "version" and "$cas.version" differ',
+      },
     ]);
     const bulk = await expectHttpError(
       controller.replace([
@@ -282,6 +286,7 @@ describe("CAS reconciliation (shared reconcileCas)", () => {
     expect(errorsOf(err)).toEqual([
       {
         path: "$cas.v",
+        code: "INVALID_QUERY",
         message: '$cas operator: key "v" does not match version column "version"',
       },
     ]);

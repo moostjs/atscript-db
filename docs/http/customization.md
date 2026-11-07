@@ -654,6 +654,50 @@ Overriding a guard is the only switch: there is no separate flag, and a no-op ov
 - **A guard that writes the same row** (e.g. a [versioned touch](/api/versioning#versioned-touch) as a fence) bumps the version twice — once for the touch, once for the main write.
 - Guard rows are validated twice (once before the guard, once after it): that cost exists only when a guard is overridden.
 
+#### Recipe — a unique index over a custom-normalised value {#normalized-unique}
+
+`@normalize` folds case and whitespace. When two values count as the same under a rule of your own (letters folded together, punctuation ignored, uniqueness per catalog), store the normalised value in a column of its own, put the unique index on it, and fill it in `guardWrite`:
+
+```atscript
+@db.table 'items'
+export interface Item {
+    @meta.id
+    id: number
+
+    name: string
+    catalog: string
+
+    @db.index.unique 'item_identity'
+    identity?: string
+}
+```
+
+```typescript
+function identityOf(row: { name: string; catalog: string }): string {
+  const name = row.name.toLowerCase().replaceAll("ё", "е").replace(/[^\p{L}\p{N}]+/gu, "");
+  return `${row.catalog}:${name}`;
+}
+
+protected override async guardWrite(ctx: TDbWriteGuardContext<Item>) {
+  for (let i = 0; i < ctx.rows.length; i++) {
+    const row = ctx.rows[i];
+    let full = row;
+    if (ctx.action.startsWith("update")) {
+      // A patch carries only the changed fields: merge it onto the stored row first.
+      const current = await ctx.current(i);
+      if (!current) continue; // no such row: the update matches nothing, as without the guard
+      full = { ...current, ...row };
+    }
+    row.identity = identityOf(full);
+  }
+}
+```
+
+- **A twin is a `409`.** The database enforces the index, so a second row with the same identity fails with `CONFLICT` (entry code `UNIQUE`, `params.index: "item_identity"`), concurrent writes included.
+- **The value a client sends is overwritten**: the guard sets it on every insert, replace and patch of an existing row. `ctx.current(i)` is `null` for a row that does not exist: skip it, or `identityOf` fails on the missing fields and the request answers 500 instead of matching nothing.
+- **When the normaliser changes**, the stored identities are stale. Recompute them in a [data step](/sync/programmatic#data-steps), or with [`rewriteRowsStep(Item, { field: "identity", id: "item-identity-v2", map: (_, row) => identityOf(row) })`](/sync/programmatic#rewrite-rows) — change its `id` with each normaliser version, since the step cannot see your function change. Rows that become twins under the new rule make the step fail on the index; merge them first, in a step with `phase: "beforeConstraints"` when the index itself is new.
+- **Direct table writes skip the controller.** `table.insertOne()` in a script or another service does not run `guardWrite`; pass the same function as the [`guard` write option](/api/crud#write-guards) there, or the column is left as the caller wrote it.
+
 ### checkWrite {#checkwrite}
 
 Since 0.1.143. A row-level **WITH CHECK**: verify the rows a write produced, with the database's own filter semantics. The override becomes the table's [`check` write option](/api/crud#write-check) — same switch as `guardWrite` — and runs once per insert / replace / update call (bulk forms included), inside the table's transaction, **after** the main write and every nested-relation phase. Deletes never call it.
@@ -679,19 +723,62 @@ protected override async checkWrite(ctx: TDbWriteCheckContext) {
 - **Don't** rely on the rollback when `ctx.transactional` is `false` (standalone MongoDB, the memory adapter): validate before the write in [`guardWrite`](#guardwrite) there.
 - Nested writes a deep payload performs on related tables do not re-run it.
 
-**Recipe — a per-tenant row cap.** There is no built-in row-cap option; enforce "at most N rows per tenant" in `checkWrite`, after the insert, inside its transaction. Counting after the write (rather than before it in `guardWrite`) counts what was actually stored — rows skipped by `?$onConflict=ignore` are not counted:
+#### Recipe — at most N rows per parent or scope {#row-cap}
+
+There is no built-in row-cap option. Count the rows in the write's own transaction, but count in a way concurrent writes cannot slip past.
+
+**Counting alone is not enough.** A count after the write (in `checkWrite`) or before it (in `guardWrite`) sees the rows other transactions have committed, plus its own. Two inserts that run at the same time therefore each count only their own new row, and both pass a cap they break together. This happens under the default isolation of PostgreSQL (READ COMMITTED), MySQL (REPEATABLE READ) and MongoDB. SQLite runs one writer at a time, so a plain count holds there.
+
+**Lock the parent, then count.** In `guardWrite`, take a row lock on the parent the cap belongs to (the household, tenant or project row) with a [locking read](/api/transactions#locking-reads), then count. A second insert for the same parent waits at the lock until the first commits, and then counts its row:
 
 ```typescript
-protected override async checkWrite(ctx: TDbWriteCheckContext) {
+protected override async guardWrite(ctx: TDbWriteGuardContext<Item>) {
   if (ctx.action !== "insert" && ctx.action !== "insertMany") return;
-  const tenant = currentTenant();
-  if ((await ctx.count({ tenantId: tenant.id })) > tenant.maxRows) {
-    throw new HttpError(409, { message: "Row limit reached", code: "row_cap", limit: tenant.maxRows });
+  for (const householdId of new Set(ctx.rows.map((row) => row.householdId))) {
+    // Serialises every insert for this household until the transaction ends.
+    await householdsTable.findById(householdId, { lock: "update" });
+    const stored = await this.table.count({ filter: { householdId }, controls: {} });
+    const adding = ctx.rows.filter((row) => row.householdId === householdId).length;
+    if (stored + adding > MAX_ITEMS) {
+      throw new HttpError(409, { message: "Item limit reached", code: "ITEM_LIMIT", limit: MAX_ITEMS });
+    }
   }
 }
 ```
 
-The cap is only as strong as the transaction: on adapters where `ctx.transactional` is `false` concurrent inserts can overshoot it, and two concurrent transactions may each see the count before the other commits — under PostgreSQL / MySQL default isolation, lock a per-tenant row first (a [locking read](/api/transactions#locking-reads)) when the cap must be exact.
+**The lock must be the first read of the transaction.** On MySQL (REPEATABLE READ) the transaction's snapshot is fixed by its first plain read, and every later plain `count` reads from that snapshot, so it misses rows that other transactions committed while this one waited at the lock. A locking read is not a plain read: it takes the latest committed state and does not fix the snapshot, so lock first and count after. PostgreSQL under READ COMMITTED takes a new snapshot for every statement, so the order matters less there, but keep it: under REPEATABLE READ or SERIALIZABLE PostgreSQL has the same gap as MySQL. Do not read a row of the table (`ctx.current(i)`, a `findById` without `lock`) before the parent is locked.
+
+**A patch that moves a row to another parent** is the case that tempts a read first. It needs no read before the lock: the new parent is in the patch itself (`row.householdId`), so lock it, then read the row's current parent, then count:
+
+```typescript
+if (ctx.action === "update" || ctx.action === "updateMany") {
+  for (const [i, row] of ctx.rows.entries()) {
+    if (row.householdId === undefined) continue; // the patch does not move the row
+    await householdsTable.findById(row.householdId, { lock: "update" }); // lock first
+    const current = await ctx.current(i); // the pre-image, read after the lock
+    if (current?.householdId === row.householdId) continue; // it stays where it is
+    const stored = await this.table.count({
+      filter: { householdId: row.householdId },
+      controls: {},
+    });
+    if (stored + 1 > MAX_ITEMS) {
+      throw new HttpError(409, {
+        message: "Item limit reached",
+        code: "ITEM_LIMIT",
+        limit: MAX_ITEMS,
+      });
+    }
+  }
+}
+```
+
+(Several rows moved to one parent in a single `updateMany` need their moves counted together, as `adding` is above.) Rows skipped by `?$onConflict=ignore` are still counted in `adding`, so the guard may refuse a batch whose duplicates would have been dropped.
+
+**Isolation assumptions.** The recipe is exact on PostgreSQL at its default READ COMMITTED, and on MySQL at its default REPEATABLE READ when the lock is taken first. If you raise PostgreSQL to REPEATABLE READ or SERIALIZABLE, retry the transaction on `SERIALIZATION_FAILURE` (see the serializable option below); on MySQL do not read before the lock. SQLite needs no lock.
+
+**MongoDB** has no locking reads (`findById(…, { lock })` throws `LOCK_NOT_SUPPORTED`). Write to the parent instead, e.g. bump a counter or a `touchedAt` field on it in the same transaction. Two transactions that write the same document conflict, and one of them is retried or fails, so the counts cannot both pass. Without a replica set MongoDB has no transactions, and the cap cannot be exact.
+
+**Or use serializable isolation** and retry: run the count and the insert in [`withTransaction(fn, { isolation: "serializable" })`](/api/transactions#isolation) and repeat the whole transaction when it fails with a retryable error (`SERIALIZATION_FAILURE`). This needs no lock, but every conflicting insert costs a retry.
 
 ### withTransaction {#withtransaction}
 

@@ -109,7 +109,7 @@ export function viewComputeExpr(
     const source = viewSourceExpr(dialect, mapping);
     return grouped && mapping.json ? `MIN(${source})` : source;
   };
-  const sql = renderArith(dialect, c.expr!, leaf, fail);
+  const sql = renderArith(dialect, c.expr!, leaf, fail, c.viewPath);
   cache.set(c.viewPath, sql);
   return sql;
 }

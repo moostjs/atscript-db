@@ -114,8 +114,10 @@ describe("hasField hides a field from every gated position", () => {
     const { controller } = bind();
     const hidden = await controller.pages("?password=abc");
     const missing = await controller.pages("?nope=abc");
-    expect(errorsOf(hidden)).toEqual([{ path: "password", message: 'Unknown field "password"' }]);
-    expect(errorsOf(missing)).toEqual([{ path: "nope", message: 'Unknown field "nope"' }]);
+    expect(errorsOf(hidden)).toMatchObject([
+      { path: "password", message: 'Unknown field "password"' },
+    ]);
+    expect(errorsOf(missing)).toMatchObject([{ path: "nope", message: 'Unknown field "nope"' }]);
     await unknownField(controller.getOne("1", "?$select=password"), "password", "one/:id");
     // `/geo` validates its controls DTO since 0.1.143 (`$sort` is not a geo control).
     await unknownField(controller.geo("?$center=0,0&$select=password"), "password", "geo");
@@ -210,7 +212,7 @@ describe("the nested-object hint lists visible leaves only", () => {
   ])("/query?%s never names a hidden sibling", async (qs) => {
     const { controller } = bind(HiddenCode, HidingController, [ROW]);
     const res = await controller.query(`?${qs}`);
-    expect(errorsOf(res)).toEqual([
+    expect(errorsOf(res)).toMatchObject([
       {
         path: "contact",
         message:
@@ -227,7 +229,9 @@ describe("the nested-object hint lists visible leaves only", () => {
       const hidden = await controller.query(`?${template.replaceAll("%s", "contact")}`);
       const missing = await controller.query(`?${template.replaceAll("%s", "nope")}`);
       expect(rendered(hidden, "contact")).toBe(rendered(missing, "nope"));
-      expect(errorsOf(hidden)).toEqual([{ path: "contact", message: 'Unknown field "contact"' }]);
+      expect(errorsOf(hidden)).toMatchObject([
+        { path: "contact", message: 'Unknown field "contact"' },
+      ]);
     },
   );
 

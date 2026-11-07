@@ -112,6 +112,8 @@ import type { TSqliteDriver } from "./types";
 import { registerBucketFunction } from "./calendar-bucket";
 import {
   ftsLanguageWarning,
+  ftsPrefixMatch,
+  ftsPrefixSpec,
   ftsTokenizer,
   ftsTokenizerMatch,
   quoteFtsTerm,
@@ -223,6 +225,8 @@ export class SqliteAdapter extends BaseDbAdapter {
   private readonly _txOptions: SqliteAdapterOptions;
   /** `ftsTokenizers` — the FTS5 tokenizer per fulltext language (since 0.1.175). */
   private readonly _ftsTokenizers: SqliteAdapterOptions["ftsTokenizers"];
+  /** `ftsPrefix` as the FTS5 `prefix` value (`"2 3"`), `undefined` when unset (since 0.1.175). */
+  private readonly _ftsPrefix: string | undefined;
   /** Whether the driver has the calendar-bucket UDF — fixed at construction, when it is registered. */
   private readonly _hasBucketFn: boolean;
 
@@ -232,10 +236,11 @@ export class SqliteAdapter extends BaseDbAdapter {
   ) {
     super();
     this._gate = getSqliteTxGate(driver);
-    const { viewJoinPruning, ftsTokenizers, ...txOptions } = options ?? {};
+    const { viewJoinPruning, ftsTokenizers, ftsPrefix, ...txOptions } = options ?? {};
     validateFtsTokenizers(ftsTokenizers);
     this._txOptions = txOptions;
     this._ftsTokenizers = ftsTokenizers;
+    this._ftsPrefix = ftsPrefixSpec(ftsPrefix);
     this.viewJoinPruning = viewJoinPruning !== false;
     this.driver.exec("PRAGMA foreign_keys = ON");
     // Eager and once per driver: tables sharing a driver may be created and
@@ -1631,8 +1636,20 @@ export class SqliteAdapter extends BaseDbAdapter {
     return { fromWhere, params };
   }
 
-  /** The `ftsTokenizers` entry of the index's language — part of the schema hash (since 0.1.175). */
+  /**
+   * The FTS5 settings adapter options give the index — its language's
+   * `ftsTokenizers` entry and `ftsPrefix` (`"trigram; prefix=2 3"`) — part of
+   * the schema hash (since 0.1.175). `undefined` when neither is set.
+   */
   override fulltextEngineConfig(index: TDbIndex): string | undefined {
+    const tokenizer = this._configuredFtsTokenizer(index);
+    if (this._ftsPrefix === undefined) return tokenizer;
+    const prefix = `prefix=${this._ftsPrefix}`;
+    return tokenizer === undefined ? prefix : `${tokenizer}; ${prefix}`;
+  }
+
+  /** The `ftsTokenizers` entry of the index's language (since 0.1.175). */
+  private _configuredFtsTokenizer(index: TDbIndex): string | undefined {
     return index.language === undefined ? undefined : this._ftsTokenizers?.[index.language];
   }
 
@@ -1648,7 +1665,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     const desiredFtsTables = new Set(ftIndexes.map((idx) => this._ftsTableName(idx.name)));
     if (!dryRun) {
       for (const index of ftIndexes) {
-        const warning = ftsLanguageWarning(index, this.fulltextEngineConfig(index));
+        const warning = ftsLanguageWarning(index, this._configuredFtsTokenizer(index));
         if (warning) this.logger.warn(warning);
       }
     }
@@ -1674,10 +1691,12 @@ export class SqliteAdapter extends BaseDbAdapter {
         });
       } else if (
         !this._ftsColumnsMatch(ftsTable, index) ||
-        !ftsTokenizerMatch(liveSql, index, this.fulltextEngineConfig(index))
+        !ftsTokenizerMatch(liveSql, index, this._configuredFtsTokenizer(index)) ||
+        !ftsPrefixMatch(liveSql, this._ftsPrefix)
       ) {
         // Column drift (e.g. a table built when integer members were indexed as
-        // text) or a changed tokenizer (`@db.index.fulltext.language`, `ftsTokenizers`)
+        // text), a changed tokenizer (`@db.index.fulltext.language`, `ftsTokenizers`)
+        // or changed prefix indexes (`ftsPrefix`)
         await apply({ name: ftsTable, action: "rebuild" }, ftsTable, () => {
           // before the drop: a missing tokenizer must not leave the index gone
           this._probeFtsTokenizer(index);
@@ -1696,7 +1715,7 @@ export class SqliteAdapter extends BaseDbAdapter {
    * rebuild fails before it drops the live table.
    */
   private _probeFtsTokenizer(index: TDbIndex): void {
-    const tokenizer = this.fulltextEngineConfig(index);
+    const tokenizer = this._configuredFtsTokenizer(index);
     if (!tokenizer) return;
     const probe = `temp."__atscript_fts_probe"`;
     try {
@@ -1731,9 +1750,10 @@ export class SqliteAdapter extends BaseDbAdapter {
     const fieldList = fieldNames.join(", ");
 
     // Create external-content FTS5 virtual table
-    const tokenizer = ftsTokenizer(index, this.fulltextEngineConfig(index));
+    const tokenizer = ftsTokenizer(index, this._configuredFtsTokenizer(index));
     const tokenize = tokenizer ? `, tokenize='${tokenizer}'` : "";
-    const createSql = `CREATE VIRTUAL TABLE IF NOT EXISTS "${esc(ftsTable)}" USING fts5(${fieldList}, content='${tableName.replace(/'/g, "''")}', content_rowid='rowid'${tokenize})`;
+    const prefix = this._ftsPrefix ? `, prefix='${this._ftsPrefix}'` : "";
+    const createSql = `CREATE VIRTUAL TABLE IF NOT EXISTS "${esc(ftsTable)}" USING fts5(${fieldList}, content='${tableName.replace(/'/g, "''")}', content_rowid='rowid'${tokenize}${prefix})`;
     this._log(createSql);
     this.driver.exec(createSql);
 

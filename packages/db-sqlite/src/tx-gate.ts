@@ -27,7 +27,7 @@ export interface SqliteTxWaitOptions {
 
 /**
  * Options accepted by `SqliteAdapter` / `createAdapter`: the transaction
- * gate's, plus `viewJoinPruning` and `ftsTokenizers`.
+ * gate's, plus `viewJoinPruning`, `ftsTokenizers` and `ftsPrefix`.
  */
 export type SqliteAdapterOptions = Pick<
   SqliteTxWaitOptions,
@@ -51,6 +51,16 @@ export type SqliteAdapterOptions = Pick<
    * @since 0.1.175
    */
   ftsTokenizers?: Partial<Record<TDbFulltextLanguage, string>>;
+  /**
+   * FTS5 prefix indexes: the prefix lengths, in characters, every fulltext
+   * index of this adapter is built with (FTS5 `prefix` option), e.g. `[2, 3]`
+   * — prefix searches (`$search: "quo*"`) of those lengths read a prebuilt
+   * index instead of scanning the term list. Integers 1–999, at most 31 of
+   * them; order and duplicates do not matter. Changing it rebuilds the FTS5
+   * tables on the next schema sync. Unset or `[]`: no prefix indexes.
+   * @since 0.1.175
+   */
+  ftsPrefix?: readonly number[];
 };
 
 const DEFAULT_WARN_MS = 5000;

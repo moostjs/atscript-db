@@ -28,9 +28,11 @@ import {
 import { parseUrl } from "@uniqu/url";
 
 import { defaultCacheControl, readHttpResponse, type THttpResponse } from "./http-response";
-import { badRequest, UseValidationErrorTransform } from "./validation-interceptor";
+import { UseValidationErrorTransform } from "./validation-interceptor";
 import {
+  controlsRefusal,
   insightError,
+  invalidQuery,
   NESTED_NOT_SUPPORTED_MESSAGE,
   notFoundError,
   unknownInsight,
@@ -597,7 +599,7 @@ export abstract class AsReadableController<
       type,
     );
     if (controlsError) {
-      return new HttpError(400, controlsError);
+      return controlsRefusal(controlsError);
     }
     if (parsed.insights) {
       const insights = parsed.insights as Map<string, unknown>;
@@ -643,7 +645,7 @@ export abstract class AsReadableController<
       parsed = parseUrl(queryString);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      throw badRequest("", `Malformed query string: ${detail}`);
+      throw invalidQuery("", `Malformed query string: ${detail}`);
     }
     return nestParsedWith(parsed);
   }

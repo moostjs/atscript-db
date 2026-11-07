@@ -95,6 +95,25 @@ describe("renderArith", () => {
     }
   });
 
+  it("an operator with a third argument is INVALID_QUERY, not a dropped term", () => {
+    const node = { op: "+", args: [{ field: "a" }, { field: "b" }, { field: "c" }] } as never;
+    try {
+      renderArith(sqlite, node, (f) => `"${f}"`);
+      throw new Error("expected a throw");
+    } catch (e) {
+      expect((e as DbError).code).toBe("INVALID_QUERY");
+      expect((e as DbError).errors[0].message).toContain("takes 2 arguments, got 3");
+      expect((e as DbError).errors[0].path).toBe("$select");
+    }
+    // a view column's definition reports the column
+    try {
+      renderArith(sqlite, node, (f) => `"${f}"`, undefined, "total");
+      throw new Error("expected a throw");
+    } catch (e) {
+      expect((e as DbError).errors[0].path).toBe("total");
+    }
+  });
+
   it("orderKeySql adds NULLS FIRST / LAST only where NULL sorts largest", () => {
     expect(orderKeySql(sqlite, '"x"', false)).toBe('"x" ASC');
     expect(orderKeySql(pg, '"x"', false)).toBe('"x" ASC NULLS FIRST');

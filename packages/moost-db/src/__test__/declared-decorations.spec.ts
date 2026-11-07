@@ -324,6 +324,10 @@ describe("@DbDecorations — the request gate", () => {
       const err = bad(await controller.query(url));
       expect(err.body.statusCode, url).toBe(400);
       expect(messageOf(err), url).toMatch(/Field "unreadCount" is display-only/);
+      expect(err.body, url).toMatchObject({
+        code: "FIELD_DISPLAY_ONLY",
+        params: { field: "unreadCount" },
+      });
     }
   });
 

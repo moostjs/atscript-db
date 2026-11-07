@@ -206,3 +206,99 @@ describe("[sqlite] ftsTokenizers", () => {
     await space.close();
   });
 });
+
+// `ftsPrefix` (since 0.1.175): FTS5 prefix indexes for every fulltext index of
+// the adapter — in the DDL and the table snapshot, so a change rebuilds.
+describe("[sqlite] ftsPrefix", () => {
+  const prefix = { ftsPrefix: [3, 2, 2] } as const;
+
+  it("builds the FTS5 table with prefix='…' (distinct lengths, ascending); prefix search works", async () => {
+    const table = await tableOf(fx.FtoPlain, [{ id: 1, body: "quokka island" }], prefix);
+    expect(ftsSql("fto_plain__fts__ft_body")).toContain("prefix='2 3'");
+    expect(ids(await table.search("qu*", {}))).toEqual([1]);
+    expect(ids(await table.search("quok*", {}))).toEqual([1]);
+  });
+
+  it("goes with a tokenizer", async () => {
+    await tableOf(fx.FtoRussian, [], { ...prefix, ftsTokenizers: { russian: "trigram" } });
+    expect(ftsSql("fto_russian__fts__ft_body")).toContain("tokenize='trigram', prefix='2 3'");
+  });
+
+  it("unset or [] leaves the DDL and the table snapshot as before", () => {
+    const snapshot = (Type: unknown, options?: SqliteAdapterOptions) =>
+      computeTableSnapshot(
+        new DbSpace(() => new SqliteAdapter(driver, options)).getTable(Type as any),
+      );
+    const plain = snapshot(fx.FtoPlain);
+    expect(plain.indexes.find((i) => i.type === "fulltext")).not.toHaveProperty("engineConfig");
+    expect(snapshot(fx.FtoPlain, { ftsPrefix: [] })).toEqual(plain);
+    expect(snapshot(fx.FtoPlain, prefix).indexes.find((i) => i.type === "fulltext")).toMatchObject({
+      engineConfig: "prefix=2 3",
+    });
+    expect(
+      snapshot(fx.FtoRussian, { ...prefix, ftsTokenizers: { russian: "trigram" } }).indexes.find(
+        (i) => i.type === "fulltext",
+      ),
+    ).toMatchObject({ engineConfig: "trigram; prefix=2 3" });
+  });
+
+  it("changing it rebuilds the FTS5 table: the sync plan reports it, the run applies it", async () => {
+    const spaceWith = (options?: SqliteAdapterOptions) =>
+      new DbSpace(() => new SqliteAdapter(driver, options), { logger: logger() as any });
+    expect((await new SchemaSync(spaceWith()).run([fx.FtoPlain])).status).toBe("synced");
+    expect(ftsSql("fto_plain__fts__ft_body")).not.toContain("prefix");
+
+    for (const [options, ddl] of [
+      [prefix, "prefix='2 3'"],
+      [{ ftsPrefix: [4] }, "prefix='4'"],
+    ] as const) {
+      const sync = new SchemaSync(spaceWith(options));
+      const plan = await sync.plan([fx.FtoPlain]);
+      expect(plan.status).toBe("changes-needed");
+      expect(plan.entries.find((e) => e.name === "fto_plain")?.indexChanges).toEqual([
+        { name: "fto_plain__fts__ft_body", action: "rebuild" },
+      ]);
+      expect((await sync.run([fx.FtoPlain])).status).toBe("synced");
+      expect(ftsSql("fto_plain__fts__ft_body")).toContain(ddl);
+      expect((await sync.plan([fx.FtoPlain])).status).toBe("up-to-date");
+    }
+
+    // duplicates collapse: the same setting
+    expect(
+      (await new SchemaSync(spaceWith({ ftsPrefix: [4, 4] })).plan([fx.FtoPlain])).status,
+    ).toBe("up-to-date");
+    // removing it rebuilds without prefix indexes
+    expect((await new SchemaSync(spaceWith()).run([fx.FtoPlain])).status).toBe("synced");
+    expect(ftsSql("fto_plain__fts__ft_body")).not.toContain("prefix");
+  });
+
+  it("rejects anything but integers 1–999, at most 31 of them", () => {
+    for (const bad of [0, -1, 1000, 1.5, Number.NaN, "2"]) {
+      expect(
+        () => new SqliteAdapter(driver, { ftsPrefix: [2, bad as number] }),
+        String(bad),
+      ).toThrow(/ftsPrefix: .* is not a prefix length — use integers from 1 to 999/);
+    }
+    expect(() => new SqliteAdapter(driver, { ftsPrefix: 2 as never })).toThrow(
+      "ftsPrefix: 2 is not an array of prefix lengths",
+    );
+    const many = Array.from({ length: 32 }, (_, i) => i + 1);
+    expect(() => new SqliteAdapter(driver, { ftsPrefix: many })).toThrow(
+      "ftsPrefix: 32 prefix lengths — FTS5 allows at most 31",
+    );
+    expect(() => new SqliteAdapter(driver, { ftsPrefix: many.slice(1) })).not.toThrow();
+  });
+
+  it("createAdapter passes it to the adapter, not to the driver", async () => {
+    expect(() => createAdapter(":memory:", { ftsPrefix: [0] }).getTable(fx.FtoPlain)).toThrow(
+      /not a prefix length/,
+    );
+    const space = createAdapter(":memory:", prefix);
+    const table = space.getTable(fx.FtoPlain) as any;
+    await table.ensureTable();
+    await table.syncIndexes();
+    await table.insertOne({ id: 1, body: "quokka" });
+    expect((await table.search("qu*", {})).map((r: { id: number }) => r.id)).toEqual([1]);
+    await space.close();
+  });
+});

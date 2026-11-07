@@ -95,10 +95,14 @@ export function buildViewPipeline(
   const computedExpr = (col: TViewColumnMapping, leaf: (c: TViewColumnMapping) => unknown) => {
     let out = rendered.get(col.viewPath);
     if (out === undefined) {
-      out = exprToMongo(col.expr!, (path) => {
-        const c = byPath.get(path)!;
-        return c.expr === undefined ? { $toDouble: leaf(c) } : computedExpr(c, leaf);
-      });
+      out = exprToMongo(
+        col.expr!,
+        (path) => {
+          const c = byPath.get(path)!;
+          return c.expr === undefined ? { $toDouble: leaf(c) } : computedExpr(c, leaf);
+        },
+        col.viewPath,
+      );
       rendered.set(col.viewPath, out);
     }
     return out;

@@ -54,11 +54,12 @@ export {
   errorEnvelope,
   MOOST_DB_MESSAGES,
   notFoundError,
+  unknownFieldError,
   unknownRelationError,
 } from "./http-errors";
 // HTTP client budget for relational predicates (since 0.1.147).
 export { REL_FILTER_CLIENT_MAX_DEPTH, REL_FILTER_CLIENT_MAX_NODES } from "./relation-predicates";
-export type { THttpErrorEntry } from "./http-errors";
+export type { TBadRequestOptions, THttpErrorEntry, TMoostDbErrorCode } from "./http-errors";
 
 // Validated-stage guard contexts for `AsDbController.guardWrite` / `guardRemove`
 // (since 0.1.128) and the post-write `checkWrite` context (since 0.1.143) —

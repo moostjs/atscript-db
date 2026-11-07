@@ -11,8 +11,8 @@ import type { HttpError } from "@moostjs/event-http";
 
 import type { TDbRequestContext, TDbRequestEndpoint } from "./as-readable.controller";
 
-import { badRequest } from "./http-errors";
-import { FieldCapabilityIndex, type TCapabilityVerdict } from "./meta/field-capabilities";
+import { badRequest, invalidQuery, unknownFieldError, verdictError } from "./http-errors";
+import { FieldCapabilityIndex } from "./meta/field-capabilities";
 
 /**
  * Client relational predicates (`nav=$some(…)` / `nav=$none(…)`, since
@@ -77,10 +77,6 @@ type TWithEntry = {
   $with?: unknown;
 };
 
-function verdictError(verdict: TCapabilityVerdict | undefined): HttpError | undefined {
-  return verdict ? badRequest(verdict.path, verdict.message) : undefined;
-}
-
 /** The readable a `$with` entry name (`rel` or dotted `rel.sub`) loads from, if resolvable. */
 export function relTarget(
   readable: AtscriptDbReadable<any>,
@@ -134,16 +130,20 @@ export class RelationPredicateGate {
     const nav = ref.path;
     const path = prefix + nav;
     if (!this.host.hasField(path)) {
-      return badRequest(path, `Unknown field "${path}"`);
+      return unknownFieldError(path);
     }
     const relation = readable.relations?.get(nav);
     if (!relation) {
-      return badRequest(path, notARelationMessage(readable, nav, path));
+      return badRequest(path, notARelationMessage(readable, nav, path), "NOT_A_RELATION", {
+        params: { field: path },
+      });
     }
     if (relation.filterable !== true) {
       return badRequest(
         path,
         `Filtering by related "${path}" rows is not permitted — add @db.rel.filterable to enable.`,
+        "RELATION_NOT_FILTERABLE",
+        { params: { relation: path } },
       );
     }
     const target =
@@ -154,23 +154,25 @@ export class RelationPredicateGate {
       return badRequest(
         path,
         `Filtering by related "${path}" rows is not possible — the related table is not available.`,
+        "RELATION_NOT_FILTERABLE",
+        { params: { relation: path } },
       );
     }
     if (depth + 1 > REL_FILTER_CLIENT_MAX_DEPTH) {
-      return badRequest(
+      return invalidQuery(
         path,
         `Relational predicates nest at most ${REL_FILTER_CLIENT_MAX_DEPTH} levels deep ("${path}")`,
       );
     }
     if (++state.nodes > REL_FILTER_CLIENT_MAX_NODES) {
-      return badRequest(
+      return invalidQuery(
         path,
         `At most ${REL_FILTER_CLIENT_MAX_NODES} relational predicates per query`,
       );
     }
     for (const { op, filter } of ref.relation ?? []) {
       if (!isPlainObject(filter)) {
-        return badRequest(path, `"${op}" on "${path}" expects a filter object`);
+        return invalidQuery(path, `"${op}" on "${path}" expects a filter object`);
       }
       const error = this._checkOperand(filter as FilterExpr, target, `${path}.`, depth + 1, state);
       if (error) return error;
@@ -218,7 +220,7 @@ export class RelationPredicateGate {
   ): HttpError | undefined {
     const refs = collectQueryPaths({ filter });
     if (refs.unsupportedOperator !== undefined) {
-      return badRequest(
+      return invalidQuery(
         refs.unsupportedOperator,
         unsupportedOperatorMessage(refs.unsupportedOperator),
       );
@@ -226,13 +228,13 @@ export class RelationPredicateGate {
     const index = this._indexOf(target);
     const visible = (p: string) => this._visibleAt(target, prefix, p);
     for (const ref of refs.filter) {
-      const error =
-        ref.predicate === "relation"
-          ? this.checkRef(ref, state, target, prefix, depth)
-          : verdictError(
-              index.check(ref.path, "filter", visible, ref.predicate, prefix, ref.nullTest),
-            );
-      if (error) return error;
+      if (ref.predicate === "relation") {
+        const error = this.checkRef(ref, state, target, prefix, depth);
+        if (error) return error;
+        continue;
+      }
+      const verdict = index.check(ref.path, "filter", visible, ref.predicate, prefix, ref.nullTest);
+      if (verdict) return verdictError(verdict);
     }
     return undefined;
   }
@@ -354,7 +356,7 @@ export function copyClientFilter<T>(filter: T, freeze = false): T {
   try {
     copy = structuredClone(filter);
   } catch {
-    throw badRequest("", "Malformed query: the filter cannot be copied");
+    throw invalidQuery("", "Malformed query: the filter cannot be copied");
   }
   if (freeze) deepFreeze(copy);
   return copy;

@@ -77,6 +77,7 @@ describe("countDistinct over HTTP", () => {
     expect(errorsOf(result)).toEqual([
       {
         path: "$select",
+        code: "INVALID_QUERY",
         message: 'Aggregate "countDistinct" needs a field — only count accepts *',
       },
     ]);

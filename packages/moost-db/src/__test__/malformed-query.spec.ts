@@ -90,7 +90,7 @@ async function expect400Envelope(p: Promise<unknown>): Promise<void> {
   expect(body.statusCode).toBe(400);
   expect(body.message).toMatch(/^Malformed query string: /);
   expect(body.message).toContain("Unexpected char '-'");
-  expect(body.errors).toEqual([{ path: "", message: body.message }]);
+  expect(body.errors).toEqual([{ path: "", message: body.message, code: "INVALID_QUERY" }]);
 }
 
 describe("malformed query string → 400 envelope on every read endpoint", () => {

@@ -68,6 +68,7 @@ export async function planSchema(
 export { SchemaSync, SyncEntry, readStoredSnapshot } from "./schema/schema-sync";
 export type {
   TDataStep,
+  TDataStepOutcome,
   TDataStepPhase,
   TSyncOptions,
   TSyncResult,
@@ -109,3 +110,6 @@ export type {
   TDbObjectKind,
   TEnsureTableOptions,
 } from "./types";
+// ── Since 0.1.175 ────────────────────────────────────────────────────────────
+export { rewriteRowsStep } from "./schema/rewrite-rows-step";
+export type { TRewriteFieldOptions, TRewriteRowOptions } from "./schema/rewrite-rows-step";

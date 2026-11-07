@@ -244,7 +244,7 @@ describe("AsDbController — /meta capability flags (adapter-gated)", () => {
     expect(result).toBeInstanceOf(HttpError);
     expect((result as HttpError).message).toContain('"address"');
     expect((result as HttpError).message).toContain("adapter");
-    expect(((result as HttpError).body as { errors?: unknown }).errors).toEqual([
+    expect(((result as HttpError).body as { errors?: unknown }).errors).toMatchObject([
       { path: "address", message: expect.stringContaining("adapter cannot sort") },
     ]);
     expect(table.findMany).not.toHaveBeenCalled();

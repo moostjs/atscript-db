@@ -1,6 +1,7 @@
 import {
   DbError,
   INTEGER_REGEX_OP,
+  assertExprArity,
   isFieldRef,
   walkFilter,
   type AtscriptExprNode,
@@ -165,10 +166,16 @@ export function queryNodeToExpr(node: AtscriptQueryNode, pathOf: TViewExprPathOf
  * arithmetic would stay exact past 2^53 where SQL rounds.
  * @since 0.1.147
  */
-export function exprToMongo(node: AtscriptExprNode, operand: (path: string) => unknown): unknown {
+export function exprToMongo(
+  node: AtscriptExprNode,
+  operand: (path: string) => unknown,
+  path = "$select",
+): unknown {
   if (typeof node === "number") return { $toDouble: node };
   if ("field" in node) return operand(node.field);
-  const args = node.args.map((arg) => exprToMongo(arg, operand));
+  // `$add` / `$multiply` would take a third argument the SQL renderers reject.
+  assertExprArity(node, path);
+  const args = node.args.map((arg) => exprToMongo(arg, operand, path));
   switch (node.op) {
     case "+": {
       return { $add: args };

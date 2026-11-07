@@ -21,6 +21,7 @@ export function createAdapter(connection: string, options?: TCreateSqliteAdapter
     transactionWaitWarnMs,
     viewJoinPruning,
     ftsTokenizers,
+    ftsPrefix,
     ...driverOptions
   } = options ?? {};
   const driver = new BetterSqlite3Driver(connection, driverOptions);
@@ -29,6 +30,7 @@ export function createAdapter(connection: string, options?: TCreateSqliteAdapter
     transactionWaitWarnMs,
     viewJoinPruning,
     ftsTokenizers,
+    ftsPrefix,
   };
   return new DbSpace(() => new SqliteAdapter(driver, adapterOptions), {
     onClose: () => driver.close(),

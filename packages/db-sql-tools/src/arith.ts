@@ -1,4 +1,9 @@
-import { DbError, aggregateExpressionsNotSupported, type AtscriptExprNode } from "@atscript/db";
+import {
+  DbError,
+  aggregateExpressionsNotSupported,
+  assertExprArity,
+  type AtscriptExprNode,
+} from "@atscript/db";
 
 import type { SqlDialect } from "./dialect";
 
@@ -19,7 +24,9 @@ export type TArithFailure = "no-cast" | "non-finite";
  *
  * @param fail - the error to throw for a failure (default `DbError`:
  *   `AGG_EXPR_NOT_SUPPORTED` without `castDouble`, `INVALID_QUERY` for a
- *   non-finite literal).
+ *   non-finite literal). An operator with the wrong number of arguments
+ *   always throws `INVALID_QUERY` ({@link assertExprArity}).
+ * @param path - the control or view column that error reports (default `$select`).
  * @since 0.1.148
  */
 export function renderArith(
@@ -27,6 +34,7 @@ export function renderArith(
   node: AtscriptExprNode,
   leaf: (field: string) => string | { double: string },
   fail: (reason: TArithFailure) => Error = defaultFailure,
+  path = "$select",
 ): string {
   const cast = dialect.castDouble?.bind(dialect);
   if (!cast) throw fail("no-cast");
@@ -39,6 +47,7 @@ export function renderArith(
       const sql = leaf(e.field);
       return typeof sql === "string" ? cast(sql) : sql.double;
     }
+    assertExprArity(e, path);
     const args = e.args.map(render);
     switch (e.op) {
       case "neg": {

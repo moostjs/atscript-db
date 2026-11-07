@@ -64,6 +64,7 @@ Each `DbSpace` instance owns its adapters; create a new space per test to guaran
 - `isSearchable()` → `true` when any `@db.index.fulltext` is declared (an integer-only index counts, but has no FTS5 table).
 - `@db.index.fulltext.language "english"` (0.1.168) → `tokenize='porter unicode61'` (stemming); any other language → default `unicode61`, unstemmed, sync warning. Tokenizer drift → FTS5 table recreated.
 - `ftsTokenizers` adapter option (0.1.175; `createAdapter(path, { ftsTokenizers })` / `new SqliteAdapter(driver, { ftsTokenizers })`): `{ russian: "snowball russian unicode61" }` — FTS5 `tokenize` per language, replaces the default (english too), silences that language's warning. Non-built-in tokenizers come from an extension loaded via the driver's `loadExtensions` (no Snowball dependency shipped). Value = words of `[A-Za-z0-9_]` separated by spaces (no quotes → no `tokenchars`); bad value or non-language key → throw at adapter construction. Part of the schema hash → a change recreates the FTS5 table on next sync. Unknown tokenizer at sync → error naming it + `loadExtensions`, probed (temp FTS5 table) BEFORE an existing table is dropped. Every writing connection must load the extension (sync triggers tokenize). An index without a language is not english on SQLite → no key applies (stays `unicode61`). `@db.index.fulltext.match "any"` → terms OR-ed (default AND).
+- `ftsPrefix` adapter option (0.1.175; `createAdapter(path, { ftsPrefix: [2, 3] })` / `new SqliteAdapter(driver, { ftsPrefix })`): FTS5 prefix indexes (`prefix='2 3'`) on EVERY FTS5 table of that adapter/space — speeds up `$search: "qu*"` prefix terms of those lengths (prefix search works without it, just slower on big tables; costs index size). Integers 1–999, ≤ 31 distinct; order/duplicates ignored; anything else → throw at adapter construction. Unset or `[]` → no clause, schema hash unchanged. Part of the hash → a change (or removal) recreates the FTS5 tables on next sync. Per-index prefix: not available — use a separate space.
 - Pre-migration copy: `driver.exec("VACUUM INTO '/backups/x.db'")` (every SQLite driver, live db, target must not exist) before a `syncSchema` that recreates tables or runs data steps. No adapter API.
 
 ## sqlite-vec / vec0 specifics
@@ -146,11 +147,30 @@ Throws (`Unsupported regex …`):
 
 Callers building regex from user input should pass it through `escapeRegex(literal)` before wrapping with anchors / `.*`. Literal `%` and `_` round-trip safely — the translator escapes them for `LIKE`.
 
+## Prebuilt read-only file (search pack)
+
+Serve a shipped SQLite file (e.g. a knowledge pack with FTS) next to the app's own database: a SECOND `DbSpace` over a read-only driver — no ATTACH.
+
+```ts
+const packDriver = new BetterSqlite3Driver("./pack.db", { readonly: true, fileMustExist: true }); // native options pass through
+const pack = new DbSpace(() => new SqliteAdapter(packDriver, { ftsPrefix: [2, 3] }), {
+  onClose: () => packDriver.close(),
+});
+provideDbSpace(pack, "pack"); // moost-db: models with @db.space 'pack' bind to it
+const articles = pack.getTable(PackArticle);
+await articles.search("quo*", {});
+```
+
+- Bind the pack models with `@db.space 'pack'`; leave them out of the app's `syncSchema` call (`modelsBySpace.default` only) — NEVER sync the read-only space (sync writes its store/lock tables and would fail).
+- Build the file with atscript-db itself (`createAdapter(path, sameOptions)` + `syncSchema` + inserts, build script/CI) so the FTS5 tables, triggers and shadow tables match what the adapter queries. Use the same `.as` models and the same `ftsTokenizers`/`ftsPrefix` at build and serve time. A hand-written FTS5 schema is not supported.
+- Writes on the read-only space fail with SQLite's `attempt to write a readonly database`. Reads, `search`, aggregates, relations within the pack work.
+- Ship a new file to update it (swap + reopen); `VACUUM` the built file before shipping.
+
 ## Pragmas / concurrency / limits
 
 - `PRAGMA foreign_keys = ON` (always); set WAL / `synchronous = NORMAL` via your driver options.
 - One connection per driver → a per-driver FIFO gate (since 0.1.128): `withTransaction` takes it before `BEGIN IMMEDIATE`, releases on COMMIT/ROLLBACK; every plain read/write from another context WAITS for the open transaction (never runs inside it). Concurrent `withTransaction` calls queue instead of failing with "cannot start a transaction within a transaction".
-- Options (`createAdapter(path, opts)` / `new SqliteAdapter(driver, opts)`): `transactionWaitTimeoutMs` (default unbounded; bounds the waiter's TOTAL wait; waiter rejects `DbError("TX_WAIT_TIMEOUT")` → moost-db 503; `0` = fail-fast: reject immediately when the connection is busy), `transactionWaitWarnMs` (default 5000; logs a warning through the adapter logger; 0 = off), `viewJoinPruning`, `ftsTokenizers` (see FTS5 specifics).
+- Options (`createAdapter(path, opts)` / `new SqliteAdapter(driver, opts)`): `transactionWaitTimeoutMs` (default unbounded; bounds the waiter's TOTAL wait; waiter rejects `DbError("TX_WAIT_TIMEOUT")` → moost-db 503; `0` = fail-fast: reject immediately when the connection is busy), `transactionWaitWarnMs` (default 5000; logs a warning through the adapter logger; 0 = off), `viewJoinPruning`, `ftsTokenizers`, `ftsPrefix` (see FTS5 specifics).
 - NEVER await external I/O (self-HTTP call, another connection) inside `withTransaction` / `guardWrite` on SQLite — it waits for itself, forever by default. Set `transactionWaitTimeoutMs` if you cannot rule it out.
 - Schema operations (`ensureTable`, `syncColumns`, `recreateTable`, `dropTablesByName`, …) take the same connection gate (since 0.1.128): they hold the connection exclusively WITHOUT a transaction, wait for an open transaction, make concurrent requests wait, and never land inside a request's transaction (where `PRAGMA foreign_keys` would be a no-op). The gate protects each STEP, not a whole `syncSchema` run (released between steps) — run schema sync before serving traffic.
 - A transaction of another adapter family / driver is "no transaction of mine" (state branded by driver since 0.1.128): SQLite statements inside it are still gated and a nested SQLite `withTransaction` opens its own (queued) transaction.

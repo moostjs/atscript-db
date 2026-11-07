@@ -19,6 +19,13 @@ export const DB_VALIDATOR_MESSAGES = Object.freeze({
   /** A field operation inside `@db.json`, an array item or a non-merge nested object. */
   FIELD_OP_CONTEXT:
     'Field operations ($inc/$dec/$mul) are not supported inside @db.json fields, array items, or nested objects without @db.patch.strategy "merge"',
+  /**
+   * An array patch operator (`$insert`, `$remove`, `$upsert`, `$update`,
+   * `$replace`) on a `@db.json` field, which is stored and written whole
+   * (since 0.1.175; `TYPE_ARRAY` before).
+   */
+  ARRAY_OP_ON_JSON:
+    "Array patch operators are not supported on a @db.json field — send the whole array",
   /** A field operation on a field that is not a number. */
   FIELD_OP_NOT_NUMERIC: "Field operations ($inc/$dec/$mul) can only be applied to numeric fields",
   /** A field operation's operand is `NaN` or an infinity. `{ operand }`: the operand as text. */

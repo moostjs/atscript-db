@@ -249,7 +249,7 @@ describe("client predicates run on opted-in relations", () => {
 describe("the gate", () => {
   it("a relation without @db.rel.filterable is rejected — the adapter is never reached", async () => {
     const { controller, adapter } = bind();
-    expect(await rejected(controller.query("?ticketPlain=$some(status=open)"))).toEqual({
+    expect(await rejected(controller.query("?ticketPlain=$some(status=open)"))).toMatchObject({
       path: "ticketPlain",
       message:
         'Filtering by related "ticketPlain" rows is not permitted — add @db.rel.filterable to enable.',
@@ -262,16 +262,16 @@ describe("the gate", () => {
     const hidden = await rejected(controller.query("?ticket=$some(status=open)"));
     const missing = await rejected(controller.query("?nope=$some(status=open)"));
     // The validation envelope, like every other predicate rejection.
-    expect(hidden).toEqual({ path: "ticket", message: 'Unknown field "ticket"' });
-    expect(missing).toEqual({ path: "nope", message: 'Unknown field "nope"' });
+    expect(hidden).toMatchObject({ path: "ticket", message: 'Unknown field "ticket"' });
+    expect(missing).toMatchObject({ path: "nope", message: 'Unknown field "nope"' });
     // Nested: the hidden hop is named, not its operand path.
     const nested = bind(hiding(["ticket.team"])).controller;
-    expect(await rejected(nested.query("?ticket=$some(team=$some(name=Core))"))).toEqual({
+    expect(await rejected(nested.query("?ticket=$some(team=$some(name=Core))"))).toMatchObject({
       path: "ticket.team",
       message: 'Unknown field "ticket.team"',
     });
     // A nonexistent operand field too.
-    expect(await rejected(bind().controller.query("?ticket=$some(nope=1)"))).toEqual({
+    expect(await rejected(bind().controller.query("?ticket=$some(nope=1)"))).toMatchObject({
       path: "ticket.nope",
       message: 'Unknown field "ticket.nope"',
     });
@@ -284,25 +284,28 @@ describe("the gate", () => {
       }
     }
     const { controller } = bind(Own);
-    expect(await rejected(controller.query("?ticket=$some(nope=1)"))).toEqual({
+    expect(await rejected(controller.query("?ticket=$some(nope=1)"))).toMatchObject({
       path: "ticket.nope",
       message: 'Unknown field "ticket.nope"',
     });
     const own = (await controller.query("?title=a")) as HttpError;
+    // An override's own message is a `custom` entry with no top-level code (since 0.1.175):
+    // a translator finds it by its text.
     expect(own.body).toEqual({
       statusCode: 400,
       message: "no title filters",
       error: "Bad Request",
+      errors: [{ path: "", message: "no title filters", code: "INVALID_QUERY", custom: true }],
     });
   });
 
   it("the gate itself (no URL insights) rejects hidden relations and hidden operand paths", () => {
     const { controller } = bind(hiding(["ticket.status", "board"]));
     const gate = (filter: FilterExpr) => controller.checkCapabilities({ filter, controls: {} });
-    expect(errorsOf(gate({ board: { $some: {} } }))).toEqual([
+    expect(errorsOf(gate({ board: { $some: {} } }))).toMatchObject([
       { path: "board", message: 'Unknown field "board"' },
     ]);
-    expect(errorsOf(gate({ ticket: { $some: { status: "open" } } }))).toEqual([
+    expect(errorsOf(gate({ ticket: { $some: { status: "open" } } }))).toMatchObject([
       { path: "ticket.status", message: 'Unknown field "ticket.status"' },
     ]);
     expect(gate({ ticket: { $some: { key: "k1" } } })).toBeUndefined();
@@ -310,7 +313,7 @@ describe("the gate", () => {
 
   it("a hidden operand path is an unknown field", async () => {
     const { controller } = bind(hiding(["ticket.status"]));
-    expect(await rejected(controller.query("?ticket=$some(status=open)"))).toEqual({
+    expect(await rejected(controller.query("?ticket=$some(status=open)"))).toMatchObject({
       path: "ticket.status",
       message: 'Unknown field "ticket.status"',
     });
@@ -318,17 +321,17 @@ describe("the gate", () => {
 
   it("the related table's capability rules apply to every operand path", async () => {
     const { controller } = bind();
-    expect(await rejected(controller.query("?ticket=$some(note=x)"))).toEqual({
+    expect(await rejected(controller.query("?ticket=$some(note=x)"))).toMatchObject({
       path: "ticket.note",
       message: expect.stringMatching(
         /^Filtering on field "ticket\.note" is not permitted — .*encrypt/,
       ),
     });
-    expect(await rejected(controller.query("?ticket=$some(code=x)"))).toEqual({
+    expect(await rejected(controller.query("?ticket=$some(code=x)"))).toMatchObject({
       path: "ticket.code",
       message: 'Filtering on field "ticket.code" is not permitted — field is @db.writeOnly.',
     });
-    expect(await rejected(controller.query("?board=$some(owner=u1)"))).toEqual({
+    expect(await rejected(controller.query("?board=$some(owner=u1)"))).toMatchObject({
       path: "board.owner",
       message:
         'Filtering on field "board.owner" is not permitted — add @db.column.filterable to enable.',
@@ -340,7 +343,7 @@ describe("the gate", () => {
 
   it("a derived field whose source is hidden is an unknown field", async () => {
     const { controller } = bind(hiding(["ticket.payload"]));
-    expect(await rejected(controller.query("?ticket=$some(region=eu)"))).toEqual({
+    expect(await rejected(controller.query("?ticket=$some(region=eu)"))).toMatchObject({
       path: "ticket.region",
       message: 'Unknown field "ticket.region"',
     });
@@ -365,7 +368,7 @@ describe("the gate", () => {
     );
     // Inside an operand, a dotted navigation path is answered relative to it.
     const inner = await rejected(controller.query("?ticket=$some(team.name=Core)"));
-    expect(inner).toEqual({
+    expect(inner).toMatchObject({
       path: "ticket.team.name",
       message:
         '"ticket.team.name" is a navigation path — use team=$some(name=…) to filter by related rows ' +
@@ -375,7 +378,7 @@ describe("the gate", () => {
 
   it("$some / $none on a field that is not a relation", async () => {
     const { controller } = bind();
-    expect(await rejected(controller.query("?title=$some(x=1)"))).toEqual({
+    expect(await rejected(controller.query("?title=$some(x=1)"))).toMatchObject({
       path: "title",
       message: '"$some" / "$none" are only valid on a navigation relation — "title" is not one',
     });
@@ -395,7 +398,7 @@ describe("the gate", () => {
       await rejected(
         controller.query("?ticket=$some(team=$some(tickets=$some(issues=$some(title=a))))"),
       ),
-    ).toEqual({
+    ).toMatchObject({
       path: "ticket.team.tickets.issues",
       message: 'Relational predicates nest at most 3 levels deep ("ticket.team.tickets.issues")',
     });
@@ -408,7 +411,7 @@ describe("the gate", () => {
     ).toEqual([1, 3]);
     expect(
       await rejected(controller.query("?ticket=$some(issues=$some(ticket=$some(issues=$some())))")),
-    ).toEqual({
+    ).toMatchObject({
       path: "ticket.issues.ticket.issues",
       message: 'Relational predicates nest at most 3 levels deep ("ticket.issues.ticket.issues")',
     });
@@ -435,13 +438,13 @@ describe("the gate", () => {
   it("at most REL_FILTER_CLIENT_MAX_NODES (8) predicates per request, $with sub-filters included", async () => {
     const { controller } = bind(AsDbReadableController, "teams");
     expect(await controller.query(`?${manyPredicates(8)}`)).toEqual([]);
-    expect(await rejected(controller.query(`?${manyPredicates(9)}`))).toEqual({
+    expect(await rejected(controller.query(`?${manyPredicates(9)}`))).toMatchObject({
       path: "tickets",
       message: "At most 8 relational predicates per query",
     });
     const sub = "$with=tickets(issues=$some(title=a)^issues=$some(title=b))";
     expect(Array.isArray(await controller.query(`?${manyPredicates(6)}&${sub}`))).toBe(true);
-    expect(await rejected(controller.query(`?${manyPredicates(7)}&${sub}`))).toEqual({
+    expect(await rejected(controller.query(`?${manyPredicates(7)}&${sub}`))).toMatchObject({
       path: "tickets.issues",
       message: "At most 8 relational predicates per query",
     });
@@ -481,13 +484,15 @@ describe("predicates inside $with sub-filters", () => {
 
   it("are rejected on relations that did not opt in, and on hidden ones", async () => {
     const { controller } = bind(AsDbReadableController, "teams");
-    expect(await rejected(controller.query("?$with=tickets(plainIssues=$some(title=c))"))).toEqual({
+    expect(
+      await rejected(controller.query("?$with=tickets(plainIssues=$some(title=c))")),
+    ).toMatchObject({
       path: "tickets.plainIssues",
       message:
         'Filtering by related "tickets.plainIssues" rows is not permitted — add @db.rel.filterable to enable.',
     });
     const hidden = bind(hiding(["tickets.issues"]), "teams").controller;
-    expect(await rejected(hidden.query("?$with=tickets(issues=$some(title=c))"))).toEqual({
+    expect(await rejected(hidden.query("?$with=tickets(issues=$some(title=c))"))).toMatchObject({
       path: "tickets.issues",
       message: 'Unknown field "tickets.issues"',
     });
@@ -652,7 +657,9 @@ describe("server predicates conjoined into $with in validateControls", () => {
     });
     expect(hookLog).toEqual(["tickets.issues"]);
     // the client's own predicate on a non-filterable relation is still rejected
-    expect(await rejected(controller.query("?$with=tickets(plainIssues=$some(title=c))"))).toEqual({
+    expect(
+      await rejected(controller.query("?$with=tickets(plainIssues=$some(title=c))")),
+    ).toMatchObject({
       path: "tickets.plainIssues",
       message:
         'Filtering by related "tickets.plainIssues" rows is not permitted — add @db.rel.filterable to enable.',
@@ -666,7 +673,10 @@ describe("server predicates conjoined into $with in validateControls", () => {
       await rejected(
         controller.query(`?${manyPredicates(8)}&$with=tickets(issues=$some(title=c))`),
       ),
-    ).toEqual({ path: "tickets.issues", message: "At most 8 relational predicates per query" });
+    ).toMatchObject({
+      path: "tickets.issues",
+      message: "At most 8 relational predicates per query",
+    });
   });
 
   it("fails closed when the hook replaced a client $with predicate by a copy", async () => {

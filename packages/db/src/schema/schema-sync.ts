@@ -88,14 +88,24 @@ export interface TSyncPlan {
   pendingDataSteps?: string[];
 }
 
+/** When a {@link TDataStep} runs relative to the schema DDL (since 0.1.168). */
+export type TDataStepPhase = "after" | "beforeConstraints";
+
+/** What a {@link TDataStep.run} may return (since 0.1.175). */
+export interface TDataStepOutcome {
+  /**
+   * A short note stored with the step's record (for example, which rows it
+   * changed) and reported in {@link TSyncResult.dataSteps}`.notes`. Notes
+   * longer than 4096 characters are truncated, ending in `… [truncated]`.
+   */
+  note?: string;
+}
+
 /**
  * A one-time data step of {@link TSyncOptions.dataSteps} (since 0.1.165) —
  * a backfill or data fix that must run exactly once per database, after the
  * schema change it needs.
  */
-/** When a {@link TDataStep} runs relative to the schema DDL (since 0.1.168). */
-export type TDataStepPhase = "after" | "beforeConstraints";
-
 export interface TDataStep {
   /** Stable, unique id — the step is recorded under it (`data_step:<id>` in `__atscript_control`). */
   id: string;
@@ -118,8 +128,25 @@ export interface TDataStep {
    * sync recorded meanwhile — after taking over an expired lock — is not run
    * again. Without transactions the record is checked right before the step
    * and written after it.
+   *
+   * Return `{ note }` to store a note with the record (since 0.1.175) — see
+   * {@link TDataStepOutcome}.
    */
-  run(space: DbSpace): Promise<void> | void;
+  run(space: DbSpace): Promise<TDataStepOutcome | void> | TDataStepOutcome | void;
+  /**
+   * What a failure of this step does (since 0.1.175):
+   * - `"throw"` (default) — stops the run; the error is rethrown after the
+   *   lock is released and the steps after it stay pending;
+   * - `"warn"` — logs the error (via the sync's logger, falling back to
+   *   `console`), adds `{ id, error }` to the result's `dataSteps.failed` and
+   *   runs the next step. The failed step is not recorded — with transactions
+   *   its writes are rolled back — so the next sync runs it again.
+   *
+   * Later steps must not depend on a step that may fail with `"warn"`: they
+   * run, and are recorded, without it. Not allowed on a `"beforeConstraints"`
+   * step — the constraints after it need its work.
+   */
+  onError?: "throw" | "warn";
 }
 
 export interface TSyncOptions {
@@ -162,7 +189,9 @@ export interface TSyncOptions {
    * under the sync lock — also when the schema itself is up to date. Each
    * step runs once per database: once it committed, its id is recorded and
    * later syncs skip it. A step that throws stops the run (the error is
-   * rethrown after the lock is released); the steps after it stay pending.
+   * rethrown after the lock is released); the steps after it stay pending —
+   * unless the step sets `onError: "warn"` (since 0.1.175, see
+   * {@link TDataStep.onError}).
    * Steps do not run when the sync is refused or an entry errored.
    * A step with `phase: "beforeConstraints"` (since 0.1.168) runs before the
    * indexes and foreign keys are synced — see {@link TDataStep.phase}; when
@@ -196,8 +225,18 @@ export interface TSyncResult {
    * not recorded after this call, so a later sync runs them (steps an earlier
    * sync recorded are in neither list; a refused or errored run leaves every
    * unrecorded step pending). Absent when no steps were passed. @since 0.1.165
+   *
+   * Since 0.1.175: `notes` holds the notes the steps that ran here returned
+   * (by step id, see {@link TDataStepOutcome}); `failed` lists the
+   * `onError: "warn"` steps that failed here — still pending. Each is present
+   * only when not empty.
    */
-  dataSteps?: { ran: string[]; pending: string[] };
+  dataSteps?: {
+    ran: string[];
+    pending: string[];
+    notes?: Record<string, string>;
+    failed?: Array<{ id: string; error: unknown }>;
+  };
 }
 
 // ── Internal discovery types ──────────────────────────────────────────────
@@ -403,6 +442,19 @@ function rethrowStepError(error: unknown): never {
   throw error instanceof DataStepFailure ? error.error : error;
 }
 
+/** The longest note a data step's record keeps, in characters. */
+const NOTE_MAX = 4096;
+const NOTE_TRUNCATED = "… [truncated]";
+
+/** A step's note as stored: a non-empty string, capped at {@link NOTE_MAX}. */
+function capNote(note: unknown): string | undefined {
+  if (typeof note !== "string" || note === "") return undefined;
+  if (note.length <= NOTE_MAX) return note;
+  // Never end the kept part on half of a surrogate pair
+  const kept = note.slice(0, NOTE_MAX - NOTE_TRUNCATED.length).replace(/[\uD800-\uDBFF]$/, "");
+  return kept + NOTE_TRUNCATED;
+}
+
 /** The `__atscript_control` key a data step is recorded under. */
 function dataStepKey(id: string): string {
   return `data_step:${id}`;
@@ -420,6 +472,16 @@ function checkDataSteps(steps: readonly TDataStep[] | undefined): readonly TData
     if (step.phase !== undefined && step.phase !== "after" && step.phase !== "beforeConstraints") {
       throw new Error(
         `syncSchema: data step "${step.id}" has an unknown phase "${String(step.phase)}" (expected "after" or "beforeConstraints")`,
+      );
+    }
+    if (step.onError !== undefined && step.onError !== "throw" && step.onError !== "warn") {
+      throw new Error(
+        `syncSchema: data step "${step.id}" has an unknown onError "${String(step.onError)}" (expected "throw" or "warn")`,
+      );
+    }
+    if (step.onError === "warn" && step.phase === "beforeConstraints") {
+      throw new Error(
+        `syncSchema: data step "${step.id}" cannot use onError "warn" with phase "beforeConstraints" — the constraints after it need its work`,
       );
     }
     seen.add(step.id);
@@ -714,7 +776,8 @@ export class SchemaSync {
    * (see {@link SyncStore.runOnce}), settling each in `report`. A step a peer
    * recorded meanwhile — it took the lock over while this run held its list —
    * is not run again. A throwing step propagates (rolled back, not recorded)
-   * as a {@link DataStepFailure}.
+   * as a {@link DataStepFailure} — an `onError: "warn"` one is logged, listed
+   * in `report.failed` and stays pending.
    */
   private async applyDataSteps(
     steps: readonly TDataStep[],
@@ -724,20 +787,33 @@ export class SchemaSync {
   ): Promise<void> {
     for (const step of steps) {
       this.assertLockHeld(getAbortReason);
-      const outcome = await this.store
-        .runOnce(
+      // Unique to this run: a conflicting record that holds it is this run's own write.
+      const ranAt = Date.now();
+      let note: string | undefined;
+      let outcome: Awaited<ReturnType<SyncStore["runOnce"]>>;
+      try {
+        outcome = await this.store.runOnce(
           dataStepKey(step.id),
-          // Unique to this run: a conflicting record that holds it is this run's own write.
-          () => JSON.stringify({ ranAt: Date.now(), podId }),
-          () => step.run(this.space),
-        )
-        .catch((error: unknown) => {
-          throw new DataStepFailure(step.id, error);
-        });
+          (withNote) => JSON.stringify({ ranAt, podId, note: withNote }),
+          async () => {
+            const result = (await step.run(this.space)) as TDataStepOutcome | void;
+            return (note = capNote(result?.note));
+          },
+        );
+      } catch (error) {
+        if (step.onError !== "warn") throw new DataStepFailure(step.id, error);
+        this.reportLogger.error(
+          `[schema-sync] data step "${step.id}" failed (onError: "warn") — not recorded, the next sync runs it again:`,
+          error instanceof Error ? error.message : error,
+        );
+        (report.failed ??= []).push({ id: step.id, error });
+        continue;
+      }
       report.pending = report.pending.filter((id) => id !== step.id);
       if (outcome === "ran") {
         this.logger.info?.(`[schema-sync] data step "${step.id}" applied`);
         report.ran.push(step.id);
+        if (note !== undefined) (report.notes ??= {})[step.id] = note;
       } else {
         this.logger.warn(
           outcome === "recorded"
@@ -821,7 +897,7 @@ export class SchemaSync {
         await this.applyDataSteps(todo, podId, heartbeat.getAbortReason, report).catch(
           rethrowStepError,
         );
-        const status = report.ran.length > 0 ? "synced" : "synced-by-peer";
+        const status = report.ran.length > 0 || report.failed ? "synced" : "synced-by-peer";
         return withSteps({ status, schemaHash: hash, entries: [] }, steps, report);
       }
 
@@ -2070,11 +2146,16 @@ export class SchemaSync {
    * configured, warnings/errors go to `console` (a production consumer lost
    * months of failed-index errors to the silent default).
    */
+  /** The logger for reports a user must see — never swallowed by the NoopLogger default. */
+  private get reportLogger(): TGenericLogger {
+    return this.logger === NoopLogger ? console : this.logger;
+  }
+
   private reportOutcome(result: TSyncResult, onError: "throw" | "warn" | "silent"): void {
     if (onError === "silent" || result.entries.length === 0) {
       return;
     }
-    const out: TGenericLogger = this.logger === NoopLogger ? console : this.logger;
+    const out = this.reportLogger;
 
     const counts = new Map<string, number>();
     for (const entry of result.entries) {

@@ -1,6 +1,7 @@
 import type { Collection, Document } from "mongodb";
 import {
   andFilters,
+  unknownWithRelation,
   relationStaticFilter,
   tableNameOf,
   type BaseDbAdapter,
@@ -129,9 +130,8 @@ export async function loadRelationsImpl(
 
     const relation = relations.get(withRel.name);
     if (!relation) {
-      throw new Error(
-        `Unknown relation "${withRel.name}" in $with. Available relations: ${[...relations.keys()].join(", ") || "(none)"}`,
-      );
+      // `UNKNOWN_RELATION` like the core's loader (a plain `Error`, listing every relation, before).
+      throw unknownWithRelation(withRel.name);
     }
 
     const lookup = buildRelationLookup(source, withRel, relation, foreignKeys, tableResolver);

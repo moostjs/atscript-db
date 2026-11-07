@@ -135,6 +135,25 @@ describe("db validator plugin — coded errors", () => {
     });
   });
 
+  it("ARRAY_OP_ON_JSON: array operators on a @db.json field (any operator, plain arrays pass)", async () => {
+    const VcDoc: any = (await import("./fixtures/validator-codes.as")).VcDoc;
+    for (const op of ["$insert", "$remove", "$upsert", "$update", "$replace"]) {
+      const error = firstError(VcDoc, "patch", { id: 1, tags: { [op]: ["a"] } });
+      expect(error).toMatchObject({
+        path: "tags",
+        code: "ARRAY_OP_ON_JSON",
+        params: {},
+        message: DB_VALIDATOR_MESSAGES.ARRAY_OP_ON_JSON,
+      });
+    }
+    const { flatMap, navFields } = buildValidationContext(VcDoc);
+    const validator = buildDbValidator(VcDoc, "patch");
+    const ctx = { mode: "patch" as const, flatMap, navFields };
+    expect(validator.validate({ id: 1, tags: ["a", "b"] }, true, ctx)).toBe(true);
+    // A plain (non-JSON) array keeps its operators.
+    expect(validator.validate({ id: 1, labels: { $insert: ["a"] } }, true, ctx)).toBe(true);
+  });
+
   it("NAV_PATCH_NOT_ARRAY names the relation", async () => {
     const { VcParent } = await import("./fixtures/validator-codes.as");
     const error = firstError(VcParent, "patch", { id: 1, profile: { $insert: [] } });

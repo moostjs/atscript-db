@@ -16,6 +16,7 @@ export {
   isRetryableDbError,
   aggregateFailure,
   aggregateExpressionsNotSupported,
+  unknownWithRelation,
   constraintViolation,
 } from "./db-error";
 export type { DbErrorCode, TDbErrorEntry, TDbErrorEntryCode, TDbConstraintHint } from "./db-error";
@@ -114,7 +115,13 @@ export { UniquSelect, aggregateColumns } from "./query/uniqu-select";
 export type { TExprAggregate, TFirstLast, TRowOrderKey } from "./query/uniqu-select";
 export { decomposePatch, assertNoVersionWrites } from "./patch/patch-decomposer";
 export { isVersionExemptPatch } from "./patch/version-exempt";
-export { translateQueryTree, isFieldRef, evaluateExpr } from "./query/query-tree";
+export {
+  translateQueryTree,
+  isFieldRef,
+  evaluateExpr,
+  assertExprArity,
+  assertExprTreeArity,
+} from "./query/query-tree";
 export { tableNameOf } from "./rel/relation-helpers";
 // ── Since 0.1.141 ────────────────────────────────────────────────────────────
 export { aliasTargetOf } from "./table/view-source";

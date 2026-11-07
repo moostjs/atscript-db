@@ -32,7 +32,7 @@ import { current, Inherit, Inject, Moost, Optional, Param } from "moost";
 
 import { AsDbReadableController } from "./as-db-readable.controller";
 import { TABLE_DEF } from "./decorators";
-import { badRequest, notFoundError } from "./http-errors";
+import { badRequest, invalidQuery, notFoundError } from "./http-errors";
 import { dbErrorToHttp } from "./validation-interceptor";
 
 const SHAPE_MESSAGE = "Expected an object";
@@ -54,11 +54,11 @@ function prefersRepresentation(prefer: string | undefined): boolean {
 function assertWriteShape(payload: unknown): void {
   if (Array.isArray(payload)) {
     for (let i = 0; i < payload.length; i++) {
-      if (!isPlainObject(payload[i])) throw badRequest(`[${i}]`, SHAPE_MESSAGE);
+      if (!isPlainObject(payload[i])) throw badRequest(`[${i}]`, SHAPE_MESSAGE, "EXPECTED_OBJECT");
     }
     return;
   }
-  if (!isPlainObject(payload)) throw badRequest("", SHAPE_MESSAGE);
+  if (!isPlainObject(payload)) throw badRequest("", SHAPE_MESSAGE, "EXPECTED_OBJECT");
 }
 
 /** The write mode each write action validates and normalizes its rows in. */
@@ -445,11 +445,14 @@ export class AsDbController<
   /** The only POST control: `$onConflict` (`error` | `ignore`). Anything else `$…` → 400. */
   private _readOnConflict(controls: Record<string, unknown>): "ignore" | undefined {
     for (const key of Object.keys(controls)) {
-      if (key !== "$onConflict") throw badRequest("", `Unsupported control "${key}" on insert`);
+      if (key !== "$onConflict") throw invalidQuery(key, `Unsupported control "${key}" on insert`);
     }
     const mode = controls.$onConflict;
     if (mode !== undefined && mode !== "error" && mode !== "ignore") {
-      throw badRequest("", `$onConflict must be "error" or "ignore", got ${JSON.stringify(mode)}`);
+      throw invalidQuery(
+        "$onConflict",
+        `$onConflict must be "error" or "ignore", got ${JSON.stringify(mode)}`,
+      );
     }
     return mode === "ignore" ? "ignore" : undefined;
   }
@@ -559,14 +562,18 @@ export class AsDbController<
     // `statusCode` with the constructor's code, so we can't ship the proposal's
     // exact `error` key. The rendered body becomes
     // `{ statusCode: 409, message: "version_mismatch", error: "Conflict",
-    //   kind: "version_mismatch", currentVersion: N }`.
-    // Clients discriminate on `message` (or the explicit `kind` field) plus
-    // `currentVersion`. The framework constraint is upstream of this package.
+    //   code: "VERSION_MISMATCH", kind: "version_mismatch", currentVersion: N }`.
+    // Clients discriminate on `code` (since 0.1.175; `kind` kept for older
+    // clients) plus `currentVersion`. The framework constraint is upstream of
+    // this package.
+    const currentVersion = row[versionColumn] as number;
     return new HttpError(409, {
       message: "version_mismatch",
       statusCode: 409,
+      code: "VERSION_MISMATCH",
+      params: { currentVersion },
       kind: "version_mismatch",
-      currentVersion: row[versionColumn] as number,
+      currentVersion,
     });
   }
 

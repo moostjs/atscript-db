@@ -130,7 +130,11 @@ describe("GET /query with an aggregate $select and no $groupBy", () => {
   it("a plain field next to the aggregates must be grouped (400)", async () => {
     const err = await rejected(bind().query("/query?$select=status,count(*):n"));
     expect(errorsOf(err)).toEqual([
-      { path: "$select", message: 'Plain field "status" in $select must also appear in $groupBy' },
+      {
+        path: "$select",
+        code: "INVALID_QUERY",
+        message: 'Plain field "status" in $select must also appear in $groupBy',
+      },
     ]);
   });
 
@@ -159,7 +163,7 @@ describe("ungrouped aggregates pass the grouped aggregates' gates", () => {
       }
     }
     const err = await rejected(bind(Scoped).query("/query?$select=sum(cost):c"));
-    expect(errorsOf(err)).toEqual([{ path: "cost", message: 'Unknown field "cost"' }]);
+    expect(errorsOf(err)).toMatchObject([{ path: "cost", message: 'Unknown field "cost"' }]);
   });
 
   it("a @db.writeOnly field cannot be aggregated", async () => {
@@ -204,7 +208,7 @@ describe("ungrouped aggregates pass the grouped aggregates' gates", () => {
     ]) {
       const res = await ctrl.pages(`/pages?${qs}`);
       expect(res, qs).toBeInstanceOf(HttpError);
-      expect(errorsOf(res), qs).toEqual([
+      expect(errorsOf(res), qs).toMatchObject([
         { path, message: "Aggregate queries are only valid on /query" },
       ]);
     }

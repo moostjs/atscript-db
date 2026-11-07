@@ -262,7 +262,7 @@ describe("aggregate() — the bucket source (path guard, strict mode, capability
   it("only a number.timestamp leaf can be bucketed", async () => {
     const { table } = sql();
     const points = await rejection(table.aggregate(bucketOn("points") as any));
-    expect(points.errors).toEqual([
+    expect(points.errors).toMatchObject([
       {
         path: "points",
         message: 'Cannot bucket "points" — not a timestamp field (declare it number.timestamp)',
@@ -271,7 +271,7 @@ describe("aggregate() — the bucket source (path guard, strict mode, capability
     const status = await rejection(table.aggregate(bucketOn("status") as any));
     expect(status.errors[0]!.message).toContain("not a timestamp field");
     const unknown = await rejection(table.aggregate(bucketOn("nope") as any));
-    expect(unknown.errors).toEqual([{ path: "nope", message: 'Unknown field "nope"' }]);
+    expect(unknown.errors).toMatchObject([{ path: "nope", message: 'Unknown field "nope"' }]);
     const nav = await rejection(table.aggregate(bucketOn("owner.id") as any));
     expect(nav.errors[0]!.message).toBe('Cannot bucket "owner.id" — navigation path');
   });
@@ -279,7 +279,7 @@ describe("aggregate() — the bucket source (path guard, strict mode, capability
   it("a timestamp inside a JSON value is rejected on both adapter families", async () => {
     for (const { table } of [sql(), nested()]) {
       const err = await rejection(table.aggregate(bucketOn("meta.seenAt") as any));
-      expect(err.errors).toEqual([
+      expect(err.errors).toMatchObject([
         {
           path: "meta.seenAt",
           message: 'Cannot bucket "meta.seenAt" — inside JSON-stored column "meta"',
@@ -298,7 +298,7 @@ describe("aggregate() — the bucket source (path guard, strict mode, capability
     const { table, adapter } = sql("BucketStrict");
     const err = await rejection(table.aggregate(bucketOn("reviewedAt") as any));
     expect(err.code).toBe("INVALID_QUERY");
-    expect(err.errors).toEqual([
+    expect(err.errors).toMatchObject([
       { path: "reviewedAt", message: 'Cannot bucket "reviewedAt" — not a dimension' },
     ]);
     // Plain `$groupBy` fields keep the aggregate rule's wording.
@@ -329,7 +329,7 @@ describe("aggregate() — the bucket source (path guard, strict mode, capability
     const plain = bind(() => new MockAdapter(), "BucketEvent");
     const err = await rejection(plain.table.aggregate(bucketOn("openedAt") as any));
     expect(err.code).toBe("BUCKET_NOT_SUPPORTED");
-    expect(err.errors).toEqual([
+    expect(err.errors).toMatchObject([
       { path: "openedAt", message: 'Cannot bucket "openedAt" — adapter has no calendar buckets' },
     ]);
     expect(plain.adapter.calls.some((c) => c.method === "aggregate")).toBe(false);
@@ -461,7 +461,7 @@ describe("bucketSourceVerdict — the one bucket-source rule set", () => {
         } else if (verdict.code === "encrypted") {
           expect(error?.code, path).toBe("ENC_FIELD_AGG");
         } else {
-          expect(error?.errors, path).toEqual([
+          expect(error?.errors, path).toMatchObject([
             { path, message: `Cannot bucket "${path}" — ${verdict.reason}` },
           ]);
         }

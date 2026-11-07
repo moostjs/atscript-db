@@ -258,7 +258,7 @@ describe("/geo runs validateParsed like /query", () => {
     HIDDEN = new Set(["owner"]);
     const { c, geoSearch } = await geoController(ScopedController);
     const r = await c.geo("?$center=0,0&$with=owner");
-    expect(errorsOf(r)).toEqual([{ path: "$with", message: 'Unknown relation "owner"' }]);
+    expect(errorsOf(r)).toMatchObject([{ path: "$with", message: 'Unknown relation "owner"' }]);
     expect(geoSearch).not.toHaveBeenCalled();
   });
 
@@ -336,10 +336,10 @@ describe("text / vector / geo index gating through hasField", () => {
     const { c, search } = await accounts();
     const hidden = await c.query("?$search=zebra&$index=txt_idx");
     const missing = await c.query("?$search=zebra&$index=nope");
-    expect(errorsOf(hidden)).toEqual([
+    expect(errorsOf(hidden)).toMatchObject([
       { path: "$index", message: 'Search index "txt_idx" not found' },
     ]);
-    expect(errorsOf(missing)).toEqual([
+    expect(errorsOf(missing)).toMatchObject([
       { path: "$index", message: 'Search index "nope" not found' },
     ]);
     expect(await status(c.pages("?$search=zebra&$index=txt_idx"))).toBe(400);
@@ -371,7 +371,7 @@ describe("text / vector / geo index gating through hasField", () => {
     await c.query("?$search=n1&$index=atscript__fulltext__note_idx");
     expect(search).toHaveBeenCalledTimes(1);
     const hidden = await c.query("?$search=zebra&$index=atscript__fulltext__txt_idx");
-    expect(errorsOf(hidden)).toEqual([
+    expect(errorsOf(hidden)).toMatchObject([
       { path: "$index", message: 'Search index "atscript__fulltext__txt_idx" not found' },
     ]);
     expect(search).toHaveBeenCalledTimes(1);
@@ -404,7 +404,7 @@ describe("text / vector / geo index gating through hasField", () => {
       c.pages("?$search=alp"),
       c.query("?$search=zebra&$select=note,count(*):n&$groupBy=note"),
     ]) {
-      expect(errorsOf(await pending)).toEqual([
+      expect(errorsOf(await pending)).toMatchObject([
         { path: "$search", message: "No search index available" },
       ]);
     }
@@ -471,10 +471,10 @@ describe("text / vector / geo index gating through hasField", () => {
     const { c, vectorSearch } = await accounts();
     const hidden = await c.query("?$search=x&$vector=embedding");
     const missing = await c.query("?$search=x&$vector=nope");
-    expect(errorsOf(hidden)).toEqual([
+    expect(errorsOf(hidden)).toMatchObject([
       { path: "$vector", message: 'Vector index "embedding" not found' },
     ]);
-    expect(errorsOf(missing)).toEqual([
+    expect(errorsOf(missing)).toMatchObject([
       { path: "$vector", message: 'Vector index "nope" not found' },
     ]);
     expect(await status(c.query("?$search=x&$vector="))).toBe(400);
@@ -580,7 +580,7 @@ describe("@db.column.derived follows its source's visibility", () => {
       "$select=apiKeyCopy",
       "$select=apiKeyCopy,count(*):n&$groupBy=apiKeyCopy",
     ]) {
-      expect(errorsOf(await c.query(`?${qs}`))?.[0], qs).toEqual({
+      expect(errorsOf(await c.query(`?${qs}`))?.[0], qs).toMatchObject({
         path: "apiKeyCopy",
         message: 'Unknown field "apiKeyCopy"',
       });
@@ -654,13 +654,13 @@ describe("$with: the joined table's @db.writeOnly fields are sealed", () => {
 
   it("vetoes a write-only filter / sort inside $with like a top-level one", async () => {
     const c = await tasks();
-    expect(errorsOf(await c.query("?$with=owner(password='pw-bob')"))).toEqual([
+    expect(errorsOf(await c.query("?$with=owner(password='pw-bob')"))).toMatchObject([
       {
         path: "owner.password",
         message: 'Filtering on field "owner.password" is not permitted — field is @db.writeOnly.',
       },
     ]);
-    expect(errorsOf(await c.query("?$with=owner($sort=password)"))).toEqual([
+    expect(errorsOf(await c.query("?$with=owner($sort=password)"))).toMatchObject([
       {
         path: "owner.password",
         message: 'Sorting on field "owner.password" is not permitted — field is @db.writeOnly.',

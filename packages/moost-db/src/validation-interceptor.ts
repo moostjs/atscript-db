@@ -39,7 +39,10 @@ const dbErrorCodeToStatus: Record<string, number> = {
  */
 export function dbErrorToHttp(error: DbError): HttpError {
   // The engine text an entry keeps in `details` stays server-side (since 0.1.165).
-  const errors = error.errors.map(({ path, message, code, params }) => ({
+  // An `INVALID_QUERY` entry the core left without a code carries its error's
+  // (since 0.1.175), so a translator never receives the bare English sentence.
+  const fallback = error.code === "INVALID_QUERY" ? error.code : undefined;
+  const errors = error.errors.map(({ path, message, code = fallback, params }) => ({
     path,
     message,
     ...(code === undefined ? {} : { code }),

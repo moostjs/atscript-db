@@ -562,7 +562,7 @@ describe("resolveQuery — index visibility and identifications", () => {
     const { run, search } = await bootNative({ hide: ["status"] });
     const res = await run("$search=a");
     expect(res.status).toBe(400);
-    expect(res.body.code).toBeUndefined();
+    expect(res.body.code).toBe("INVALID_QUERY");
     expect(res.body.errors[0].path).toBe("$search");
     expect(search).not.toHaveBeenCalled();
   });

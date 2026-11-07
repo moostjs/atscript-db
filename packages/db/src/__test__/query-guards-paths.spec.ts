@@ -233,11 +233,49 @@ describe("guardPaths — relational adapter", () => {
     }
   });
 
+  it("codes every entry (code + params) under INVALID_QUERY", async () => {
+    const { table } = sqlTable();
+    const cases: Array<[Promise<unknown>, string, Record<string, unknown> | undefined]> = [
+      [table.findMany(q({ nope: 1 })), "UNKNOWN_FIELD", { field: "nope" }],
+      [
+        table.findMany(q({ contact: "x" })),
+        "FIELD_NESTED_OBJECT",
+        { field: "contact", op: "filter" },
+      ],
+      [
+        table.findMany(q({}, { $sort: { "ctx.sub": 1 } })),
+        "FIELD_IN_JSON",
+        { field: "ctx.sub", column: "ctx", op: "sort" },
+      ],
+      [
+        table.findMany(q({}, { $select: ["credentials.user"] })),
+        "FIELD_ENCRYPTED",
+        { field: "credentials.user", op: "select" },
+      ],
+      [
+        table.findMany(q({}, { $sort: { "target.name": 1 } })),
+        "NAVIGATION_PATH",
+        { field: "target.name", op: "sort" },
+      ],
+      [table.findMany(q({ title: { $some: {} } })), "NOT_A_RELATION", { field: "title" }],
+      [table.findMany(q({ $nor: [{ title: "a" }] })), "INVALID_QUERY", undefined],
+    ];
+    for (const [promise, code, params] of cases) {
+      const err = (await rejection(promise)) as {
+        code: string;
+        errors: Array<{ code?: string; params?: Record<string, unknown> }>;
+      };
+      expect(err.code, code).toBe("INVALID_QUERY");
+      expect(err.errors[0]!.code, code).toBe(code);
+      expect(err.errors[0]!.params, code).toEqual(params);
+    }
+  });
+
   it("rejects filter-node $-keys uniqu does not treat as logical (e.g. $nor)", async () => {
     const { table } = sqlTable();
     const err = await rejection(table.findMany(q({ $nor: [{ title: "a" }] })));
     // One wording for the core guard and the HTTP gate (`unsupportedOperatorMessage`).
-    expect(err.errors[0]).toEqual({
+    expect(err.errors[0]).toMatchObject({
       path: "$nor",
       message: 'Unsupported filter operator "$nor" — use $and, $or or $not',
     });
@@ -495,7 +533,7 @@ describe("guardPaths — existence-only predicates on JSON-stored columns (relat
     ]) {
       const err = await rejection(table.findMany(q(filter)));
       expect(err.code).toBe("INVALID_QUERY");
-      expect(err.errors[0]).toEqual({
+      expect(err.errors[0]).toMatchObject({
         path: expect.stringMatching(/^(ctx|tags)$/),
         message: expect.stringContaining("(accepted operators: $exists)"),
       });
@@ -507,7 +545,7 @@ describe("guardPaths — existence-only predicates on JSON-stored columns (relat
     const { table } = sqlTable();
     for (const value of [{ $exists: true, $eq: 1 }, { $exists: true, $ne: null }, { $eq: null }]) {
       const err = await rejection(table.findMany(q({ ctx: value })));
-      expect(err.errors[0]).toEqual({
+      expect(err.errors[0]).toMatchObject({
         path: "ctx",
         message:
           'Cannot filter on "ctx" — adapter cannot filter on this storage type (accepted operators: $exists)',

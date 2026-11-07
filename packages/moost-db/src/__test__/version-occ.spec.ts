@@ -225,7 +225,11 @@ describe("AsDbController OCC integration", () => {
         400,
       );
       expect((err.body as unknown as { errors: unknown }).errors).toEqual([
-        { path: "$cas", message: 'Ambiguous version: "version" and "$cas.version" differ' },
+        {
+          path: "$cas",
+          code: "INVALID_QUERY",
+          message: 'Ambiguous version: "version" and "$cas.version" differ',
+        },
       ]);
       expect(table.updateOne).not.toHaveBeenCalled();
     });

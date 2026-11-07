@@ -73,6 +73,16 @@ export function isPatchOperatorObject(value: unknown): value is Record<string, u
   return keys.every((k) => PATCH_OPS.has(k));
 }
 
+/** Whether `value` is an object with at least one array-patch operator key. */
+function hasPatchOperator(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).some((k) => PATCH_OPS.has(k))
+  );
+}
+
 /**
  * Items of union / tuple / intersection types the plugin has visited. The
  * validator visits a complex type before its items, so an item is known here
@@ -312,7 +322,11 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
       // Top-level array patch handling
       if (def.type.kind === "array" && dbCtx.flatMap) {
         const flatEntry = dbCtx.flatMap.get(ctx.path);
-        if (flatEntry?.metadata?.has("db.__topLevelArray") && !flatEntry.metadata.has("db.json")) {
+        if (flatEntry?.metadata?.has("db.json")) {
+          // A JSON field is stored (and written) whole: array operators have
+          // nothing to apply to — its own code, not a bare "Expected array".
+          if (hasPatchOperator(value)) return fail(ctx, "ARRAY_OP_ON_JSON");
+        } else if (flatEntry?.metadata?.has("db.__topLevelArray")) {
           return handleArrayPatch(ctx, def as TAtscriptAnnotatedType<TAtscriptTypeArray>, value);
         }
       }

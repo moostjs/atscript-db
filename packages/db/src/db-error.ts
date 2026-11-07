@@ -126,6 +126,13 @@ const RETRYABLE_CODES: ReadonlySet<DbErrorCode> = new Set<DbErrorCode>([
  *   which foreign key failed and every one is listed);
  * - `FK_RESTRICT` — a delete is blocked by referencing rows; params
  *   `{ table, referencedBy? }`.
+ *
+ * Query-path rejections (`INVALID_QUERY`, since 0.1.175) code their entry
+ * too: `UNKNOWN_FIELD` `{ field }`, `UNKNOWN_RELATION` `{ relation }`,
+ * `NOT_A_RELATION` `{ field }`, `NAVIGATION_PATH` / `FIELD_NOT_PERMITTED` /
+ * `FIELD_NESTED_OBJECT` / `FIELD_ENCRYPTED` `{ field, op }`, `FIELD_IN_JSON`
+ * `{ field, column, op }`, else `INVALID_QUERY` — the codes moost-db answers
+ * over HTTP (its `MOOST_DB_MESSAGES` holds their English templates).
  */
 export type TDbErrorEntryCode = "UNIQUE" | "FK_MISSING" | "FK_RESTRICT";
 
@@ -322,6 +329,26 @@ export class CasMismatchError extends DbError {
  */
 export function bucketTimeZoneUnavailable(message: string): DbError {
   return new DbError("BUCKET_TZ_UNAVAILABLE", [{ path: "$select", message }]);
+}
+
+/**
+ * A `$with` entry names a relation the table does not have (`INVALID_QUERY`,
+ * entry `UNKNOWN_RELATION` `{ relation }`, `path` `$with`; moost-db: 400) —
+ * the message names only the requested relation. Since 0.1.175.
+ */
+export function unknownWithRelation(name: string): DbError {
+  return new DbError(
+    "INVALID_QUERY",
+    [
+      {
+        path: "$with",
+        message: `Unknown relation "${name}"`,
+        code: "UNKNOWN_RELATION",
+        params: { relation: name },
+      },
+    ],
+    `Unknown relation "${name}" in $with`,
+  );
 }
 
 /**

@@ -87,7 +87,7 @@ describe("aggregate gate — $having aliases", () => {
     expect((result as HttpError).message).toBe(
       '$having key "region" must be an aggregate alias or a $groupBy field',
     );
-    expect(errorsOf(result)).toEqual([
+    expect(errorsOf(result)).toMatchObject([
       {
         path: "region",
         message: '$having key "region" must be an aggregate alias or a $groupBy field',
