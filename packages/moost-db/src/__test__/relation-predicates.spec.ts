@@ -382,6 +382,13 @@ describe("the gate", () => {
       path: "title",
       message: '"$some" / "$none" are only valid on a navigation relation — "title" is not one',
     });
+    // A dotted navigation path is coded like a plain filter on it, not as "not a relation".
+    const err = (await controller.query("?ticket.team=$some()")) as HttpError;
+    expect(err.body).toMatchObject({
+      code: "NAVIGATION_PATH",
+      params: { field: "ticket.team", op: "filter" },
+    });
+    expect(errorsOf(err)?.[0]?.message).toContain('"ticket.team" is a navigation path');
   });
 
   it("the client caps leave the core caps headroom for server overlays", () => {

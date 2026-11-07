@@ -134,9 +134,7 @@ export class RelationPredicateGate {
     }
     const relation = readable.relations?.get(nav);
     if (!relation) {
-      return badRequest(path, notARelationMessage(readable, nav, path), "NOT_A_RELATION", {
-        params: { field: path },
-      });
+      return notARelationError(readable, nav, path);
     }
     if (relation.filterable !== true) {
       return badRequest(
@@ -266,17 +264,33 @@ export class RelationPredicateGate {
   }
 }
 
-/** A `$some` / `$none` on something that is not a navigation relation of `readable`. */
-function notARelationMessage(readable: AtscriptDbReadable<any>, nav: string, path: string): string {
+/**
+ * A `$some` / `$none` on something that is not a navigation relation of
+ * `readable`: a dotted navigation path is `NAVIGATION_PATH` (like a plain
+ * filter on it), anything else `NOT_A_RELATION`.
+ */
+function notARelationError(
+  readable: AtscriptDbReadable<any>,
+  nav: string,
+  path: string,
+): HttpError {
   const dot = nav.indexOf(".");
   if (dot > 0 && readable.relations?.has(nav.slice(0, dot))) {
     // A dotted navigation path: one relation hop per nesting level.
-    return (
+    return badRequest(
+      path,
       `"${path}" is a navigation path — nest the predicates, one relation per level: ` +
-      `${nav.slice(0, dot)}=$some(${nav.slice(dot + 1)}=$some(…))`
+        `${nav.slice(0, dot)}=$some(${nav.slice(dot + 1)}=$some(…))`,
+      "NAVIGATION_PATH",
+      { params: { field: path, op: "filter" } },
     );
   }
-  return `"$some" / "$none" are only valid on a navigation relation — "${path}" is not one`;
+  return badRequest(
+    path,
+    `"$some" / "$none" are only valid on a navigation relation — "${path}" is not one`,
+    "NOT_A_RELATION",
+    { params: { field: path } },
+  );
 }
 
 /**
