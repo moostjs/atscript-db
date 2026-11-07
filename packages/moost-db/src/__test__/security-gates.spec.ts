@@ -452,7 +452,7 @@ describe("text / vector / geo index gating through hasField", () => {
     // No text index visible either: nothing to search with.
     HIDDEN = new Set(["secretNote", "note", "embedding"]);
     const none = (await c.meta()) as any;
-    const searchControls = ["search", "index", "fuzzy", "vector", "threshold"];
+    const searchControls = ["search", "index", "fuzzy", "rank", "vector", "threshold"];
     expect(none.crud.query).toEqual(without(QUERY_CONTROLS, searchControls));
     expect(none.crud.pages).toEqual(without(PAGES_CONTROLS, searchControls));
     expect(none.crud.geo).toEqual([...GEO_CONTROLS]);

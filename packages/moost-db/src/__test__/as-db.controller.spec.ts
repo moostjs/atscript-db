@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
 import { ValidatorError } from "@atscript/typescript/utils";
 import { HttpError } from "@moostjs/event-http";
+import type { Uniquery } from "@uniqu/core";
+import { buildUrl } from "@uniqu/url/builder";
 import { createEventContext, setControllerContext } from "moost";
 
 import { AsDbController } from "../as-db.controller";
@@ -268,6 +270,30 @@ describe("AsDbController", () => {
       expect(table.search).toHaveBeenCalledWith("hello", expect.any(Object), "myIndex");
     });
 
+    // `$rank=false` (since 0.1.175) arrives as a string; the controller makes it a boolean.
+    it("passes $rank=false to search as a boolean", async () => {
+      table.isSearchable.mockReturnValue(true);
+      await controller.query("/query?$search=hello&$rank=false");
+      expect(table.search.mock.calls[0][1].controls.$rank).toBe(false);
+      await controller.query("/query?$search=hello&$rank=true");
+      expect(table.search.mock.calls[1][1].controls.$rank).toBe(true);
+    });
+
+    it("$rank: false survives the client URL round trip", async () => {
+      table.isSearchable.mockReturnValue(true);
+      const qs = buildUrl({ controls: { $search: "hello", $rank: false } } as Uniquery);
+      await controller.query(`/query?${qs}`);
+      expect(table.search.mock.calls[0][1].controls.$rank).toBe(false);
+    });
+
+    it("rejects a $rank that is not a boolean (400)", async () => {
+      table.isSearchable.mockReturnValue(true);
+      const result = await controller.query("/query?$search=hello&$rank=nope");
+      expect(result).toBeInstanceOf(HttpError);
+      expect((result as HttpError).body.statusCode).toBe(400);
+      expect(table.search).not.toHaveBeenCalled();
+    });
+
     it("should fall back to findMany when not searchable", async () => {
       table.isSearchable.mockReturnValue(false);
       await controller.query("/query?$search=hello");
@@ -476,6 +502,12 @@ describe("AsDbController", () => {
       await controller.pages("/pages?$search=hello");
       expect(table.searchWithCount).toHaveBeenCalledWith("hello", expect.any(Object), undefined);
       expect(table.findManyWithCount).not.toHaveBeenCalled();
+    });
+
+    it("passes $rank=false to searchWithCount as a boolean", async () => {
+      table.isSearchable.mockReturnValue(true);
+      await controller.pages("/pages?$search=hello&$rank=false");
+      expect(table.searchWithCount.mock.calls[0][1].controls.$rank).toBe(false);
     });
 
     it("should default page to 1 and size to 10", async () => {

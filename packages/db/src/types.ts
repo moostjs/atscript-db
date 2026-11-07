@@ -49,6 +49,13 @@ export interface DbControls extends Omit<_UniqueryControls, "$select" | "$rowOrd
    * controls aggregate its rows — see `BaseDbAdapter.supportsNestedAggregates`.
    */
   $from?: DbControls;
+  /**
+   * `false` — a text search computes no relevance score: rows come in `$sort`
+   * order, or primary-key order without one (since 0.1.175). `vectorSearch()`
+   * and `geoSearch()` reject it — their order is the similarity / distance.
+   * Default `true`.
+   */
+  $rank?: boolean;
 }
 
 /** Query object with resolved projection. Passed to adapter methods. */

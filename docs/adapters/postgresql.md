@@ -66,6 +66,8 @@ You can pass additional pool options as the second argument:
 const db = createAdapter("postgresql://localhost:5432/mydb", { max: 20 });
 ```
 
+The same options object takes `textSearchConfigs` (since 0.1.175), an adapter option rather than a pool one — see [Text search configuration per language](#text-search-configs). With your own driver, pass it to the adapter: `new PostgresAdapter(driver, { textSearchConfigs })`.
+
 ### Plugin Registration
 
 To use PostgreSQL-specific annotations (`@db.pg.*`), register the plugin in your Atscript configuration:
@@ -270,11 +272,36 @@ const results = await table.search("database optimization", {
 
 Multiple fields in the same fulltext index group are concatenated for combined search.
 
-The configuration is `english` unless `@db.index.fulltext.language` names another (`russian`, `german`, …; `none` → `simple`), used for the index and every query; changing it rebuilds the index on the next schema sync. `@db.index.fulltext.match` switches the query to `websearch_to_tsquery` — `"all"` passes the text as typed, `"any"` joins the terms with `or`, without `-` exclusions (since 0.1.168). See [Language and term matching](/search/#language-and-match).
+The configuration is `english` unless `@db.index.fulltext.language` names another (`russian`, `german`, …; `none` → `simple`) or [`textSearchConfigs`](#text-search-configs) maps that language to your own, used for the index and every query; changing it rebuilds the index on the next schema sync. `@db.index.fulltext.match` switches the query to `websearch_to_tsquery` — `"all"` passes the text as typed, `"any"` joins the terms with `or`, without `-` exclusions (since 0.1.168). See [Language and term matching](/search/#language-and-match).
 
-Without a `$sort`, results are ordered by `ts_rank` descending, then the primary key (since 0.1.165). Per-field weights (`@db.index.fulltext 'idx', 5`) apply to that ranking: the distinct weights map to `setweight` buckets A–D (highest first) with their relative values. The match itself keeps using the unweighted GIN expression, so the index needs no rebuild — but the rank recomputes `to_tsvector` for every matched row before `LIMIT`; on a broad term over a large table, narrow with a filter or pass a `$sort`. `getSearchIndexes()` lists the index under its declared name (the `atscript__fulltext__<name>` key is an alias).
+Without a `$sort`, results are ordered by `ts_rank` descending, then the primary key (since 0.1.165). Per-field weights (`@db.index.fulltext 'idx', 5`) apply to that ranking: the distinct weights map to `setweight` buckets A–D (highest first) with their relative values. The match itself keeps using the unweighted GIN expression, so the index needs no rebuild — but the rank recomputes `to_tsvector` for every matched row before `LIMIT`; on a broad term over a large table, narrow with a filter, pass a `$sort`, or turn ranking off with [`$rank: false`](/search/#unranked) (since 0.1.175). `getSearchIndexes()` lists the index under its declared name (the `atscript__fulltext__<name>` key is an alias).
 
 **Integer members** are left out of the tsvector — `coalesce(int, '')` would not even be valid SQL — and matched by exact number instead. When the whole search term is a whole number, the predicate becomes `(<tsvector match> OR "ref_no" = CAST(? AS BIGINT))`; the `BIGINT` cast keeps a 10-digit term from overflowing an `INTEGER` column, and the member's btree index serves the equality next to the GIN index (a bitmap OR). An index of integer members only creates no DDL. See [Text Search — Integer fields](/search/#integer-fields-exact-number-match).
+
+### Text search configuration per language {#text-search-configs}
+
+_Since 0.1.175._ The `textSearchConfigs` adapter option replaces the built-in configuration of a `@db.index.fulltext.language` with one your app creates, for example a copy of `russian` that removes accents before stemming:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS unaccent;
+CREATE TEXT SEARCH CONFIGURATION ru_unaccent (COPY = russian);
+ALTER TEXT SEARCH CONFIGURATION ru_unaccent
+  ALTER MAPPING FOR word, hword, hword_part WITH unaccent, russian_stem;
+```
+
+```typescript
+const db = createAdapter("postgresql://localhost:5432/mydb", {
+  textSearchConfigs: { russian: "ru_unaccent" },
+});
+// or: new PostgresAdapter(driver, { textSearchConfigs: { russian: "ru_unaccent" } })
+```
+
+The built-in `russian` already stems words of plain ASCII letters with `english_stem`, so mixed Russian and English text needs no custom configuration for that.
+
+- Every index of that language and every query against it use the configuration. An index without `@db.index.fulltext.language` is `english` on PostgreSQL, so the `english` entry maps it too.
+- The name must be an unquoted lowercase identifier (letters, digits, `_`) that the connection finds through its `search_path` — no schema prefix. Other names, and keys that are not a `@db.index.fulltext.language` value, are rejected when the adapter is created.
+- Create the configuration before schema sync builds the index; atscript-db does not create it.
+- The configuration is part of the schema: changing an entry rebuilds the indexes of that language on the next schema sync.
 
 ## Transactional DDL
 

@@ -86,3 +86,32 @@ describe("MysqlAdapter — fulltext relevance order", () => {
     expect(count.sql).not.toContain("ORDER BY");
   });
 });
+
+// `$rank: false` (since 0.1.175): no relevance ORDER BY — `$sort`, else the primary key.
+describe("MysqlAdapter — $rank: false", () => {
+  const MATCH = "MATCH(`title`, `body`) AGAINST(? IN NATURAL LANGUAGE MODE)";
+
+  it("MATCH only filters: ORDER BY the primary key", async () => {
+    const { driver, table } = setup(fx.FtPlain);
+    await table.search("cat", { filter: {}, controls: { $rank: false, $limit: 10 } } as any);
+    const call = searchSql(driver);
+    expect(call.sql).toContain(`WHERE ${MATCH} ORDER BY \`id\` ASC LIMIT ?`);
+    expect(call.sql.match(/AGAINST/g)).toHaveLength(1);
+    expect(call.params).toEqual(["cat", 10]);
+  });
+
+  it("searchWithCount: the page unranked too", async () => {
+    const { driver, table } = setup(fx.FtPlain);
+    await table.searchWithCount("cat", { filter: {}, controls: { $rank: false } } as any);
+    expect(searchSql(driver).sql.match(/AGAINST/g)).toHaveLength(1);
+  });
+
+  it("an explicit $sort still wins", async () => {
+    const { driver, table } = setup(fx.FtPlain);
+    await table.search("cat", {
+      filter: {},
+      controls: { $rank: false, $sort: { title: -1 } },
+    } as any);
+    expect(searchSql(driver).sql).toContain("ORDER BY `title` DESC");
+  });
+});

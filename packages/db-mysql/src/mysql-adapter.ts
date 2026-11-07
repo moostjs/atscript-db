@@ -3097,7 +3097,8 @@ export class MysqlAdapter extends BaseDbAdapter {
    * The search predicate (AND the request filter) and its relevance order
    * (`rank`, since 0.1.165) — used as the ORDER BY when the read has no
    * `$sort`: exact-number hits first, then `MATCH … AGAINST` relevance, then
-   * the primary key. Grouped searches use only the predicate.
+   * the primary key; the primary key alone under `$rank: false`. Grouped
+   * searches use only the predicate.
    */
   private _buildSearchWhere(
     text: string,
@@ -3116,10 +3117,12 @@ export class MysqlAdapter extends BaseDbAdapter {
     const all = fulltextIndex.match === "all";
     const matchClause = `MATCH(${matchCols}) AGAINST(? IN ${all ? "BOOLEAN" : "NATURAL LANGUAGE"} MODE)`;
     const term = all ? mysqlRequireEveryTerm(text) : text;
+    // `$rank: false` (since 0.1.175): no MATCH relevance — primary-key order
+    const ranked = textFields.length > 0 && query.controls?.$rank !== false;
     const rank = searchRankOrder(mysqlDialect, {
       exactEqualities: n === undefined ? [] : integerFields.map((f) => `${qi(f.name)} = ?`),
       n,
-      textRank: textFields.length > 0 ? { sql: `${matchClause} DESC`, params: [term] } : undefined,
+      textRank: ranked ? { sql: `${matchClause} DESC`, params: [term] } : undefined,
       pkColumns: this._table.primaryKeys.map((key) => this._table.physicalPath(key)),
     });
     const withWhere = (clause: string, params: unknown[]) => ({

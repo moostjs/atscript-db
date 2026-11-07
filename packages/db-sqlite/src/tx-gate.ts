@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { DbError } from "@atscript/db";
-import type { TGenericLogger } from "@atscript/db";
+import type { TDbFulltextLanguage, TGenericLogger } from "@atscript/db";
 
 import type { TSqliteDriver } from "./types";
 
@@ -25,7 +25,10 @@ export interface SqliteTxWaitOptions {
   logger?: TGenericLogger;
 }
 
-/** Options accepted by `SqliteAdapter` / `createAdapter`: the transaction gate's, plus `viewJoinPruning`. */
+/**
+ * Options accepted by `SqliteAdapter` / `createAdapter`: the transaction
+ * gate's, plus `viewJoinPruning` and `ftsTokenizers`.
+ */
 export type SqliteAdapterOptions = Pick<
   SqliteTxWaitOptions,
   "transactionWaitTimeoutMs" | "transactionWaitWarnMs"
@@ -37,6 +40,17 @@ export type SqliteAdapterOptions = Pick<
    * @since 0.1.153
    */
   viewJoinPruning?: boolean;
+  /**
+   * The FTS5 tokenizer per `@db.index.fulltext.language`, e.g.
+   * `{ russian: "snowball russian unicode61" }` — replaces the default
+   * (`porter unicode61` for `english`, `unicode61` for the rest), and a
+   * configured language gets no "no stemmer" warning. A tokenizer FTS5 does
+   * not ship comes from a SQLite extension loaded through the driver's
+   * `loadExtensions`. Words, digits, `_` and spaces only. Changing it rebuilds
+   * the index on the next schema sync.
+   * @since 0.1.175
+   */
+  ftsTokenizers?: Partial<Record<TDbFulltextLanguage, string>>;
 };
 
 const DEFAULT_WARN_MS = 5000;

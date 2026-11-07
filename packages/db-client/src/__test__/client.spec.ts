@@ -162,6 +162,13 @@ describe("Client", () => {
     expect(url).toContain("$index=title_idx");
   });
 
+  it("query sends $rank: false as $rank=false (since 0.1.175)", async () => {
+    fetchFn = mockFetch([]);
+    const client = new Client<typeof UserType>("/api/users", { fetch: fetchFn });
+    await client.query({ controls: { $search: "hello", $rank: false } });
+    expect(fetchFn.mock.calls[0][0] as string).toContain("$rank=false");
+  });
+
   // ── count (GET /query with $count) ─────────────────────────────────────
 
   it("count sends $count control", async () => {

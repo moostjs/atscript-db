@@ -10,6 +10,7 @@ export interface QueryControlsDto {
     $fuzzy?: string
     $vector?: string
     $threshold?: string
+    $rank?: boolean
     $with?: WithRelationDto[]
     $actions?: boolean
 }
@@ -27,6 +28,7 @@ export interface PagesControlsDto {
     $fuzzy?: string
     $vector?: string
     $threshold?: string
+    $rank?: boolean
     $with?: WithRelationDto[]
     $actions?: boolean
 }

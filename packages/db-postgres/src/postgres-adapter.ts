@@ -117,7 +117,7 @@ import {
   pgDialect,
   finalizeParams,
 } from "./sql-builder";
-import type { TPgConnection, TPgDriver } from "./types";
+import type { TPgConnection, TPgDriver, TPostgresAdapterOptions } from "./types";
 
 /** The statement surface the adapter runs CRUD through (pool or transaction connection). */
 type TPgExecutor = Pick<TPgDriver, "run" | "all" | "get" | "exec">;
@@ -378,8 +378,16 @@ export class PostgresAdapter extends BaseDbAdapter {
     return this._table?.schema ?? null;
   }
 
-  constructor(protected readonly driver: TPgDriver) {
+  /** `textSearchConfigs` — the text search configuration per fulltext language (since 0.1.175). */
+  private readonly _textSearchConfigs: TPostgresAdapterOptions["textSearchConfigs"];
+
+  constructor(
+    protected readonly driver: TPgDriver,
+    options?: TPostgresAdapterOptions,
+  ) {
     super();
+    validateTextSearchConfigs(options?.textSearchConfigs);
+    this._textSearchConfigs = options?.textSearchConfigs;
   }
 
   // ── Transaction primitives ──────────────────────────────────────────────
@@ -2168,7 +2176,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       },
       // `@db.index.fulltext.language` changed → rebuild (since 0.1.168)
       renderDesiredDefinition: (index) =>
-        index.type === "fulltext" ? pgTextSearchConfig(index) : undefined,
+        index.type === "fulltext" ? this._textSearchConfig(index) : undefined,
       createIndex: async (index: TDbIndex) => {
         if (index.type === "fulltext") {
           // GIN index on tsvector expression (text members only — integer
@@ -2176,7 +2184,7 @@ export class PostgresAdapter extends BaseDbAdapter {
           const textFields = splitFulltextFields(index).text;
           if (textFields.length === 0) return;
           const tsvectorExpr = this._buildTsvectorExpr(textFields);
-          const sql = `CREATE INDEX IF NOT EXISTS ${qi(index.key)} ON ${quoteTableName(this.resolveTableName())} USING gin(to_tsvector('${pgTextSearchConfig(index)}', ${tsvectorExpr}))`;
+          const sql = `CREATE INDEX IF NOT EXISTS ${qi(index.key)} ON ${quoteTableName(this.resolveTableName())} USING gin(to_tsvector('${this._textSearchConfig(index)}', ${tsvectorExpr}))`;
           this._log(sql);
           await this._exec().exec(sql);
           return;
@@ -2403,8 +2411,9 @@ export class PostgresAdapter extends BaseDbAdapter {
    * The search predicate (AND the request filter) and its relevance order
    * (`rank`, since 0.1.165) — used as the ORDER BY when the read has no
    * `$sort`: exact-number hits first, then `ts_rank` over the text members
-   * (per-field weights through `setweight` buckets), then the primary key.
-   * Grouped searches use only the predicate.
+   * (per-field weights through `setweight` buckets), then the primary key;
+   * the primary key alone under `$rank: false`. Grouped searches use only
+   * the predicate.
    */
   private _buildSearchWhere(
     text: string,
@@ -2428,16 +2437,19 @@ export class PostgresAdapter extends BaseDbAdapter {
       n === undefined ? [] : integerFields.map((f) => `${qi(f.name)} = CAST(? AS BIGINT)`);
     let textRank: TSqlFragment | undefined;
     if (textFields.length > 0) {
-      const config = pgTextSearchConfig(fulltextIndex);
+      const config = this._textSearchConfig(fulltextIndex);
       const tsvector = `to_tsvector('${config}', ${this._buildTsvectorExpr(textFields)})`;
       const { fn, term } = pgTsQuery(fulltextIndex, text);
       const tsquery = `${fn}('${config}', ?)`;
       parts.push(`${tsvector} @@ ${tsquery}`);
       params.push(term);
-      textRank = {
-        sql: `${this._buildTsRankExpr(textFields, tsvector, config, tsquery)} DESC`,
-        params: [term],
-      };
+      // `$rank: false` (since 0.1.175): no ts_rank — primary-key order
+      if (query.controls?.$rank !== false) {
+        textRank = {
+          sql: `${this._buildTsRankExpr(textFields, tsvector, config, tsquery)} DESC`,
+          params: [term],
+        };
+      }
     }
     for (const eq of equalities) {
       parts.push(eq);
@@ -2455,6 +2467,23 @@ export class PostgresAdapter extends BaseDbAdapter {
         pkColumns: this._table.primaryKeys.map((key) => this._table.physicalPath(key)),
       }),
     };
+  }
+
+  /**
+   * The text search configuration of a fulltext index: the one
+   * `textSearchConfigs` gives its language (since 0.1.175), else
+   * {@link pgTextSearchConfig}.
+   */
+  private _textSearchConfig(index: TDbIndex): string {
+    return this.fulltextEngineConfig(index) ?? pgTextSearchConfig(index);
+  }
+
+  /**
+   * The `textSearchConfigs` entry of the index's language — an index without
+   * one is `english` here — or `undefined`. Part of the schema hash (since 0.1.175).
+   */
+  override fulltextEngineConfig(index: TDbIndex): string | undefined {
+    return this._textSearchConfigs?.[index.language ?? "english"];
   }
 
   /**
@@ -3106,9 +3135,45 @@ function pgTextSearchConfig(index: TDbIndex): string {
   return language === "none" ? "simple" : language;
 }
 
-/** The configuration of a `to_tsvector('<config>'::regconfig, …)` index definition, else `undefined`. */
+/**
+ * The configuration of a `to_tsvector('<config>'::regconfig, …)` index
+ * definition, else `undefined`. PostgreSQL prints a keyword name (`select`)
+ * — and every name under `quote_all_identifiers` — quoted (`'"select"'`);
+ * the quotes are removed so it compares with the configured name.
+ */
 function tsConfigOfIndexDef(def: string | null): string | undefined {
-  return def ? /to_tsvector\('([a-z_]+)'::regconfig/i.exec(def)?.[1] : undefined;
+  const m = def
+    ? /to_tsvector\('(?:"((?:[^"]|"")+)"|([a-z_][a-z0-9_]*))'::regconfig/i.exec(def)
+    : null;
+  return m ? (m[1]?.replaceAll('""', '"') ?? m[2]) : undefined;
+}
+
+/**
+ * An unquoted lowercase identifier — what `pg_get_indexdef` prints back
+ * unchanged (no quotes, no schema for a configuration on the `search_path`).
+ */
+const PG_CONFIG_NAME = /^[a-z_][a-z0-9_]{0,62}$/;
+
+/**
+ * Checks `textSearchConfigs` (since 0.1.175): every key a
+ * `@db.index.fulltext.language` value, every configuration an unquoted
+ * lowercase identifier (it is inlined into DDL and queries). Throws on the
+ * first bad entry.
+ */
+function validateTextSearchConfigs(configs: TPostgresAdapterOptions["textSearchConfigs"]): void {
+  for (const [language, config] of Object.entries(configs ?? {})) {
+    if (config === undefined) continue;
+    if (!(DB_FULLTEXT_LANGUAGES as readonly string[]).includes(language)) {
+      throw new Error(
+        `[postgres] textSearchConfigs: "${language}" is not a @db.index.fulltext.language value`,
+      );
+    }
+    if (typeof config !== "string" || !PG_CONFIG_NAME.test(config)) {
+      throw new Error(
+        `[postgres] textSearchConfigs.${language}: ${JSON.stringify(config)} is not a text search configuration name — use an unquoted lowercase identifier (letters, digits, "_") on the search_path`,
+      );
+    }
+  }
 }
 
 /**

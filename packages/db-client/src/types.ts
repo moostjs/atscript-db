@@ -281,6 +281,12 @@ export type ResponseDataOf<T> = T extends { type: { __dataType?: infer D } }
  */
 export type DecoratedControls<T, D> = Omit<UniqueryControls<OwnOf<T>, NavOf<T>>, "$select"> & {
   $select?: SelectExpr<OwnOf<T> & D>;
+  /**
+   * `false` — a `$search` read computes no relevance score: rows come in
+   * `$sort` order, or primary-key order without one. A `$vector` read refuses
+   * it (400). Default `true`. Since 0.1.175.
+   */
+  $rank?: boolean;
 };
 
 /** A read query over `T` — {@link DecoratedControls} for the controls. Since 0.1.148. */

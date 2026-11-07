@@ -401,9 +401,9 @@ const results = await articles.search("mongodb tutorial");
 
 MongoDB keeps **one** text index per collection, so a table may declare only one `@db.index.fulltext` name with text (string) members: a second one throws when the table metadata is built. Extra fulltext names that hold only integer members are fine and are addressable with `$index=<name>`.
 
-The term is handed to `$text`, so MongoDB's operators apply natively: a plain list of words matches **any** of them, `"a phrase"` matches the phrase, and `-word` excludes a word (a term made only of negations matches nothing). Results are ranked by `textScore`.
+The term is handed to `$text`, so MongoDB's operators apply natively: a plain list of words matches **any** of them, `"a phrase"` matches the phrase, and `-word` excludes a word (a term made only of negations matches nothing). Results are ranked by `textScore`; with `$rank: false` (since 0.1.175) no score is projected and rows come in `$sort`, else `_id`, order — see [Unranked search](/search/#unranked).
 
-`@db.index.fulltext.language` (since 0.1.168) sets the text index's `default_language` (`english` when unset; `none` turns stemming and stop words off); changing it rebuilds the index on the next schema sync. `@db.index.fulltext.match "all"` splits each word on punctuation (`e-mail` → `e`, `mail`) and turns every piece into a phrase, so every word is required — phrases match as written, without stemming. See [Language and term matching](/search/#language-and-match).
+`@db.index.fulltext.language` (since 0.1.168) sets the text index's `default_language` (`english` when unset; `none` turns stemming and stop words off); changing it rebuilds the index on the next schema sync. The adapter sets no `language_override`; for documents in several languages see [Several languages](/search/#several-languages). `@db.index.fulltext.match "all"` splits each word on punctuation (`e-mail` → `e`, `mail`) and turns every piece into a phrase, so every word is required — phrases match as written, without stemming. See [Language and term matching](/search/#language-and-match).
 
 **Integer members** are not part of the text index (it ignores numbers); the text index and its weights cover the string members only. When the whole search term is a whole number the stage becomes
 

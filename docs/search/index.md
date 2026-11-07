@@ -93,14 +93,14 @@ export interface Article {
 
 **`@db.index.fulltext.language "<language>", "<index>"?`** sets the text language — which words share a stem and which are stop words. The values are `none` (no stemming, no stop words), `danish`, `dutch`, `english`, `finnish`, `french`, `german`, `hungarian`, `italian`, `norwegian`, `portuguese`, `romanian`, `russian`, `spanish`, `swedish` and `turkish`; the editor completes them. Without it each database keeps its default.
 
-| Adapter        | What the language does                                                                                                                                                       | Default                  |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
-| **PostgreSQL** | The text search configuration of the index and of every query (`none` → `simple`).                                                                                           | `english`                |
-| **MongoDB**    | The text index's `default_language`.                                                                                                                                         | `english`                |
-| **SQLite**     | `english` builds the FTS5 table with the Porter stemmer. FTS5 has no other stemmer: any other language indexes words unstemmed (`unicode61`) and schema sync logs a warning. | `unicode61`, no stemming |
-| **MySQL**      | Ignored, with a warning at schema sync: `FULLTEXT` has no per-index language.                                                                                                | the server's stop words  |
+| Adapter        | What the language does                                                                                                                                                                                                                                                     | Default                  |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| **PostgreSQL** | The text search configuration of the index and of every query (`none` → `simple`), or the one [`textSearchConfigs`](/adapters/postgresql#text-search-configs) maps the language to.                                                                                        | `english`                |
+| **MongoDB**    | The text index's `default_language`.                                                                                                                                                                                                                                       | `english`                |
+| **SQLite**     | `english` builds the FTS5 table with the Porter stemmer. FTS5 has no other stemmer built in: any other language indexes words unstemmed (`unicode61`) and schema sync logs a warning, unless [`ftsTokenizers`](/adapters/sqlite#fulltext-tokenizers) gives it a tokenizer. | `unicode61`, no stemming |
+| **MySQL**      | Ignored, with a warning at schema sync: `FULLTEXT` has no per-index language.                                                                                                                                                                                              | the server's stop words  |
 
-Changing the language rebuilds the index on the next schema sync (PostgreSQL, MongoDB, SQLite). An index without the annotation keeps the index it has.
+Changing the language rebuilds the index on the next schema sync (PostgreSQL, MongoDB, SQLite), and so does changing the adapter's `textSearchConfigs` / `ftsTokenizers` entry for it. An index without the annotation keeps the index it has.
 
 **`@db.index.fulltext.match "all" | "any", "<index>"?`** decides whether a search needs every term or any term:
 
@@ -112,6 +112,17 @@ Changing the language rebuilds the index on the next schema sync (PostgreSQL, Mo
 | **MongoDB**    | each word (split on punctuation) becomes a phrase, so every word is required (matched as written, without stemming) | `$text` as typed                                                    | any                     |
 
 Results stay in [relevance order](#ranking). Under `match "all"` PostgreSQL reads the web-search syntax: a `"quoted phrase"`, `or` between words, `-word` to exclude; under `"any"` a leading `-` is dropped, since one excluded term OR-ed with the others would match nearly every row. On MySQL, the text is split into words the way InnoDB splits it — at every character that is not a letter, a number, a combining mark or `_`, so `the, quick` is the words `the` and `quick`. Under `"all"`, words shorter than 3 characters and InnoDB's default stop words stay optional — the server does not index them, so requiring one would match nothing; a server with a larger `innodb_ft_min_token_size` or its own stop-word list can still miss such words.
+
+### Several languages {#several-languages}
+
+A fulltext index has one language. There is no annotation for several languages in one index; what each database can do instead:
+
+- **PostgreSQL** — one text search configuration per index. A configuration maps each kind of word to its own dictionaries: the built-in `russian`, for example, already stems words of plain ASCII letters with `english_stem`. For other combinations create a [custom configuration](/adapters/postgresql#text-search-configs) and map the index's language to it with `textSearchConfigs`.
+- **MongoDB** — one text index per collection, with one `default_language`. MongoDB itself reads a document field named `language` as that document's language (and rejects a write whose `language` value it does not support); a search is stemmed with the index's language. Naming another field for this (`language_override`) is not supported by the adapter.
+- **SQLite** — one FTS5 tokenizer per index: the one [`ftsTokenizers`](/adapters/sqlite#fulltext-tokenizers) gives the index's language. Whether it handles more than one language depends on the tokenizer you load.
+- **MySQL** — `FULLTEXT` does not stem in any language, so text in any language is matched by its word forms as written.
+
+On PostgreSQL and SQLite, to search texts in different languages with each one's stemming, give each language its own field and fulltext index (`@db.index.fulltext.language "<language>", "<index>"`), and pick the index with `$index`.
 
 ## Programmatic API
 
@@ -145,7 +156,25 @@ The `search()` method returns records ranked by relevance.
 
 Without a `$sort`, results come in relevance order on every adapter (since 0.1.165 — before, PostgreSQL and SQLite returned matches in storage order): PostgreSQL ranks with `ts_rank`, SQLite with FTS5 `bm25()`, MySQL by `MATCH … AGAINST`, MongoDB by `textScore`. The weights of `@db.index.fulltext` apply on PostgreSQL, SQLite and MongoDB. When the whole term is a whole number, rows matched by an [integer member](#integer-fields-exact-number-match) come first. The primary key breaks ties (`_id` on MongoDB's classic text index), so offset pages are stable — except an Atlas `$search`, which keeps Atlas's own score order with no tie-breaker. An explicit `$sort` replaces relevance order.
 
-On PostgreSQL the rank recomputes `to_tsvector` for every matched row before `LIMIT` applies (the GIN index serves the match, not the rank), so a broad term over a large table costs a pass over all its matches. Narrow with a filter, or pass a `$sort` on an indexed column when relevance does not matter.
+On PostgreSQL the rank recomputes `to_tsvector` for every matched row before `LIMIT` applies (the GIN index serves the match, not the rank), so a broad term over a large table costs a pass over all its matches. Narrow with a filter, or turn ranking off with `$rank: false` when relevance does not matter.
+
+#### Unranked search {#unranked}
+
+_Since 0.1.175._ `$rank: false` matches like any search but computes no relevance score: rows come in `$sort` order, or in primary-key order without a `$sort` (`_id` on MongoDB; a view without a primary key keeps the database's order).
+
+```typescript
+// e.g. collecting candidate ids that your app ranks itself
+const rows = await articles.search("typescript", {
+  filter: {},
+  controls: { $rank: false, $select: ["id"], $limit: 500 },
+});
+```
+
+- No adapter computes a rank expression: no `ts_rank` (PostgreSQL), `bm25()` (SQLite), `MATCH … AGAINST` order (MySQL) or `textScore` (MongoDB). Rows matched by an integer member are not moved first either.
+- On a MongoDB Atlas `$search` the engine still scores inside its stage; the results come in `_id` order. That order is an extra sort over every hit before `$skip` / `$limit`, so on Atlas an unranked search can be slower than a ranked one.
+- `searchWithCount()` and `/pages` order the page the same way; the count does not change.
+- `vectorSearch()` and `geoSearch()` reject it with `INVALID_QUERY`: their results are the nearest rows, so similarity or distance is the order.
+- On a table without native search (the `@db.column.searchable` fallback), reads are not ranked anyway, and `$rank: false` changes nothing.
 
 ### Search with Count
 
@@ -200,9 +229,10 @@ GET /articles/query?$search=typescript%20tutorial
 GET /articles/query?$search=typescript%20tutorial&$index=content_idx
 GET /articles/query?$search=database&category=tech
 GET /articles/pages?$search=typescript&$page=1&$size=20
+GET /articles/query?$search=typescript&$rank=false
 ```
 
-The `$search` parameter provides the search text. Add `$index` to target a specific fulltext index when multiple exist. Regular filter parameters (like `category=tech`) combine with search results using AND logic.
+The `$search` parameter provides the search text. Add `$index` to target a specific fulltext index when multiple exist, and `$rank=false` for an [unranked search](#unranked). Regular filter parameters (like `category=tech`) combine with search results using AND logic.
 
 See [HTTP — Advanced](/http/advanced) for the full URL query syntax.
 

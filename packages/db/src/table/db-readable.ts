@@ -284,6 +284,16 @@ function withGroupBy(query: AggregateQuery): AggregateQuery {
 }
 
 /**
+ * Refuses `$rank: false` (since 0.1.175) on a read whose order IS its result —
+ * `ordered` names it (`"vectorSearch results are similarity-ordered"`).
+ */
+function refuseUnranked(controls: object | undefined, ordered: string): void {
+  if ((controls as { $rank?: unknown } | undefined)?.$rank === false) {
+    throw invalidQuery("$rank", `${ordered} — $rank: false applies to text search only`);
+  }
+}
+
+/**
  * The inner level of a two-level aggregate with every plain `$groupBy` key
  * listed in its `$select` (after validation): each is an inner column the
  * outer level may read, whether the request selected it or not.
@@ -1924,7 +1934,7 @@ export class AtscriptDbReadable<
       maybeQuery,
     );
     this._ensureBuilt();
-    this._guardQuery(query as Uniquery | undefined);
+    this._guardVectorQuery(query as Uniquery | undefined);
     const read = this._translateRead(query as Uniquery | undefined);
     const results = await this.adapter.vectorSearch(vector, read.translated, indexName);
     const rows = await this._finishRead(results, read);
@@ -1949,7 +1959,7 @@ export class AtscriptDbReadable<
       maybeQuery,
     );
     this._ensureBuilt();
-    this._guardQuery(query as Uniquery | undefined);
+    this._guardVectorQuery(query as Uniquery | undefined);
     const read = this._translateRead(query as Uniquery | undefined);
     const result = await this.adapter.vectorSearchWithCount(vector, read.translated, indexName);
     const rows = await this._finishRead(result.data, read);
@@ -1957,6 +1967,16 @@ export class AtscriptDbReadable<
       data: rows as Array<DbResponse<DataType, NavType, Q>>,
       count: result.count,
     };
+  }
+
+  /**
+   * {@link _guardQuery} for a vector search, which also refuses `$rank: false`
+   * (since 0.1.175): the nearest rows ARE the result, so there is no unranked
+   * vector search.
+   */
+  private _guardVectorQuery(query: Uniquery | undefined): void {
+    refuseUnranked(query?.controls, "vectorSearch results are similarity-ordered");
+    this._guardQuery(query);
   }
 
   /** Resolves overloaded vector search arguments into canonical form. */
@@ -2105,6 +2125,7 @@ export class AtscriptDbReadable<
         "geoSearch results are distance-ordered — $sort is not allowed on this path",
       );
     }
+    refuseUnranked(controls, "geoSearch results are distance-ordered");
     for (const key of ["$maxDistance", "$minDistance"] as const) {
       const v = controls[key];
       if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) {

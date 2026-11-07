@@ -46,7 +46,6 @@ export function noTableError(ctx: EventContext): HttpError {
   }
   return new HttpError(500, {
     statusCode: 500,
-    error: "Internal Server Error",
     message: "Internal server error",
     code: "ACTION_TABLE_NOT_BOUND",
   });

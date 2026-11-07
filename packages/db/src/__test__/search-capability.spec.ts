@@ -130,3 +130,29 @@ describe("a vector-only table and $search", () => {
     expect(adapter.calls.some((c) => c.method === "vectorSearch")).toBe(true);
   });
 });
+
+// `$rank: false` (since 0.1.175) is a text-search control: a vector search's
+// nearest rows ARE its result, so the core refuses it before the adapter runs.
+describe("vectorSearch and $rank: false", () => {
+  it("rejects $rank: false on vectorSearch() and vectorSearchWithCount()", async () => {
+    const adapter = new VectorOnlyAdapter();
+    const table: any = new AtscriptDbTable(AggOrders, adapter);
+    const query = { filter: {}, controls: { $rank: false } };
+    for (const run of [
+      () => table.vectorSearch([0.1, 0.2, 0.3], query),
+      () => table.vectorSearchWithCount("embedding", [0.1, 0.2, 0.3], query),
+    ]) {
+      const err = (await run().catch((e: unknown) => e)) as DbError;
+      expect(err).toBeInstanceOf(DbError);
+      expect([err.code, err.errors[0]?.path]).toEqual(["INVALID_QUERY", "$rank"]);
+    }
+    expect(adapter.calls.some((c) => c.method === "vectorSearch")).toBe(false);
+  });
+
+  it("$rank: true is the default and runs", async () => {
+    const table: any = new AtscriptDbTable(AggOrders, new VectorOnlyAdapter());
+    expect(await table.vectorSearch([0.1], { filter: {}, controls: { $rank: true } })).toEqual([
+      { id: 1 },
+    ]);
+  });
+});

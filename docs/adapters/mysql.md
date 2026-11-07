@@ -314,7 +314,7 @@ WHERE `id` IN (SELECT `id` FROM (
 ) AS `_atscript_search`)
 ```
 
-A composite key uses a row-value `IN`; a table without a primary key falls back to a plain `OR`. Without a `$sort` the result is ordered explicitly (since 0.1.165): exact-number hits first, then `MATCH … AGAINST` relevance, then the primary key — also in the `UNION` form, which had no relevance order before. `getSearchIndexes()` lists the index under its declared name (the `atscript__fulltext__<name>` key is an alias). An index of integer members only creates no FULLTEXT index. See [Text Search — Integer fields](/search/#integer-fields-exact-number-match).
+A composite key uses a row-value `IN`; a table without a primary key falls back to a plain `OR`. Without a `$sort` the result is ordered explicitly (since 0.1.165): exact-number hits first, then `MATCH … AGAINST` relevance, then the primary key — also in the `UNION` form, which had no relevance order before. With `$rank: false` (since 0.1.175) `MATCH` only filters and the order is the primary key — see [Unranked search](/search/#unranked). `getSearchIndexes()` lists the index under its declared name (the `atscript__fulltext__<name>` key is an alias). An index of integer members only creates no FULLTEXT index. See [Text Search — Integer fields](/search/#integer-fields-exact-number-match).
 
 ::: info FULLTEXT column ordering
 MySQL FULLTEXT indexes do not support explicit column ordering. Atscript omits the ASC/DESC modifiers for FULLTEXT index fields automatically.

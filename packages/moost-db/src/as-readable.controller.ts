@@ -500,7 +500,7 @@ export abstract class AsReadableController<
    * endpoints, and `POST /`) it parses the query string — `/one` and `POST /`
    * keep only the `$` controls ({@link parseControlsOnlyFromUrl}), every other endpoint the
    * whole query ({@link parseQueryString}) — and coerces boolean controls the
-   * URL grammar leaves as strings (`$actions=true`); then it awaits
+   * URL grammar leaves as strings (`$actions=true`, `$rank=false`); then it awaits
    * {@link prepareRequest} (when implemented) with the parsed controls.
    * Without a `url` (writes, `meta`, `metaForm`) only the hook runs. Custom
    * routes on a subclass should call it too.
@@ -526,6 +526,9 @@ export abstract class AsReadableController<
         controls.$actions =
           controls.$actions === "true" || controls.$actions === "1" || controls.$actions === "";
       }
+      // `$rank=false` (since 0.1.175); any other text stays a string for the DTO to refuse
+      if (controls.$rank === "false" || controls.$rank === "0") controls.$rank = false;
+      else if (controls.$rank === "true" || controls.$rank === "1") controls.$rank = true;
       request = { parsed, controls, hasNonControl };
     }
     if (typeof this.prepareRequest === "function") {

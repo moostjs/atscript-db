@@ -1694,6 +1694,16 @@ export abstract class BaseDbAdapter {
   dropForeignKeys?(fkFieldKeys: string[]): Promise<void>;
 
   /**
+   * The engine text-search setting a fulltext index is built with when an
+   * adapter option sets it for the index's language (SQLite `ftsTokenizers`,
+   * PostgreSQL `textSearchConfigs`), else `undefined`. Part of the table
+   * snapshot, so changing the option re-runs schema sync, which rebuilds the
+   * index.
+   * @since 0.1.175
+   */
+  fulltextEngineConfig?(index: TDbIndex): string | undefined;
+
+  /**
    * Returns the desired table options from Atscript annotations.
    * Called after onBeforeFlatten/onAfterFlatten, so adapter-specific state
    * (e.g., engine, charset, capped options) is populated.

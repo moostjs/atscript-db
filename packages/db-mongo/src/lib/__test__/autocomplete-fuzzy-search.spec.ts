@@ -265,3 +265,24 @@ describe("[mongo] no declared fuzzy (dynamic index)", () => {
     });
   });
 });
+
+// `$rank: false` (since 0.1.175) on an Atlas `$search`: Atlas scores inside
+// the stage, so the order is what changes — `_id` instead of the score.
+describe("[mongo] Atlas $search under $rank: false", () => {
+  beforeEach(async () => {
+    const { Person } = await import("./fixtures/search-collection.as");
+    adapter = mongo.getAdapter(Person) as unknown as MongoAdapter;
+    mockCollection();
+  });
+
+  it("orders by _id; without it the stage's score order stands", async () => {
+    await adapter.search("ann", { filter: {}, controls: { $rank: false } });
+    let pipeline = aggregate.mock.calls.at(-1)?.[0] as Record<string, unknown>[];
+    expect(lastStage()).toHaveProperty("$search");
+    expect(pipeline).toContainEqual({ $sort: { _id: 1 } });
+
+    await adapter.search("ann", EMPTY_QUERY);
+    pipeline = aggregate.mock.calls.at(-1)?.[0] as Record<string, unknown>[];
+    expect(pipeline.some((s) => "$sort" in s)).toBe(false);
+  });
+});

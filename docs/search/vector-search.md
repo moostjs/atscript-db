@@ -109,7 +109,7 @@ const results = await docs.vectorSearch(queryVector, {
 });
 ```
 
-Results are ordered by similarity (most similar first). `controls.$select` projects the rows exactly like `findMany()` — inclusion and exclusion forms, on every adapter (the SQL adapters returned every column before 0.1.143, so `@db.writeOnly` fields leaked through `$vector` queries over HTTP).
+Results are ordered by similarity (most similar first): the nearest rows are the result, so there is no unranked vector search, and `controls.$rank: false` — the [unranked text search](/search/#unranked) control — is rejected with `INVALID_QUERY` (since 0.1.175). `controls.$select` projects the rows exactly like `findMany()` — inclusion and exclusion forms, on every adapter (the SQL adapters returned every column before 0.1.143, so `@db.writeOnly` fields leaked through `$vector` queries over HTTP).
 
 ### Vector Search with Count
 

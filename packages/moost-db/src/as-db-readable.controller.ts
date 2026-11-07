@@ -1559,14 +1559,14 @@ export class AsDbReadableController<
     );
     const searchable = isSearchable ? visibleDefault("text") : fallbackVisible.some(Boolean);
     // The read controls the index gate would refuse, left out of `crud`:
-    // `$index` / `$fuzzy` with no visible text index (nor the fallback),
+    // `$index` / `$fuzzy` / `$rank` with no visible text index (nor the fallback),
     // `$vector` / `$threshold` with no visible vector index, `$search` with
     // neither; `/geo` with no visible geo index.
     const textUsable = searchable || (isSearchable && anyVisible("text"));
     const vectorUsable = anyVisible("vector");
     const unusable = new Set<string>();
     if (has("text") && !anyVisible("text")) unusable.add("index");
-    if (meta.searchable && !textUsable) unusable.add("fuzzy");
+    if (meta.searchable && !textUsable) unusable.add("fuzzy").add("rank");
     if (has("vector") && !vectorUsable) unusable.add("vector").add("threshold");
     if ((meta.searchable || has("vector")) && !textUsable && !vectorUsable) unusable.add("search");
     const crud: TCrudPermissions = { ...meta.crud };

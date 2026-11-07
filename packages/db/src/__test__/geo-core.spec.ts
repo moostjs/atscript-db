@@ -112,6 +112,13 @@ describe("geoSearch — core contract", () => {
     ).rejects.toMatchObject({ code: "INVALID_QUERY" });
   });
 
+  it("rejects $rank: false (results are distance-ordered)", async () => {
+    const table = new DbSpace(() => new GeoMockAdapter()).getTable(GeoListing);
+    await expect(
+      table.geoSearch([0, 0], { filter: {}, controls: { $rank: false } } as never),
+    ).rejects.toMatchObject({ code: "INVALID_QUERY", errors: [{ path: "$rank" }] });
+  });
+
   it("validates $maxDistance / $minDistance", async () => {
     const table = new DbSpace(() => new GeoMockAdapter()).getTable(GeoListing);
     await expect(

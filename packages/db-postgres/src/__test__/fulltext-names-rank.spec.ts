@@ -93,3 +93,33 @@ describe("PostgresAdapter — fulltext relevance order", () => {
     expect(count.sql).not.toContain("ORDER BY");
   });
 });
+
+// `$rank: false` (since 0.1.175): no ts_rank — `$sort`, else the primary key.
+describe("PostgresAdapter — $rank: false", () => {
+  it("no ts_rank: ORDER BY the primary key", async () => {
+    const { driver, table } = setup(fx.FtPlain);
+    await table.search("cat", { filter: {}, controls: { $rank: false, $limit: 10 } } as any);
+    const call = searchSql(driver);
+    expect(call.sql).not.toContain("ts_rank");
+    expect(call.sql).toMatch(/ORDER BY "id" ASC LIMIT \$2$/);
+    expect(call.params).toEqual(["cat", 10]);
+  });
+
+  it("searchWithCount: the page unranked too", async () => {
+    const { driver, table } = setup(fx.FtDoc);
+    await table.searchWithCount("cat", { filter: {}, controls: { $rank: false } } as any);
+    expect(searchSql(driver).sql).not.toContain("ts_rank");
+    expect(searchSql(driver).sql).toContain(`ORDER BY "id" ASC`);
+  });
+
+  it("an explicit $sort still wins", async () => {
+    const { driver, table } = setup(fx.FtPlain);
+    await table.search("cat", {
+      filter: {},
+      controls: { $rank: false, $sort: { title: -1 } },
+    } as any);
+    const call = searchSql(driver);
+    expect(call.sql).not.toContain("ts_rank");
+    expect(call.sql).toContain(`ORDER BY "title" DESC`);
+  });
+});

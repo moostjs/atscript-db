@@ -141,7 +141,7 @@ The adapter creates a companion `articles__fts__<indexName>` virtual table and t
 const results = await articles.search("database optimization", {});
 ```
 
-Without a `$sort`, results are ordered by FTS5 `bm25()` (with the index's per-field weights), then the primary key (since 0.1.165; before, in rowid order).
+Without a `$sort`, results are ordered by FTS5 `bm25()` (with the index's per-field weights), then the primary key (since 0.1.165; before, in rowid order). With `$rank: false` (since 0.1.175) no `bm25()` is computed and the order is the primary key — see [Unranked search](/search/#unranked).
 
 ::: warning Raw SQL against FTS5 tables: bind rowids as integers
 better-sqlite3 binds a JavaScript integer as `REAL`, and FTS5 silently ignores a `rowid = ?` constraint whose value is `REAL` — the query returns every match. atscript-db's own queries never bind a rowid (they join on `rowid`), but in your own SQL write `rowid = CAST(? AS INTEGER)` or bind a `BigInt`.
@@ -151,7 +151,29 @@ better-sqlite3 binds a JavaScript integer as `REAL`, and FTS5 silently ignores a
 The `$search` text is quoted before it reaches FTS5's `MATCH`, so no input can raise an FTS5 syntax error (`-2946`, `a AND`, `title:x`, `(` are searched as plain text). Words are AND-ed (OR-ed under `@db.index.fulltext.match "any"`); a `"quoted phrase"` stays a phrase; a trailing `*` is a prefix match (`quok*`). FTS5 operators (`AND`, `OR`, `NOT`, `NEAR`, column filters) are not available through `$search`.
 :::
 
-**Language** (since 0.1.168): `@db.index.fulltext.language "english"` builds the FTS5 table with `tokenize='porter unicode61'`, so `run` finds `running`. FTS5 ships no stemmer for other languages: with any other language words are indexed unstemmed (FTS5's default `unicode61`, which folds case for every script) and schema sync logs a warning. Changing the language recreates the FTS5 table. See [Language and term matching](/search/#language-and-match).
+**Language** (since 0.1.168): `@db.index.fulltext.language "english"` builds the FTS5 table with `tokenize='porter unicode61'`, so `run` finds `running`. FTS5 ships no stemmer for other languages: with any other language words are indexed unstemmed (FTS5's default `unicode61`, which folds case for every script) and schema sync logs a warning — unless [`ftsTokenizers`](#fulltext-tokenizers) gives that language a tokenizer. Changing the language recreates the FTS5 table. See [Language and term matching](/search/#language-and-match).
+
+#### Tokenizer per language {#fulltext-tokenizers}
+
+_Since 0.1.175._ The `ftsTokenizers` adapter option picks the FTS5 tokenizer for a `@db.index.fulltext.language`. A tokenizer FTS5 does not ship, such as a Snowball stemmer, comes from a SQLite extension your app loads through the driver's [`loadExtensions`](#driver-options):
+
+```typescript
+import { createAdapter } from "@atscript/db-sqlite";
+
+const db = createAdapter("./data.db", {
+  loadExtensions: ["/path/to/fts5stemmer"], // the extension that registers the tokenizer
+  ftsTokenizers: { russian: "snowball russian unicode61" },
+});
+// or: new SqliteAdapter(driver, { ftsTokenizers: { russian: "snowball russian unicode61" } })
+```
+
+- The value is the FTS5 `tokenize` option: words of letters, digits and `_`, separated by spaces (`"trigram"`, `"unicode61 remove_diacritics 2"`, `"snowball russian unicode61"`). Anything else, including quoted arguments, is rejected when the adapter is created. A key that is not a `@db.index.fulltext.language` value is rejected too.
+- It replaces the default for that language: `english` can be given another tokenizer too. Languages without an entry keep the default. An index without `@db.index.fulltext.language` is not `english` on SQLite (it has no stemmer), so no entry applies to it: it keeps `unicode61`.
+- A configured language gets no "no stemmer" warning at sync.
+- The tokenizer is part of the schema: changing an entry recreates the FTS5 tables of that language on the next schema sync, as a language change does.
+- If SQLite does not know the tokenizer, schema sync fails with an error that names the tokenizer and points at `loadExtensions`, before it drops an existing FTS5 table.
+- Every connection that writes the table must load the extension too: the triggers that keep the FTS5 table current run the tokenizer on each insert, update and delete.
+- Search terms go through the same tokenizer as the indexed text, so a stemming tokenizer matches other forms of a word.
 
 **Integer members** are left out of the FTS5 table (SQLite stores integers in `REAL` columns, so FTS5 would index `29461277.0` and a term `0` would match every row). They are matched by exact number instead: `(rowid IN (SELECT rowid FROM <fts> WHERE <fts> MATCH ?) OR "ref_no" = ?)`, which SQLite serves from the FTS5 lookup and the member's btree. A text-only search keeps the JOIN form. An index of integer members only creates no FTS5 table. Schema sync compares an existing FTS5 table's columns with the index's text members and recreates it on drift (for example, a table built before integers were excluded). See [Text Search — Integer fields](/search/#integer-fields-exact-number-match).
 
@@ -409,7 +431,7 @@ const db = createAdapter("./data.db", {
 // or: new SqliteAdapter(driver, { transactionWaitTimeoutMs, transactionWaitWarnMs })
 ```
 
-The same options object takes `viewJoinPruning: false` (since 0.1.153) to read managed views as stored instead of [skipping their unused joins](/views/querying-views#performance-unused-joins-are-skipped).
+The same options object takes `viewJoinPruning: false` (since 0.1.153) to read managed views as stored instead of [skipping their unused joins](/views/querying-views#performance-unused-joins-are-skipped), and `ftsTokenizers` (since 0.1.175) to pick the [FTS5 tokenizer per language](#fulltext-tokenizers).
 
 A waiter that exceeds `transactionWaitTimeoutMs` rejects with `DbError("TX_WAIT_TIMEOUT")`, which `@atscript/moost-db` maps to **503**. The timeout bounds the waiter's _total_ wait, however many transactions run ahead of it. The default is unbounded (like the mysql2 / pg pool defaults): a slow bulk import then delays concurrent requests instead of failing them. `transactionWaitTimeoutMs: 0` is a fail-fast mode — a statement or transaction that finds the connection busy rejects immediately instead of queueing.
 

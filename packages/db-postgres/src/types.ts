@@ -1,3 +1,5 @@
+import type { TDbFulltextLanguage } from "@atscript/db";
+
 /**
  * Result of a PostgreSQL statement that modifies data (INSERT, UPDATE, DELETE).
  */
@@ -68,4 +70,20 @@ export interface TPgConnection {
   exec(sql: string): Promise<void>;
   /** Release this connection back to the pool. */
   release(): void;
+}
+
+/**
+ * `PostgresAdapter` options.
+ * @since 0.1.175
+ */
+export interface TPostgresAdapterOptions {
+  /**
+   * The text search configuration per `@db.index.fulltext.language` — e.g.
+   * `{ russian: "ru_en" }` for a configuration the app created with
+   * `CREATE TEXT SEARCH CONFIGURATION`. Replaces the language's built-in
+   * configuration in the index and in every query. An unquoted lowercase
+   * name (letters, digits, `_`), found through the connection's
+   * `search_path`. Changing it rebuilds the index on the next schema sync.
+   */
+  textSearchConfigs?: Partial<Record<TDbFulltextLanguage, string>>;
 }

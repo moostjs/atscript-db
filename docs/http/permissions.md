@@ -30,27 +30,32 @@ A typical writable controller emits all seven keys:
       "limit",
       "count",
       "sort",
+      "nulls",
       "select",
       "search",
       "index",
       "fuzzy",
       "vector",
       "threshold",
+      "rank",
       "with",
       "actions",
-      "groupBy"
+      "groupBy",
+      "rowOrder"
     ],
     "pages": [
       "filter",
       "page",
       "size",
       "sort",
+      "nulls",
       "select",
       "search",
       "index",
       "fuzzy",
       "vector",
       "threshold",
+      "rank",
       "with",
       "actions"
     ],
@@ -80,12 +85,12 @@ The read-op control whitelists are static per handler. The `query`, `pages` and 
 import { QUERY_CONTROLS, PAGES_CONTROLS, ONE_CONTROLS } from "@atscript/moost-db";
 ```
 
-| Op      | Controls                                                                                                              |
-| ------- | --------------------------------------------------------------------------------------------------------------------- |
-| `query` | `filter, insights, skip, limit, count, sort, select, search, index, fuzzy, vector, threshold, with, actions, groupBy` |
-| `pages` | `filter, page, size, sort, select, search, index, fuzzy, vector, threshold, with, actions`                            |
-| `one`   | `select, with, actions`                                                                                               |
-| `geo`   | `filter, insights, center, maxDistance, minDistance, index, select, skip, limit, page, size, with, actions`           |
+| Op      | Controls                                                                                                                                           |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `query` | `filter, insights, skip, limit, count, sort, nulls, select, search, index, fuzzy, vector, threshold, rank, with, actions, groupBy, rowOrder, from` |
+| `pages` | `filter, page, size, sort, nulls, select, search, index, fuzzy, vector, threshold, rank, with, actions`                                            |
+| `one`   | `select, with, actions`                                                                                                                            |
+| `geo`   | `filter, insights, center, maxDistance, minDistance, index, select, skip, limit, page, size, with, actions`                                        |
 
 `actions` is the URL-control name for [`$actions=true`](./actions#actions-augmentation) — when the caller asks the server to compute per-row action availability.
 

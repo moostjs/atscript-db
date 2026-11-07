@@ -1,3 +1,7 @@
+import { DB_FULLTEXT_LANGUAGES } from "@atscript/db";
+
+import type { SqliteAdapterOptions } from "./tx-gate";
+
 const BAREWORD = /^[\p{L}\p{N}_]+$/u;
 const KEYWORD = /^(?:AND|OR|NOT|NEAR)$/i;
 
@@ -38,24 +42,63 @@ export function quoteFtsTerm(text: string, match?: "all" | "any"): string {
   return parts.length > 0 ? parts.join(match === "any" ? " OR " : " ") : '""';
 }
 
+/** A tokenizer spec — words of letters, digits and `_`, separated by spaces (no quotes: it is inlined into DDL). */
+const TOKENIZER_SPEC = /^[A-Za-z0-9_]+(?: +[A-Za-z0-9_]+)*$/;
+
 /**
- * The FTS5 `tokenize` option of a fulltext index (since 0.1.168): `english`
- * (`@db.index.fulltext.language`) adds the Porter stemmer; every other
+ * Checks `ftsTokenizers` (since 0.1.175): every key a `@db.index.fulltext.language`
+ * value, every tokenizer a plain spec (it is inlined into `CREATE VIRTUAL TABLE`).
+ * Throws on the first bad entry.
+ */
+export function validateFtsTokenizers(tokenizers: SqliteAdapterOptions["ftsTokenizers"]): void {
+  for (const [language, tokenizer] of Object.entries(tokenizers ?? {})) {
+    if (tokenizer === undefined) continue;
+    if (!(DB_FULLTEXT_LANGUAGES as readonly string[]).includes(language)) {
+      throw new Error(
+        `[sqlite] ftsTokenizers: "${language}" is not a @db.index.fulltext.language value`,
+      );
+    }
+    if (typeof tokenizer !== "string" || !TOKENIZER_SPEC.test(tokenizer)) {
+      throw new Error(
+        `[sqlite] ftsTokenizers.${language}: ${JSON.stringify(tokenizer)} is not a tokenizer spec — use words of letters, digits and "_" separated by spaces (e.g. "snowball russian unicode61")`,
+      );
+    }
+  }
+}
+
+/**
+ * The FTS5 `tokenize` option of a fulltext index: `configured` — the
+ * `ftsTokenizers` entry of its `@db.index.fulltext.language` (since 0.1.175)
+ * — else `english` adds the Porter stemmer (since 0.1.168); every other
  * language — FTS5 ships no other stemmer — and no language keep FTS5's
  * default `unicode61` (`undefined`: no `tokenize` clause).
  */
-export function ftsTokenizer(index: { language?: string }): string | undefined {
-  return index.language === "english" ? "porter unicode61" : undefined;
+export function ftsTokenizer(
+  index: { language?: string },
+  configured?: string,
+): string | undefined {
+  return configured ?? (index.language === "english" ? "porter unicode61" : undefined);
 }
 
 /** Whether an FTS5 table's `CREATE` statement has the tokenizer the index's language asks for. */
-export function ftsTokenizerMatch(createSql: string, index: { language?: string }): boolean {
-  return /tokenize\s*=\s*'([^']*)'/i.exec(createSql)?.[1] === ftsTokenizer(index);
+export function ftsTokenizerMatch(
+  createSql: string,
+  index: { language?: string },
+  configured?: string,
+): boolean {
+  return /tokenize\s*=\s*'([^']*)'/i.exec(createSql)?.[1] === ftsTokenizer(index, configured);
 }
 
-/** The sync warning for a language FTS5 cannot stem, `undefined` when it can (or none is set). */
-export function ftsLanguageWarning(index: { name: string; language?: string }): string | undefined {
+/**
+ * The sync warning for a language FTS5 cannot stem, `undefined` when it can,
+ * none is set, or an `ftsTokenizers` entry (`configured`) covers it.
+ */
+export function ftsLanguageWarning(
+  index: { name: string; language?: string },
+  configured?: string,
+): string | undefined {
   const { language } = index;
   if (language === undefined || language === "english" || language === "none") return undefined;
-  return `[sqlite] fulltext index "${index.name}": FTS5 has no ${language} stemmer — words are indexed unstemmed (unicode61)`;
+  if (configured !== undefined) return undefined;
+  return `[sqlite] fulltext index "${index.name}": FTS5 has no ${language} stemmer — words are indexed unstemmed (unicode61); set the adapter's ftsTokenizers to use a stemming tokenizer`;
 }

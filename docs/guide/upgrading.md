@@ -6,6 +6,19 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.175 {#v0-1-175}
+
+### Features
+
+- **Unranked text search: `$rank: false`.** A search with `controls.$rank: false` (`$rank=false` over HTTP) computes no relevance score on any adapter; rows come in `$sort` order, or primary-key order without one. Use it instead of a placeholder `$sort` when your app orders the matches itself. `vectorSearch()` and `geoSearch()` reject it with `INVALID_QUERY`. `$rank` is now in the `crud.query` / `crud.pages` control lists of `/meta`. See [Unranked search](/search/#unranked).
+- **SQLite: a tokenizer per language.** The `ftsTokenizers` adapter option gives a `@db.index.fulltext.language` its FTS5 tokenizer, such as a Snowball stemmer loaded with `loadExtensions`. See [Tokenizer per language](/adapters/sqlite#fulltext-tokenizers).
+- **PostgreSQL: a text search configuration per language.** The `textSearchConfigs` adapter option maps a language to a configuration your app created. See [Text search configuration per language](/adapters/postgresql#text-search-configs).
+
+### Custom adapters
+
+- `controls.$rank === false` reaches `search()` / `searchWithCount()`: compute no score and order by `$sort`, else the primary key. The core rejects it before `vectorSearch()` / `geoSearch()`.
+- An adapter whose options change how a fulltext index is built can implement `fulltextEngineConfig(index)`; the value becomes part of the table's schema snapshot, so changing it re-runs schema sync. See [Creating adapters](/adapters/creating-adapters#text-search).
+
 ## 0.1.174 {#v0-1-174}
 
 ### Fixes

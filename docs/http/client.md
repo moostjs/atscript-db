@@ -135,12 +135,17 @@ const active = await users.query({
 });
 ```
 
-The `$search`, `$vector`, `$index`, and `$threshold` controls are also passed through `query()`:
+The `$search`, `$vector`, `$index`, `$threshold` and `$rank` controls are also passed through `query()`:
 
 ```typescript
 // Text search
 const results = await users.query({
   controls: { $search: "alice" },
+});
+
+// Text search without relevance ranking (since 0.1.175): `$sort`, else primary-key order
+const unranked = await users.query({
+  controls: { $search: "alice", $rank: false },
 });
 
 // Vector search

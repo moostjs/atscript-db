@@ -67,3 +67,32 @@ describe("[mongo] fulltext relevance order", () => {
     expect(facet.$facet.data).toContainEqual({ $sort: { _score: -1, _id: 1 } });
   });
 });
+
+// `$rank: false` (since 0.1.175): no textScore — `$sort`, else `_id` order.
+const UNRANKED: DbQuery = { filter: {}, controls: { $rank: false } };
+const noScore = (stages: Record<string, unknown>[]) =>
+  expect(JSON.stringify(stages)).not.toMatch(/textScore|_score/);
+
+describe("[mongo] $rank: false", () => {
+  it("search(): no textScore, sorted by _id", async () => {
+    await adapter.search("cat", UNRANKED);
+    noScore(lastPipeline());
+    expect(lastPipeline()).toContainEqual({ $sort: { _id: 1 } });
+  });
+
+  it("searchWithCount(): no textScore before the $facet, the page sorted by _id", async () => {
+    aggregate = vi.fn(() => ({ toArray: async () => [{ data: [], meta: [] }] }));
+    vi.spyOn(adapter, "collection", "get").mockReturnValue({ aggregate } as never);
+    await adapter.searchWithCount("cat", UNRANKED);
+    noScore(lastPipeline());
+    const facet = lastPipeline().find((s) => "$facet" in s) as any;
+    expect(facet.$facet.data).toContainEqual({ $sort: { _id: 1 } });
+  });
+
+  it("an explicit $sort still wins", async () => {
+    await adapter.search("cat", { filter: {}, controls: { $rank: false, $sort: { title: -1 } } });
+    noScore(lastPipeline());
+    expect(lastPipeline()).toContainEqual({ $sort: { title: -1 } });
+    expect(lastPipeline()).not.toContainEqual({ $sort: { _id: 1 } });
+  });
+});

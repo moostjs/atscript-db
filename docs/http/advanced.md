@@ -127,7 +127,7 @@ When using `$select` alongside `$with`, foreign key fields needed for joining ar
 
 For the programmatic equivalent, see [Relations — Loading](/relations/loading).
 
-## Text Search ($search, $index, $fuzzy) {#text-search}
+## Text Search ($search, $index, $fuzzy, $rank) {#text-search}
 
 Perform full-text search on fields annotated with `@db.index.fulltext` or similar search indexes.
 
@@ -197,6 +197,16 @@ curl "http://localhost:3000/users/query?\$search=mngo&\$fuzzy=1"
 ```
 
 The default comes from the index annotation (`@db.mongo.search.static`/`.dynamic`); see [MongoDB → Fuzzy Search](/adapters/mongodb#fuzzy-search).
+
+### Unranked Search
+
+_Since 0.1.175._ `$rank=false` skips relevance ranking: rows come in `$sort` order, or in primary-key order without one. Use it when your app orders the matches itself:
+
+```bash
+curl "http://localhost:3000/articles/query?\$search=mongodb&\$rank=false&\$select=id"
+```
+
+A request with `$vector` refuses it (400). See [Text Search — Unranked search](/search/#unranked).
 
 ### Combining with Filters
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterEach } from "vite-plus/test";
+import { describe, it, expect, beforeAll, afterEach, vi } from "vite-plus/test";
 import { AtscriptDbTable } from "@atscript/db";
 
 import { SqliteAdapter } from "../sqlite-adapter";
@@ -93,4 +93,57 @@ describe("SqliteAdapter — fulltext relevance order", () => {
     expect(ids(hits)).toEqual([9001, 1, 4, 7, 10]);
     expect(ms).toBeLessThan(400);
   }, 30_000);
+});
+
+// `$rank: false` (since 0.1.175): no relevance score at all — `$sort` order,
+// or the primary key without one.
+const unranked = (controls: Record<string, unknown> = {}) =>
+  ({ filter: {}, controls: { $rank: false, ...controls } }) as any;
+/** The SQL of the search's row read (not the COUNT). */
+const readSql = (all: { mock: { calls: unknown[][] } }) =>
+  all.mock.calls.map((c) => c[0] as string).find((sql) => !sql.includes("COUNT"))!;
+
+describe("SqliteAdapter — $rank: false", () => {
+  const weakFirst = [
+    { id: 1, title: "notes", body: "one cat among very many other words in this body" },
+    { id: 2, title: "cat", body: "cat cat" },
+  ];
+
+  it("no bm25, no ranking CTE: primary-key order", async () => {
+    const table = await setup(fx.FtPlain, weakFirst);
+    const all = vi.spyOn(driver!, "all");
+    expect(ids(await table.search("cat", unranked()))).toEqual([1, 2]);
+    const sql = readSql(all);
+    expect(sql).not.toMatch(/bm25|MATERIALIZED/);
+    expect(sql).toMatch(/ORDER BY "id" ASC/);
+  });
+
+  it("searchWithCount: the same page order, and the count", async () => {
+    const table = await setup(fx.FtPlain, weakFirst);
+    const all = vi.spyOn(driver!, "all");
+    const page = await table.searchWithCount("cat", unranked({ $limit: 1 }));
+    expect([ids(page.data), page.count]).toEqual([[1], 2]);
+    expect(readSql(all)).not.toContain("bm25");
+  });
+
+  it("an explicit $sort still wins", async () => {
+    const table = await setup(fx.FtPlain, weakFirst);
+    expect(ids(await table.search("cat", unranked({ $sort: { id: -1 } })))).toEqual([2, 1]);
+  });
+
+  it("a whole-number term: no exact-number-first ordering either", async () => {
+    const table = await setup(fx.FtNumbered, [
+      { id: 1, title: "invoice 77 copy", refNo: 5 },
+      { id: 2, title: "something else", refNo: 77 },
+      { id: 3, title: "77 77", refNo: 6 },
+    ]);
+    const all = vi.spyOn(driver!, "all");
+    expect(ids(await table.search("77", unranked()))).toEqual([1, 2, 3]);
+    expect(readSql(all)).not.toMatch(/bm25|CASE WHEN/);
+  });
+
+  it("$rank: true is the default relevance order", async () => {
+    const table = await setup(fx.FtPlain, weakFirst);
+    expect(ids(await table.search("cat", unranked({ $rank: true })))).toEqual([2, 1]);
+  });
 });

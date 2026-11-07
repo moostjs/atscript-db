@@ -83,6 +83,8 @@ function filterOptionsOf(host: TMongoSearchHost | TMongoGeoHost): TMongoFilterOp
  */
 /** Classic `$text` relevance order: `textScore` descending, `_id` breaking ties (since 0.1.165). */
 const RELEVANCE_SORT: Document = { $sort: { _score: -1, _id: 1 } };
+/** The order of an unranked search (`$rank: false`, since 0.1.175): the primary key. */
+const UNRANKED_SORT: Document = { $sort: { _id: 1 } };
 
 export function getSearchIndexesImpl(host: TMongoSearchHost): TSearchIndexInfo[] {
   const result: TSearchIndexInfo[] = [];
@@ -181,7 +183,7 @@ export async function searchImpl(
   indexName?: string,
 ): Promise<Array<Record<string, unknown>>> {
   const plan = requireSearchStage(host, text, indexName, query.controls);
-  return runSearchPipeline(host, plan.stage, query, "search", { classicText: plan.classicText });
+  return runSearchPipeline(host, plan.stage, query, "search", textRunOptions(plan, query));
 }
 
 /** Text search with faceted count. */
@@ -192,9 +194,23 @@ export async function searchWithCountImpl(
   indexName?: string,
 ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
   const plan = requireSearchStage(host, text, indexName, query.controls);
-  return runSearchWithCountPipeline(host, plan.stage, query, "searchWithCount", {
-    classicText: plan.classicText,
-  });
+  return runSearchWithCountPipeline(
+    host,
+    plan.stage,
+    query,
+    "searchWithCount",
+    textRunOptions(plan, query),
+  );
+}
+
+/**
+ * The runner options of a text search: relevance from `textScore` for a
+ * classic `$text` match — none under `$rank: false` (since 0.1.175), which
+ * orders by `_id` instead (an Atlas `$search` included).
+ */
+function textRunOptions(plan: { classicText: boolean }, query: DbQuery): TSearchRunOptions {
+  if (query.controls?.$rank === false) return { defaultSort: UNRANKED_SORT };
+  return plan.classicText ? { classicText: true, defaultSort: RELEVANCE_SORT } : {};
 }
 
 /** Vector search via $vectorSearch aggregation stage. */
@@ -810,6 +826,11 @@ interface TSearchRunOptions {
   threshold?: number;
   /** A classic `$text` match (relevance from `textScore`). */
   classicText?: boolean;
+  /**
+   * The order without a `$sort`: relevance for a classic `$text` match, `_id`
+   * under `$rank: false` (since 0.1.175); none keeps the leading stage's order.
+   */
+  defaultSort?: Document;
   /** The filter stages after the leading stage (default: the whole request filter). */
   filterStages?: Document[];
 }
@@ -820,7 +841,7 @@ async function runSearchPipeline(
   stage: Document,
   query: DbQuery,
   label: string,
-  { threshold, classicText = false, filterStages }: TSearchRunOptions = {},
+  { threshold, classicText = false, defaultSort, filterStages }: TSearchRunOptions = {},
 ): Promise<Array<Record<string, unknown>>> {
   const controls = query.controls || {};
   const pipeline: Document[] = [stage];
@@ -835,10 +856,10 @@ async function runSearchPipeline(
   const { stages: sorted, cleanup } = sortStages(controls);
   if (sorted.length > 0) {
     pipeline.push(...sorted);
-  } else if (classicText) {
-    // Default to relevance order, mirroring Atlas $search's implicit ordering;
-    // `_id` breaks ties so pages never overlap (since 0.1.165).
-    pipeline.push(RELEVANCE_SORT);
+  } else if (defaultSort) {
+    // Classic `$text`: relevance order, mirroring Atlas $search's implicit
+    // ordering; `_id` breaks ties so pages never overlap (since 0.1.165).
+    pipeline.push(defaultSort);
   }
   if (controls.$skip) {
     pipeline.push({ $skip: controls.$skip });
@@ -875,7 +896,7 @@ async function runSearchWithCountPipeline(
   stage: Document,
   query: DbQuery,
   label: string,
-  { threshold, classicText = false, filterStages }: TSearchRunOptions = {},
+  { threshold, classicText = false, defaultSort, filterStages }: TSearchRunOptions = {},
 ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
   const controls = query.controls || {};
 
@@ -890,8 +911,8 @@ async function runSearchWithCountPipeline(
   }
 
   const { stages: dataStages, cleanup } = sortStages(controls);
-  if (dataStages.length === 0 && classicText) {
-    dataStages.push(RELEVANCE_SORT);
+  if (dataStages.length === 0 && defaultSort) {
+    dataStages.push(defaultSort);
   }
   if (controls.$skip) {
     dataStages.push({ $skip: controls.$skip });

@@ -147,10 +147,12 @@ export const dbIndexAnnotations: TAnnotationsTree = {
             "index of the interface; with one, to that index (and wins over the table-wide " +
             "one). Changing it rebuilds the index on the next schema sync. Without it each " +
             "database keeps its default (`english` on PostgreSQL and MongoDB).\n\n" +
-            "- **PostgreSQL**: the text search configuration (`russian`, …; `none` → `simple`).\n" +
+            "- **PostgreSQL**: the text search configuration (`russian`, …; `none` → `simple`), " +
+            "or the one the adapter's `textSearchConfigs` maps the language to.\n" +
             "- **MongoDB**: the text index `default_language`.\n" +
             "- **SQLite**: `english` tokenizes with the Porter stemmer; FTS5 has no other " +
-            "stemmer, so every other language indexes words unstemmed (a warning at sync).\n" +
+            "stemmer built in, so every other language indexes words unstemmed (a warning at " +
+            "sync) unless the adapter's `ftsTokenizers` gives it a tokenizer.\n" +
             "- **MySQL**: ignored, with a warning at sync — `FULLTEXT` has no per-index language.",
           "@db.table 'articles'",
           '@db.index.fulltext.language "russian"',
