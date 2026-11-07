@@ -121,6 +121,24 @@ import {
 } from "./fts-term";
 
 /**
+ * The retryable `LOCK_TIMEOUT` of an `SQLITE_BUSY` driver error (another
+ * connection holds the database lock past `busy_timeout`), with the driver
+ * error as `cause`; any other error as is.
+ */
+function mapBusy(error: unknown): unknown {
+  if (!error || typeof error !== "object") return error;
+  const { code, errcode } = error as { code?: unknown; errcode?: unknown };
+  const busy =
+    (typeof code === "string" && code.startsWith("SQLITE_BUSY")) ||
+    (typeof errcode === "number" && (errcode & 0xff) === 5);
+  return busy
+    ? new DbError("LOCK_TIMEOUT", [{ path: "", message: (error as Error).message }], undefined, {
+        cause: error,
+      })
+    : error;
+}
+
+/**
  * SQLite adapter for {@link AtscriptDbTable}.
  *
  * Accepts any {@link TSqliteDriver} implementation — the actual SQLite engine
@@ -436,9 +454,13 @@ export class SqliteAdapter extends BaseDbAdapter {
     try {
       this._log("COMMIT");
       this.driver.exec("COMMIT");
-    } finally {
-      (state as SqliteTxState).release();
+    } catch (error) {
+      // A failed COMMIT (SQLITE_BUSY: another connection holds a lock) leaves
+      // the transaction open: the gate stays held until `withTransaction`'s
+      // ROLLBACK releases it, so no waiter enters meanwhile.
+      throw mapBusy(error);
     }
+    (state as SqliteTxState).release();
   }
 
   protected override async _rollbackTransaction(state: unknown): Promise<void> {

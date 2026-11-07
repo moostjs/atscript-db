@@ -37,8 +37,14 @@ export function createMockDriver(overrides?: {
   getResult?: Record<string, unknown> | null | ((sql: string, params?: unknown[]) => unknown);
   /** Makes `exec()` throw for the statements it returns an error for. */
   execError?: (sql: string) => Error | undefined;
-}): TPgDriver & { calls: CapturedCall[] } {
+  /** Hand out the same connection object on every `getConnection()` (a custom pooling driver). */
+  reuseConnection?: boolean;
+  /** `false`: the connection has no `destroy()` (default: it has one). */
+  destroyable?: boolean;
+}): TPgDriver & { calls: CapturedCall[]; releaseCount: () => number; destroyCount: () => number } {
   const calls: CapturedCall[] = [];
+  let released = 0;
+  let destroyed = 0;
 
   const runResult: TPgRunResult = {
     affectedRows: 1,
@@ -61,8 +67,12 @@ export function createMockDriver(overrides?: {
     }
   };
 
+  let shared: TPgConnection | undefined;
+
   return {
     calls,
+    releaseCount: () => released,
+    destroyCount: () => destroyed,
     async run(sql: string, params?: unknown[]): Promise<TPgRunResult> {
       calls.push({ method: "run", sql, params });
       return { ...runResult, ...overrides?.runResponder?.(sql, params) };
@@ -77,7 +87,8 @@ export function createMockDriver(overrides?: {
     },
     exec,
     async getConnection(): Promise<TPgConnection> {
-      return {
+      if (overrides?.reuseConnection && shared) return shared;
+      shared = {
         async run(sql: string, params?: unknown[]): Promise<TPgRunResult> {
           calls.push({ method: "run", sql, params });
           return { ...runResult, ...overrides?.runResponder?.(sql, params) };
@@ -91,8 +102,18 @@ export function createMockDriver(overrides?: {
           return getRow(sql, params) as T | null;
         },
         exec,
-        release: vi.fn(),
+        release: vi.fn(() => {
+          released++;
+        }),
+        ...(overrides?.destroyable === false
+          ? {}
+          : {
+              destroy: vi.fn(() => {
+                destroyed++;
+              }),
+            }),
       };
+      return shared;
     },
     async close(): Promise<void> {},
   };

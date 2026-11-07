@@ -52,6 +52,13 @@ describe.skipIf(!reachable)("[postgres live] deterministic paging tie-breaker", 
 
 const N = 40;
 
+/**
+ * The offset-window case runs ~600 serial round trips (3 sorts x 5 window sizes x pages x
+ * data + count): 30 s holds only below ~50 ms per round trip, which a remote server under
+ * load does not.
+ */
+const OFFSET_WINDOWS_TIMEOUT = 180_000;
+
 /** Rows 1..N inserted in a scrambled order; `grp` ties a third of them, `label` ties all. */
 function ptRows(): Array<{ id: number; grp: number; label: string; code: string }> {
   return Array.from({ length: N }, (_, i) => {
@@ -171,35 +178,40 @@ function defineCases(): void {
     expect(await readIds({ $sort: { code: -1 } })).toEqual(ids(ordered(ptRows(), [["code", -1]])));
   });
 
-  it("offset windows of any size cover every row exactly once", async () => {
-    const sorts: Array<[Record<string, 1 | -1>, Array<TKey<ReturnType<typeof ptRows>[number]>>]> = [
-      [
-        { grp: 1 },
+  it(
+    "offset windows of any size cover every row exactly once",
+    async () => {
+      const sorts: Array<[Record<string, 1 | -1>, Array<TKey<ReturnType<typeof ptRows>[number]>>]> =
         [
-          ["grp", 1],
-          ["id", 1],
-        ],
-      ],
-      [{ label: 1 }, [["id", 1]]],
-      [
-        { grp: -1, label: 1 },
-        [
-          ["grp", -1],
-          ["id", 1],
-        ],
-      ],
-    ];
-    for (const [sort, keys] of sorts) {
-      const expected = ids(ordered(ptRows(), keys));
-      for (const size of [1, 3, 7, 16, N]) {
-        for (const withCount of [false, true]) {
-          const got = ids(await pageThrough(t(fx.PtRow), sort, size, withCount, N));
-          expect(got).toEqual(expected);
-          expect(new Set(got).size).toBe(N);
+          [
+            { grp: 1 },
+            [
+              ["grp", 1],
+              ["id", 1],
+            ],
+          ],
+          [{ label: 1 }, [["id", 1]]],
+          [
+            { grp: -1, label: 1 },
+            [
+              ["grp", -1],
+              ["id", 1],
+            ],
+          ],
+        ];
+      for (const [sort, keys] of sorts) {
+        const expected = ids(ordered(ptRows(), keys));
+        for (const size of [1, 3, 7, 16, N]) {
+          for (const withCount of [false, true]) {
+            const got = ids(await pageThrough(t(fx.PtRow), sort, size, withCount, N));
+            expect(got).toEqual(expected);
+            expect(new Set(got).size).toBe(N);
+          }
         }
       }
-    }
-  });
+    },
+    OFFSET_WINDOWS_TIMEOUT,
+  );
 
   it("composite primary key: every key field, in declaration order", async () => {
     const pairs = t(fx.PtPair);

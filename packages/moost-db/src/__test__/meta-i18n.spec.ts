@@ -263,6 +263,42 @@ describe("/meta translation", () => {
   });
 });
 
+describe("$i18n marks a translated schema", () => {
+  it("texts translated, no templates to serve: $i18n is {}, per locale", async () => {
+    setTranslator({ en: {}, de: { Name: "Bezeichnung", Reason: "Grund" } });
+    const send = await boot();
+    const german = await send("/meta", de);
+    expect(german.body.type.type.props.name.metadata["meta.label"]).toBe("Bezeichnung");
+    expect(german.body.type.$i18n).toEqual({});
+    const english = await send("/meta", en);
+    expect("$i18n" in english.body.type).toBe(false);
+    expect(german.headers.get("etag")).not.toBe(english.headers.get("etag"));
+    expect(
+      (await send("/meta", { ...de, "if-none-match": german.headers.get("etag")! })).status,
+    ).toBe(304);
+    expect((await send("/meta", de)).text).toBe(german.text);
+  });
+
+  it("nothing translated (language without the texts): no $i18n", async () => {
+    setTranslator({ en: {}, de: { Unrelated: "Egal" } });
+    const send = await boot();
+    const german = await send("/meta", de);
+    expect(german.body.type.type.props.name.metadata["meta.label"]).toBe("Name");
+    expect("$i18n" in german.body.type).toBe(false);
+  });
+
+  it("the form path likewise", async () => {
+    setTranslator({ en: {}, de: { Reason: "Grund" } });
+    const send = await boot();
+    const german = await send("/meta/form/I18nReason", de);
+    expect(german.body.type.props.reason.metadata["meta.label"]).toBe("Grund");
+    expect(german.body.$i18n).toEqual({});
+    const english = await send("/meta/form/I18nReason", en);
+    expect("$i18n" in english.body).toBe(false);
+    expect(german.headers.get("etag")).not.toBe(english.headers.get("etag"));
+  });
+});
+
 const labelsOf = (r: { body: any }): string[] => r.body.actions.map((x: any) => x.label);
 
 describe("/meta translation × per-principal variants", () => {

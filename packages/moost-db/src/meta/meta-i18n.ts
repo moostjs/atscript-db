@@ -92,19 +92,25 @@ function i18nOf(
   return isEmptyObject(i18n) ? undefined : i18n;
 }
 
-/** `type` with `$i18n` (the type itself without one). */
+/** The `$i18n` of a translated type that has nothing to serve: it still marks the type as translated. */
+const EMPTY_I18N: Readonly<Record<string, string>> = Object.freeze({});
+
+/**
+ * `type` with `$i18n`. A translated type always carries one (`{}` when there is
+ * nothing to serve), so a client can tell it was translated.
+ */
 function withI18n(
   type: TSerializedAnnotatedType,
-  i18n: Readonly<Record<string, string>> | undefined,
+  i18n: Readonly<Record<string, string>> = EMPTY_I18N,
 ): TSerializedAnnotatedType {
-  return i18n ? { ...type, $i18n: i18n } : type;
+  return { ...type, $i18n: i18n };
 }
 
 /**
  * `/meta` in the request's language: `type` and `decorations` translated,
  * the actions' `label` / `description` / `promptText` translated, and
  * `type.$i18n` holding the translated registered templates and the expression
- * texts. The envelope itself when nothing changes.
+ * texts (`{}` when only texts were translated). The envelope itself when nothing changes.
  */
 export function localizeMeta(meta: TMetaResponse, translation: TTranslation): TMetaResponse {
   return localized(meta, translation, () => {
@@ -136,7 +142,8 @@ export function localizeForm(
 ): TSerializedAnnotatedType {
   return localized(schema, translation, () => {
     const { value, texts } = served(schema, translation);
-    return withI18n(value, i18nOf(translation, texts));
+    const i18n = i18nOf(translation, texts);
+    return i18n || value !== schema ? withI18n(value, i18n) : value;
   });
 }
 

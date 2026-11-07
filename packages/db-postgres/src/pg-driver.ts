@@ -257,6 +257,10 @@ export class PgDriver implements TPgDriver {
         client.removeListener("error", onError);
         client.release(lost);
       },
+      destroy() {
+        client.removeListener("error", onError);
+        client.release(lost ?? true);
+      },
     };
   }
 

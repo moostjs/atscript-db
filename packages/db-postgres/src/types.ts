@@ -70,6 +70,14 @@ export interface TPgConnection {
   exec(sql: string): Promise<void>;
   /** Release this connection back to the pool. */
   release(): void;
+  /**
+   * Close this connection instead of returning it to the pool (since
+   * 0.1.175) — used when its transaction state cannot be trusted, e.g. a
+   * COMMIT that failed on the client (a timeout) and may have left the
+   * transaction open. Optional: a driver without it gets a best-effort
+   * `ROLLBACK`, then `release()`.
+   */
+  destroy?(): void;
 }
 
 /**

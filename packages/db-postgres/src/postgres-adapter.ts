@@ -239,6 +239,48 @@ const PG_CONTENTION_CODES: Record<string, DbErrorCode | undefined> = {
   "40001": "SERIALIZATION_FAILURE",
 };
 
+/** Connections whose COMMIT failed: the transaction is over, no ROLLBACK may follow. */
+const endedTx = new WeakSet<object>();
+
+/**
+ * `error` as the retryable `DbError` of its contention SQLSTATE (deadlock,
+ * lock timeout, serialization failure), else `error` as is; the driver error
+ * is kept as `cause`. Applied to every statement and to COMMIT — a
+ * serialization failure can surface at either.
+ */
+function mapContention(error: unknown): unknown {
+  const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  const mapped = typeof code === "string" ? PG_CONTENTION_CODES[code] : undefined;
+  if (!mapped) return error;
+  return new DbError(mapped, [{ path: "", message: (error as Error).message }], undefined, {
+    cause: error,
+  });
+}
+
+/**
+ * Whether the server reported `error` (a 5-character SQLSTATE `code`), as
+ * opposed to a client-side failure — a timeout, a lost socket (`EPIPE`) —
+ * after which the server's transaction state is unknown.
+ */
+function isServerError(error: unknown): boolean {
+  const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" && /^[0-9A-DF-Z][0-9A-Z]{4}$/.test(code);
+}
+
+/** Closes `conn` — or, for a driver without `destroy()`, rolls it back (best effort) and releases it. */
+async function discardConnection(conn: TPgConnection): Promise<void> {
+  if (conn.destroy) {
+    conn.destroy();
+    return;
+  }
+  try {
+    await conn.exec("ROLLBACK");
+  } catch {
+    /* the connection is released regardless */
+  }
+  conn.release();
+}
+
 const PG_CONSTRAINT_LABELS: Record<string, string | undefined> = {
   p: "pkey",
   u: "key",
@@ -422,13 +464,22 @@ export class PostgresAdapter extends BaseDbAdapter {
     try {
       this._log("COMMIT");
       await conn.exec("COMMIT");
-    } finally {
-      conn.release();
+    } catch (error) {
+      // A server-reported COMMIT failure ended the transaction (the server rolled
+      // it back): the released connection must not see the caller's ROLLBACK. A
+      // client-side one (a timeout) leaves the transaction in an unknown state.
+      endedTx.add(conn);
+      if (isServerError(error)) conn.release();
+      else await discardConnection(conn);
+      // A SERIALIZABLE / REPEATABLE READ conflict can fail the COMMIT itself
+      throw mapContention(error);
     }
+    conn.release();
   }
 
   protected override async _rollbackTransaction(state: unknown): Promise<void> {
     const conn = state as TPgConnection;
+    if (endedTx.delete(conn)) return;
     try {
       this._log("ROLLBACK");
       await conn.exec("ROLLBACK");
@@ -470,13 +521,25 @@ export class PostgresAdapter extends BaseDbAdapter {
       const at = firstPendingGeo(params);
       return at < 0 ? run(params) : resolvePendingGeo(params!, at, exec).then(run);
     };
+    // Contention (deadlock / lock timeout / serialization failure) on ANY
+    // statement — a plain read in a SERIALIZABLE transaction included —
+    // surfaces as the retryable `DbError`, not the raw driver error.
+    const contention = (error: unknown): never => {
+      throw mapContention(error);
+    };
     return {
-      run: (sql, params) => prep(sql, params, (p) => exec.run(sql, p)),
-      all: <T>(sql: string, params?: unknown[]) => prep(sql, params, (p) => exec.all<T>(sql, p)),
-      get: <T>(sql: string, params?: unknown[]) => prep(sql, params, (p) => exec.get<T>(sql, p)),
+      run: (sql, params) => prep(sql, params, (p) => exec.run(sql, p)).catch(contention),
+      all: <T>(sql: string, params?: unknown[]) =>
+        prep(sql, params, (p) => exec.all<T>(sql, p)).catch(contention),
+      get: <T>(sql: string, params?: unknown[]) =>
+        prep(sql, params, (p) => exec.get<T>(sql, p)).catch(contention),
       // DDL (every schema path runs it through here, recreate aside): the
       // geo column types are learned anew once it has run.
-      exec: (sql) => exec.exec(sql).finally(() => this._geoSchemaChanged()),
+      exec: (sql) =>
+        exec
+          .exec(sql)
+          .catch(contention)
+          .finally(() => this._geoSchemaChanged()),
     };
   }
 
@@ -757,12 +820,6 @@ export class PostgresAdapter extends BaseDbAdapter {
           referencedBy ? { referencedBy } : { name: err.constraint, columns: keyColumns(detail) },
           detail,
         );
-      }
-
-      // Row-lock contention: retryable (deadlock_detected / lock_not_available)
-      const contention = PG_CONTENTION_CODES[err.code];
-      if (contention) {
-        throw new DbError(contention, [{ path: "", message: err.message }]);
       }
     }
     throw error;

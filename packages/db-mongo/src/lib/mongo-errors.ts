@@ -53,6 +53,29 @@ export function serverErrorCode(error: unknown): number | undefined {
   return typeof code === "number" ? code : undefined;
 }
 
+/** `WriteConflict`: a write met a concurrent transaction's uncommitted change. */
+const WRITE_CONFLICT = 112;
+
+/**
+ * The retryable `SERIALIZATION_FAILURE` of a driver error that ended a
+ * transaction without committing it — one labelled `TransientTransactionError`
+ * or `UnknownTransactionCommitResult` (`session.withTransaction` retries
+ * those itself for 120 s, then rethrows), or a `WriteConflict` — else `error`
+ * as is. The raw driver error is kept as `cause`.
+ */
+export function mapTransientTransactionError(error: unknown): unknown {
+  if (!(error instanceof Error)) return error;
+  const labels = (error as { errorLabels?: unknown }).errorLabels;
+  const labelled =
+    Array.isArray(labels) &&
+    (labels.includes("TransientTransactionError") ||
+      labels.includes("UnknownTransactionCommitResult"));
+  if (!labelled && serverErrorCode(error) !== WRITE_CONFLICT) return error;
+  return new DbError("SERIALIZATION_FAILURE", [{ path: "", message: error.message }], undefined, {
+    cause: error,
+  });
+}
+
 /** `DuplicateKey` (E11000) and its legacy update form `DuplicateKeyValue` (E11001). */
 function isDuplicateKeyCode(code: unknown): boolean {
   return code === 11000 || code === 11001;

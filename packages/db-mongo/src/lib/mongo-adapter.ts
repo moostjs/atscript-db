@@ -62,7 +62,12 @@ import type { TViewCapability } from "@atscript/db";
 import { dedupeProjection } from "./projection-dedupe";
 import { hasNullsPlacement, sortStages } from "./mongo-sort";
 import { isArrayPath, joinPath } from "./path-utils";
-import { bulkWriteErrors, duplicateKeyViolation, wrapInvalidQuery } from "./mongo-errors";
+import {
+  bulkWriteErrors,
+  duplicateKeyViolation,
+  mapTransientTransactionError,
+  wrapInvalidQuery,
+} from "./mongo-errors";
 import { dynamicSearchEncryptedMessage } from "./search-messages";
 import { CollectionPatcher, incExpr, type TCollectionPatcherContext } from "./collection-patcher";
 import {
@@ -333,6 +338,9 @@ export class MongoAdapter extends BaseDbAdapter {
         result = await this._runInTransactionContext(session, fn);
       });
       return result;
+    } catch (error) {
+      // The driver's retry window (120 s) ran out on a transient conflict
+      throw mapTransientTransactionError(error);
     } finally {
       try {
         await session.endSession();

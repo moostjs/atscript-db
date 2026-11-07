@@ -39,6 +39,10 @@ export interface TMockDriverOptions {
   get?: Array<[substring: string, row: unknown]>;
   /** Makes `exec` throw the returned error (after recording the call). */
   execError?: (sql: string) => Error | undefined;
+  /** Hand out the same connection object on every `getConnection()` (a custom pooling driver). */
+  reuseConnection?: boolean;
+  /** `false`: the connection has no `destroy()` (default: it has one). */
+  destroyable?: boolean;
 }
 
 /**
@@ -46,11 +50,15 @@ export interface TMockDriverOptions {
  * Both pool-level and connection-level calls are recorded in `calls` (tagged
  * `via`); `releaseCount()` counts released dedicated connections.
  */
-export function createMockDriver(
-  overrides?: TMockDriverOptions,
-): TMysqlDriver & { calls: CapturedCall[]; releaseCount: () => number } {
+export function createMockDriver(overrides?: TMockDriverOptions): TMysqlDriver & {
+  calls: CapturedCall[];
+  releaseCount: () => number;
+  destroyCount: () => number;
+} {
   const calls: CapturedCall[] = [];
   let released = 0;
+  let destroyed = 0;
+  let shared: TMysqlConnection | undefined;
 
   const runResult: TMysqlRunResult = {
     affectedRows: 1,
@@ -86,14 +94,24 @@ export function createMockDriver(
   return {
     calls,
     releaseCount: () => released,
+    destroyCount: () => destroyed,
     ...make("pool"),
     async getConnection(): Promise<TMysqlConnection> {
-      return {
+      if (overrides?.reuseConnection && shared) return shared;
+      shared = {
         ...make("conn"),
         release: vi.fn(() => {
           released++;
         }),
+        ...(overrides?.destroyable === false
+          ? {}
+          : {
+              destroy: vi.fn(() => {
+                destroyed++;
+              }),
+            }),
       };
+      return shared;
     },
     async close(): Promise<void> {},
   };

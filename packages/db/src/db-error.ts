@@ -186,8 +186,9 @@ export class DbError extends Error {
     public readonly code: DbErrorCode,
     public readonly errors: TDbErrorEntry[],
     message?: string,
+    options?: { cause?: unknown },
   ) {
-    super(message ?? errors[0]?.message ?? "Database error");
+    super(message ?? errors[0]?.message ?? "Database error", options);
     this.stack = undefined;
   }
 

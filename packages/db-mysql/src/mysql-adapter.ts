@@ -24,6 +24,7 @@ import {
 } from "@atscript/db";
 import type {
   AtscriptDbView,
+  DbErrorCode,
   DbSpace,
   TDbDeleteResult,
   TDbIndex,
@@ -251,6 +252,72 @@ type TZeroIsExplicit = () => Promise<boolean>;
 /** The statement surface the adapter runs CRUD through (pool or a dedicated connection). */
 type TMysqlExecutor = Pick<TMysqlDriver, "run" | "all" | "get" | "exec">;
 
+/** Connections whose COMMIT failed: the transaction is over, no ROLLBACK may follow. */
+const endedTx = new WeakSet<object>();
+
+/**
+ * ER_LOCK_DEADLOCK rolled the whole transaction back; ER_LOCK_WAIT_TIMEOUT /
+ * ER_LOCK_NOWAIT (3572, a `NOWAIT` locking read) failed the statement.
+ */
+const MYSQL_CONTENTION_CODES: Record<number, DbErrorCode | undefined> = {
+  1213: "DEADLOCK",
+  1205: "LOCK_TIMEOUT",
+  3572: "LOCK_TIMEOUT",
+};
+
+/**
+ * `error` as the retryable `DbError` of its contention errno (deadlock,
+ * lock wait timeout, `NOWAIT` lock refusal), else `error` as is; the driver
+ * error is kept as `cause`. Applied to every statement and to COMMIT.
+ */
+function mapContention(error: unknown): unknown {
+  if (!error || typeof error !== "object") return error;
+  const err = error as { errno?: unknown; message: string; sqlMessage?: string };
+  const code = typeof err.errno === "number" ? MYSQL_CONTENTION_CODES[err.errno] : undefined;
+  if (!code) return error;
+  return new DbError(code, [{ path: "", message: err.sqlMessage ?? err.message }], undefined, {
+    cause: error,
+  });
+}
+
+/**
+ * Whether the server reported `error` (a positive `errno`), as opposed to a
+ * client-side failure — a timeout, a lost socket — after which the server's
+ * transaction state is unknown.
+ */
+function isServerError(error: unknown): boolean {
+  const errno =
+    error && typeof error === "object" ? (error as { errno?: unknown }).errno : undefined;
+  return typeof errno === "number" && errno > 0;
+}
+
+/** Closes `conn` — or, for a driver without `destroy()`, rolls it back (best effort) and releases it. */
+async function discardConnection(conn: TMysqlConnection): Promise<void> {
+  if (conn.destroy) {
+    conn.destroy();
+    return;
+  }
+  try {
+    await conn.exec("ROLLBACK");
+  } catch {
+    /* the connection is released regardless */
+  }
+  conn.release();
+}
+
+/** `exec` whose statements reject with the retryable `DbError` on contention (any statement can be the deadlock victim). */
+function contentionExec(exec: TMysqlExecutor): TMysqlExecutor {
+  const contention = (error: unknown): never => {
+    throw mapContention(error);
+  };
+  return {
+    run: (sql, params) => exec.run(sql, params).catch(contention),
+    all: <T>(sql: string, params?: unknown[]) => exec.all<T>(sql, params).catch(contention),
+    get: <T>(sql: string, params?: unknown[]) => exec.get<T>(sql, params).catch(contention),
+    exec: (sql) => exec.exec(sql).catch(contention),
+  };
+}
+
 /** A live foreign-key constraint, as `syncColumns` drops and re-creates it. */
 interface TLiveForeignKey {
   schema: string;
@@ -390,6 +457,8 @@ export class MysqlAdapter extends BaseDbAdapter {
   /** Field path → `@db.mysql.charset` of the column. */
   private _charsetFields = new Map<string, string>();
   private _space?: DbSpace;
+  private _poolExec?: TMysqlExecutor;
+  private _txExecs = new WeakMap<TMysqlConnection, TMysqlExecutor>();
   /** Memo of {@link _keyTableCharsets} — it also makes its warning fire once. */
   private _keyTableCharsetsMemo?: ReadonlyMap<string, TMysqlCharset>;
 
@@ -499,13 +568,22 @@ export class MysqlAdapter extends BaseDbAdapter {
     try {
       this._log("COMMIT");
       await conn.exec("COMMIT");
-    } finally {
-      conn.release();
+    } catch (error) {
+      // A server-reported COMMIT failure ended the transaction (the server rolled
+      // it back): the released connection must not see the caller's ROLLBACK. A
+      // client-side one (a timeout) leaves the transaction in an unknown state.
+      endedTx.add(conn);
+      if (isServerError(error)) conn.release();
+      else await discardConnection(conn);
+      // A deadlock victim / lock wait timeout can surface at COMMIT itself
+      throw mapContention(error);
     }
+    conn.release();
   }
 
   protected override async _rollbackTransaction(state: unknown): Promise<void> {
     const conn = state as TMysqlConnection;
+    if (endedTx.delete(conn)) return;
     try {
       this._log("ROLLBACK");
       await conn.exec("ROLLBACK");
@@ -519,7 +597,13 @@ export class MysqlAdapter extends BaseDbAdapter {
    * otherwise the pool-based driver.
    */
   private _exec(): TMysqlExecutor {
-    return this._txConnection() ?? this.driver;
+    const conn = this._txConnection();
+    if (!conn) {
+      return (this._poolExec ??= contentionExec(this.driver));
+    }
+    let exec = this._txExecs.get(conn);
+    if (!exec) this._txExecs.set(conn, (exec = contentionExec(conn)));
+    return exec;
   }
 
   /**
@@ -865,14 +949,8 @@ export class MysqlAdapter extends BaseDbAdapter {
         );
       }
 
-      // Row-lock contention: retryable (ER_LOCK_DEADLOCK rolled the whole
-      // transaction back; ER_LOCK_WAIT_TIMEOUT / ER_LOCK_NOWAIT (3572, a
-      // `NOWAIT` locking read) failed the statement)
-      if (err.errno === 1213 || err.errno === 1205 || err.errno === 3572) {
-        throw new DbError(err.errno === 1213 ? "DEADLOCK" : "LOCK_TIMEOUT", [
-          { path: "", message: err.sqlMessage ?? err.message },
-        ]);
-      }
+      // Row-lock contention: retryable
+      throw mapContention(error);
     }
     throw error;
   }
