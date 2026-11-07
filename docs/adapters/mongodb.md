@@ -668,6 +668,8 @@ Capped collections do not support document deletion or updates that increase doc
 
 MongoDB transactions require a replica-set member, mongos or load balancer; this also holds over `directConnection=true` (since 0.1.164). The adapter reads it from the server once per client. On a standalone `mongod`, or an adapter created without a `MongoClient`, the adapter skips transactional wrapping — operations run normally without guarantees. See [Transactions](/api/transactions#adapter-behavior) for usage and behavioral details.
 
+The driver's `session.withTransaction()` retries transient failures itself: it re-runs your callback on a `TransientTransactionError` (a write conflict, for example), so keep the callback idempotent, and repeats the commit on an `UnknownTransactionCommitResult`. When those retries run out, the adapter throws the retryable `DbError("SERIALIZATION_FAILURE")` with the driver error as `cause` (since 0.1.175; before, the raw `MongoServerError` escaped). See [Retrying](/api/transactions#retrying).
+
 Row-locking reads (`{ lock: 'update' }`) throw `DbError("LOCK_NOT_SUPPORTED")` (since 0.1.162). Use `$cas` / `withOptimisticRetry` instead; the transaction's write-conflict retry already makes "read X, then write X" safe. `withTransaction(fn, { isolation })` accepts `'read committed'` and `'repeatable read'`, which the transaction's snapshot satisfies. `'serializable'`, and any level where no transaction is opened (standalone server, or no `MongoClient`), throws `ISOLATION_NOT_SUPPORTED`. See [Locking reads](/api/transactions#locking-reads).
 
 ## Schema Sync Notes

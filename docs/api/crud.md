@@ -145,7 +145,7 @@ await adapter.withTransaction(async () => {
 - Outside a caller's transaction it is a no-op: the call's own transaction ends when it returns. Without `onConflict: "ignore"` it throws `INVALID_QUERY`.
 
 ::: tip Retry on DEADLOCK / LOCK_TIMEOUT
-Since 0.1.153 a deadlock victim (MySQL errno 1213, PostgreSQL `40P01`) and a lock wait timeout (MySQL 1205, PostgreSQL `55P03`) throw `DbError` with code `DEADLOCK` / `LOCK_TIMEOUT` (PostgreSQL `40001`: `SERIALIZATION_FAILURE`) and `retryable: true` (`isRetryableDbError(error)`), on any write. Retry the **whole** transaction — see [Transactions](/api/transactions#retrying).
+Since 0.1.153 a deadlock victim (MySQL errno 1213, PostgreSQL `40P01`) and a lock wait timeout (MySQL 1205, PostgreSQL `55P03`) throw `DbError` with code `DEADLOCK` / `LOCK_TIMEOUT` (PostgreSQL `40001`: `SERIALIZATION_FAILURE`) and `retryable: true` (`isRetryableDbError(error)`), on any write — since 0.1.175 also on reads and at `COMMIT`, with SQLite's `SQLITE_BUSY` at `COMMIT` and MongoDB's exhausted transient-error retries mapped too. Retry the **whole** transaction — see [Transactions](/api/transactions#retrying).
 :::
 
 ::: info Nested Creation

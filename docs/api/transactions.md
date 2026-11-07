@@ -109,7 +109,15 @@ If the rollback itself fails, the rollback error is swallowed and the original e
 
 ### Retrying deadlocks and lock timeouts {#retrying}
 
-Since 0.1.153, when MySQL or PostgreSQL picks your transaction as a **deadlock** victim (MySQL errno 1213, PostgreSQL `40P01`) or a row lock is **not granted in time** (MySQL 1205 `innodb_lock_wait_timeout`, PostgreSQL `55P03` `lock_timeout` / `NOWAIT`), the write throws `DbError` with code `DEADLOCK` or `LOCK_TIMEOUT`. PostgreSQL's `40001` (could not serialize access — under `REPEATABLE READ` / `SERIALIZABLE`) throws `SERIALIZATION_FAILURE`. All three carry `retryable: true`; `isRetryableDbError(error)` tests for them. The database has already rolled the transaction back (a MySQL lock wait timeout fails only the statement, but `withTransaction` rolls the rest back as the error propagates), so retry the **whole** callback, not the failed statement:
+Since 0.1.153, when MySQL or PostgreSQL picks your transaction as a **deadlock** victim (MySQL errno 1213, PostgreSQL `40P01`) or a row lock is **not granted in time** (MySQL 1205 `innodb_lock_wait_timeout`, PostgreSQL `55P03` `lock_timeout` / `NOWAIT`), the statement throws `DbError` with code `DEADLOCK` or `LOCK_TIMEOUT`. PostgreSQL's `40001` (could not serialize access — under `REPEATABLE READ` / `SERIALIZABLE`) throws `SERIALIZATION_FAILURE`. All three carry `retryable: true`; `isRetryableDbError(error)` tests for them.
+
+Since 0.1.175 the same codes cover every statement and `COMMIT`, not only writes:
+
+- **PostgreSQL / MySQL:** a plain read (a `SERIALIZABLE` read that cannot be serialized, for example) and a `COMMIT` that fails on a deadlock or serialization failure throw the retryable `DbError` too.
+- **SQLite:** a `COMMIT` that fails with `SQLITE_BUSY` (another process holds the database lock past `busy_timeout`) throws `LOCK_TIMEOUT`.
+- **MongoDB:** a transaction that still fails after the driver's own retries of a transient error (`TransientTransactionError`, `UnknownTransactionCommitResult`, a write conflict) throws `SERIALIZATION_FAILURE`.
+
+The driver's error is kept as the `DbError`'s `cause`. Branch on `retryable` or the `DbError` code, never on the driver's code (`40001`, `ER_LOCK_DEADLOCK`). The database has already rolled the transaction back (a MySQL lock wait timeout fails only the statement, but `withTransaction` rolls the rest back as the error propagates), so retry the **whole** callback, not the failed statement:
 
 ```typescript
 import { isRetryableDbError } from "@atscript/db";

@@ -480,6 +480,7 @@ See the [better-sqlite3 README](https://github.com/WiseLibs/better-sqlite3) for 
 A SQLite driver is **one synchronous connection**, shared by every table of the space. Two async contexts cannot each own a transaction on it, and — worse — a statement from another request that runs while a transaction is open executes _inside_ that transaction (it sees uncommitted rows and is undone by a rollback). Since 0.1.128 the adapter serialises the connection through a per-driver FIFO gate:
 
 - `withTransaction` takes the gate, runs `BEGIN IMMEDIATE` (the write lock is taken up front, so a concurrent _process_ waits on `busy_timeout` instead of failing mid-transaction), and releases the gate on `COMMIT` / `ROLLBACK`. Concurrent `withTransaction` calls queue and run one after the other — no more `cannot start a transaction within a transaction`.
+- A `COMMIT` that fails with `SQLITE_BUSY` (another process still holds a lock past `busy_timeout`) throws the retryable `DbError("LOCK_TIMEOUT")`, with the driver error as `cause` (since 0.1.175). The gate stays held until the transaction is rolled back, so no queued statement runs inside it; [retry the whole transaction](/api/transactions#retrying).
 - Every read and write outside a transaction waits until no transaction is open, then runs autocommit. Inside your own transaction, statements run immediately (nested calls join as before).
 - The gate is keyed by driver instance: construct **one driver per database** (two `BetterSqlite3Driver` wrappers around one `Database` would get two gates).
 
