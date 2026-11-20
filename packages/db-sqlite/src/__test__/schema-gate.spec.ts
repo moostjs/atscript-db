@@ -182,6 +182,31 @@ describe("SQLite schema entry points take the connection gate (since 0.1.128)", 
     expect(gate().held).toBe(false);
   });
 
+  // (a'') the index plan reads PRAGMA index_list / index_info through the gate
+  // too (since 0.1.177 — before, it read them inside the other context's transaction)
+  it("planIndexes started during another context's transaction reads the index state only after its COMMIT", async () => {
+    await parents.ensureTable();
+    const opened = deferred();
+    const hold = deferred();
+    const tx = parentsAdapter().withTransaction(async () => {
+      opened.resolve();
+      await hold.promise;
+    });
+    await opened.promise;
+    const indexReads = () => driver.statements.filter((s) => s.startsWith("PRAGMA index_"));
+
+    const plan = parentsAdapter().planIndexes();
+    // every queued microtask and I/O callback runs: nothing settles while the transaction holds the gate
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(indexReads()).toEqual([]);
+
+    hold.resolve();
+    await tx;
+    await plan;
+    expect(indexReads()).not.toEqual([]);
+    expect(gate().held).toBe(false);
+  });
+
   // (c) inside this driver's own transaction the schema call runs directly
   it("schema methods called inside this driver's own withTransaction run without deadlock (one BEGIN/COMMIT)", async () => {
     await parents.ensureTable();
@@ -199,6 +224,7 @@ describe("SQLite schema entry points take the connection gate (since 0.1.128)", 
         hasRows: await childrenAdapter().hasRows(),
         kind: await childrenAdapter().getObjectKind("pf_children"),
         refs: await childrenAdapter().getReferencingForeignKeys("pf_parents"),
+        plan: await childrenAdapter().planIndexes(),
       };
     });
 
@@ -208,8 +234,11 @@ describe("SQLite schema entry points take the connection gate (since 0.1.128)", 
       hasRows: false,
       kind: "table",
       refs: [{ table: "pf_children", fields: ["parentId"], targetFields: ["id"] }],
+      plan: [],
     });
     expect(txStatements(driver.execs)).toEqual(["BEGIN IMMEDIATE", "COMMIT"]);
+    // re-entrant inside an exclusive hold as well
+    expect(await gate().runExclusive(() => childrenAdapter().planIndexes())).toEqual([]);
     expect(gate().held).toBe(false);
   });
 

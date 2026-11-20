@@ -67,6 +67,68 @@ describe("SqliteAdapter — locking reads and isolation", () => {
     );
   });
 
+  // `join: 'same'` (since 0.1.177) compares the level the outermost call ASKED
+  // for, not the serializable level SQLite runs at — so a test on SQLite
+  // catches an outer call opened at the wrong level, as PostgreSQL / MySQL would.
+  describe("join: 'same'", () => {
+    const RC = { isolation: "read committed", join: "same" } as const;
+    const mismatch = (outer?: { isolation: "repeatable read" }) =>
+      expect(
+        adapter.withTransaction(() => adapter.withTransaction(async () => {}, RC), outer),
+      ).rejects.toMatchObject({
+        code: "INVALID_QUERY",
+        errors: [
+          {
+            code: "ISOLATION_MISMATCH",
+            params: {
+              requested: "read committed",
+              open: outer?.isolation ?? null,
+              join: "same",
+            },
+          },
+        ],
+      });
+
+    it("outer opened with no level: a nested read committed 'same' throws although SQLite runs serializable", async () => {
+      // the default join accepts it — the inherent serializable level satisfies any request
+      await adapter.withTransaction(() =>
+        adapter.withTransaction(async () => {}, { isolation: "read committed" }),
+      );
+      await mismatch();
+    });
+
+    it("outer opened at repeatable read: a nested read committed 'same' throws", async () => {
+      await mismatch({ isolation: "repeatable read" });
+    });
+
+    it("outer opened at read committed: a nested 'same' joins its one BEGIN IMMEDIATE", async () => {
+      const result = await adapter.withTransaction(
+        () =>
+          adapter.withTransaction(async () => {
+            await users.updateMany({ id: 1 }, { name: "joined" } as any);
+            return 1;
+          }, RC),
+        { isolation: "read committed" },
+      );
+      expect(result).toBe(1);
+      expect(driver.execs.filter((s) => s.startsWith("BEGIN"))).toEqual(["BEGIN IMMEDIATE"]);
+      expect(await users.findById(1)).toMatchObject({ name: "joined" });
+    });
+
+    it("a mismatch rolls the outer transaction back", async () => {
+      await expect(
+        adapter.withTransaction(
+          async () => {
+            await users.updateMany({ id: 1 }, { name: "lost" } as any);
+            await adapter.withTransaction(async () => {}, RC);
+          },
+          { isolation: "repeatable read" },
+        ),
+      ).rejects.toMatchObject({ errors: [{ code: "ISOLATION_MISMATCH" }] });
+      expect(await users.findById(1)).toMatchObject({ name: "a" });
+    });
+  });
+
   it("a locking read and bounded updateMany / deleteMany share one transaction", async () => {
     await users.insertMany([
       { id: 2, name: "b", status: "new", counter: 0 },

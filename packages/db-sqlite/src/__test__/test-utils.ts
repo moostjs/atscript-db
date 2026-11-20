@@ -76,3 +76,10 @@ export async function caught(p: Promise<unknown>): Promise<DbError> {
   expect(error).toBeInstanceOf(DbError);
   return error as DbError;
 }
+
+/** Asserts `error` is the retryable `LOCK_TIMEOUT` of a busy database, its `cause` matching `cause`. */
+export function expectLockTimeout(error: unknown, cause: object): void {
+  expect(error).toBeInstanceOf(DbError);
+  expect(error).toMatchObject({ code: "LOCK_TIMEOUT", retryable: true });
+  expect((error as DbError).cause).toMatchObject(cause);
+}

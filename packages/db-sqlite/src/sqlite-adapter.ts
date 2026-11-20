@@ -121,21 +121,40 @@ import {
 } from "./fts-term";
 
 /**
- * The retryable `LOCK_TIMEOUT` of an `SQLITE_BUSY` driver error (another
- * connection holds the database lock past `busy_timeout`), with the driver
- * error as `cause`; any other error as is.
+ * Whether `error` is an `SQLITE_BUSY` driver error — another connection held
+ * the database lock past `busy_timeout`. Any extended busy code counts (`code`
+ * starting with `SQLITE_BUSY`, or a numeric `errcode` whose primary code is
+ * 5); `SQLITE_LOCKED` (6) is a conflict on the same connection, not
+ * contention. A `DbError` never is.
+ */
+function isBusy(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { code, errcode } = error as { code?: unknown; errcode?: unknown };
+  return (
+    (typeof code === "string" && code.startsWith("SQLITE_BUSY")) ||
+    (typeof errcode === "number" && (errcode & 0xff) === 5)
+  );
+}
+
+/**
+ * The retryable `LOCK_TIMEOUT` of an {@link isBusy} driver error, with the
+ * driver error as `cause`; any other error as is (so mapping twice is harmless).
  */
 function mapBusy(error: unknown): unknown {
-  if (!error || typeof error !== "object") return error;
-  const { code, errcode } = error as { code?: unknown; errcode?: unknown };
-  const busy =
-    (typeof code === "string" && code.startsWith("SQLITE_BUSY")) ||
-    (typeof errcode === "number" && (errcode & 0xff) === 5);
-  return busy
+  return isBusy(error)
     ? new DbError("LOCK_TIMEOUT", [{ path: "", message: (error as Error).message }], undefined, {
         cause: error,
       })
     : error;
+}
+
+/** Runs the synchronous `fn`, rethrowing an `SQLITE_BUSY` as {@link mapBusy}'s `LOCK_TIMEOUT`. */
+function busyMapped<R>(fn: () => R): R {
+  try {
+    return fn();
+  } catch (error) {
+    throw mapBusy(error);
+  }
 }
 
 /**
@@ -298,31 +317,33 @@ export class SqliteAdapter extends BaseDbAdapter {
     }
   }
 
+  /**
+   * A vector field. A write reaches the formatter already serialized (the
+   * mapper turns json-storage fields into JSON text first) and is stored as
+   * is; an array that does reach it becomes a Float32 BLOB with sqlite-vec,
+   * JSON text without it. A read accepts either form. Called once while the
+   * table metadata is built, where the extension probe must not run (it may
+   * be busy — see {@link _detectVectorSupport}), so a value decides when it
+   * is formatted.
+   */
   override formatValue(field: TDbFieldMeta): TValueFormatterPair | undefined {
     if (!this._vectorFields.has(field.path)) {
       return undefined;
     }
-    if (this._detectVectorSupport()) {
-      return {
-        toStorage: (value: unknown) =>
-          Array.isArray(value) ? Buffer.from(new Float32Array(value as number[]).buffer) : value,
-        fromStorage: (value: unknown) => {
-          if (value instanceof Buffer || value instanceof Uint8Array) {
-            const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
-            const arr = new Float32Array(
-              buf.buffer,
-              buf.byteOffset,
-              Math.floor(buf.byteLength / 4),
-            );
-            return Array.from(arr);
-          }
-          return value;
-        },
-      };
-    }
     return {
-      toStorage: (value: unknown) => (Array.isArray(value) ? JSON.stringify(value) : value),
+      toStorage: (value: unknown) => {
+        if (!Array.isArray(value)) return value;
+        return this._detectVectorSupport()
+          ? Buffer.from(new Float32Array(value as number[]).buffer)
+          : JSON.stringify(value);
+      },
       fromStorage: (value: unknown) => {
+        if (value instanceof Uint8Array) {
+          const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
+          return Array.from(
+            new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.byteLength / 4)),
+          );
+        }
         if (typeof value === "string") {
           try {
             return JSON.parse(value);
@@ -342,6 +363,12 @@ export class SqliteAdapter extends BaseDbAdapter {
     return this._detectVectorSupport();
   }
 
+  /**
+   * Whether sqlite-vec is loaded: the driver's `hasVectorExt`, else a probe,
+   * answered once. A busy probe answers nothing — it throws the retryable
+   * `LOCK_TIMEOUT` (the caller's write, search or sync fails, the next call
+   * probes again).
+   */
   private _detectVectorSupport(): boolean {
     if (this._supportsVector !== undefined) {
       return this._supportsVector;
@@ -354,7 +381,8 @@ export class SqliteAdapter extends BaseDbAdapter {
       try {
         this.driver.get("SELECT vec_version()");
         this._supportsVector = true;
-      } catch {
+      } catch (error) {
+        if (isBusy(error)) throw mapBusy(error);
         this._supportsVector = false;
       }
     }
@@ -380,6 +408,13 @@ export class SqliteAdapter extends BaseDbAdapter {
   // synchronous segment); only methods that `await` between statements or
   // flip connection-level PRAGMAs hold the connection with
   // `_withExclusiveConnection`.
+  //
+  // Busy: `_stmt`, `_withExclusiveConnection`, `BEGIN` and `COMMIT` turn
+  // `SQLITE_BUSY` into the retryable `LOCK_TIMEOUT` (`mapBusy`; `this.driver` stays raw — it is the
+  // gate key). The failing statement did not run; earlier statements of a
+  // non-transactional schema call may have applied. Code inside them that
+  // catches and classifies errors (the index diff's failure collector, the
+  // capability probes) must map — or test `isBusy` — first: it sees the raw error.
 
   private _waitOpts(): SqliteTxWaitOptions {
     return { ...this._txOptions, logger: this.logger };
@@ -400,15 +435,19 @@ export class SqliteAdapter extends BaseDbAdapter {
    * exclusive hold) it runs immediately; otherwise it waits until no
    * transaction is open on the connection. The `held` check and the statement
    * run in the same synchronous segment, so they cannot interleave with a
-   * `BEGIN` from another context.
+   * `BEGIN` from another context. A busy statement rejects with `LOCK_TIMEOUT`.
    */
   private async _stmt<R>(fn: () => R): Promise<R> {
-    // Fast path first: when nothing holds the gate there is no ownership
-    // question to answer (no async-local lookups).
-    if (!this._gate.held || this._ownsConnection()) {
-      return fn();
+    try {
+      // Fast path first: when nothing holds the gate there is no ownership
+      // question to answer (no async-local lookups).
+      if (!this._gate.held || this._ownsConnection()) {
+        return fn();
+      }
+      return await this._gate.runWhenFree(fn, this._waitOpts());
+    } catch (error) {
+      throw mapBusy(error);
     }
-    return this._gate.runWhenFree(fn, this._waitOpts());
   }
 
   /**
@@ -420,13 +459,17 @@ export class SqliteAdapter extends BaseDbAdapter {
    * request's transaction (PRAGMA changes are no-ops inside one). Inside our
    * own transaction `fn` runs directly; re-entrant for the same async
    * context; nested `withTransaction` calls inside `fn` still BEGIN/COMMIT
-   * on the held connection.
+   * on the held connection. A busy step rejects with `LOCK_TIMEOUT`, after
+   * `fn`'s own `finally` blocks restored the connection's PRAGMAs.
    */
   protected async _withExclusiveConnection<T>(fn: () => Promise<T>): Promise<T> {
-    if (this._getTransactionState() !== undefined) {
-      return fn();
+    try {
+      return this._getTransactionState() !== undefined
+        ? await fn()
+        : await this._gate.runExclusive(fn, this._waitOpts());
+    } catch (error) {
+      throw mapBusy(error);
     }
-    return this._gate.runExclusive(fn, this._waitOpts());
   }
 
   protected override async _beginTransaction(): Promise<SqliteTxState> {
@@ -442,8 +485,10 @@ export class SqliteAdapter extends BaseDbAdapter {
       this._log("BEGIN IMMEDIATE");
       this.driver.exec("BEGIN IMMEDIATE");
     } catch (error) {
+      // A busy BEGIN opened nothing and ran nothing: free the gate and report
+      // the retryable LOCK_TIMEOUT
       state.release();
-      throw error;
+      throw mapBusy(error);
     }
     return state;
   }
@@ -455,9 +500,9 @@ export class SqliteAdapter extends BaseDbAdapter {
       this._log("COMMIT");
       this.driver.exec("COMMIT");
     } catch (error) {
-      // A failed COMMIT (SQLITE_BUSY: another connection holds a lock) leaves
-      // the transaction open: the gate stays held until `withTransaction`'s
-      // ROLLBACK releases it, so no waiter enters meanwhile.
+      // A failed COMMIT (SQLITE_BUSY: a reader holds SHARED in rollback-journal
+      // mode) leaves the transaction open: the gate stays held until
+      // `withTransaction`'s ROLLBACK releases it, so no waiter enters meanwhile.
       throw mapBusy(error);
     }
     (state as SqliteTxState).release();
@@ -923,12 +968,13 @@ export class SqliteAdapter extends BaseDbAdapter {
   /**
    * Seeds the sqlite_sequence table for auto-increment fields that have a start value.
    * Only applies once per adapter instance (idempotent via INSERT OR IGNORE + flag).
+   * The flag is set once the seed ran: a failed (busy) seed is retried by the
+   * next `ensureTable`.
    */
   private _seedIncrementStart(): void {
     if (this._incrementSeeded) {
       return;
     }
-    this._incrementSeeded = true;
     const tableName = this.resolveTableName();
     for (const def of this._table.defaults.values()) {
       if (def.kind === "fn" && def.fn === "increment" && typeof def.start === "number") {
@@ -939,6 +985,7 @@ export class SqliteAdapter extends BaseDbAdapter {
         break; // Only one auto-increment PK per table
       }
     }
+    this._incrementSeeded = true;
   }
 
   async ensureView(): Promise<void> {
@@ -1332,6 +1379,15 @@ export class SqliteAdapter extends BaseDbAdapter {
     return this._withExclusiveConnection(() => this._syncIndexes(false));
   }
 
+  /**
+   * The plan reads the live index state (`PRAGMA index_list` / `index_info`)
+   * through the gate like {@link syncIndexes}: never inside another context's
+   * open transaction, and a busy read rejects with `LOCK_TIMEOUT`.
+   */
+  override async planIndexes(): Promise<TIndexChange[]> {
+    return this._withExclusiveConnection(() => this._syncIndexes(true));
+  }
+
   protected override async _syncIndexes(dryRun: boolean): Promise<TIndexChange[]> {
     const tableName = this.resolveTableName();
 
@@ -1356,12 +1412,13 @@ export class SqliteAdapter extends BaseDbAdapter {
           .join(", ");
         const sql = `CREATE ${unique}INDEX IF NOT EXISTS "${esc(index.key)}" ON "${esc(tableName)}" (${cols})`;
         this._log(sql);
-        this.driver.exec(sql);
+        // Mapped here: the diff's collector rethrows only a retryable DbError
+        busyMapped(() => this.driver.exec(sql));
       },
       dropIndex: async (name: string) => {
         const sql = `DROP INDEX IF EXISTS "${esc(name)}"`;
         this._log(sql);
-        this.driver.exec(sql);
+        busyMapped(() => this.driver.exec(sql));
       },
       // fulltext → FTS5 shadow tables (below); geo → no physical artifact,
       // geoSearch/$geoWithin run a haversine scan over the JSON tuple.
@@ -2033,7 +2090,9 @@ export class SqliteAdapter extends BaseDbAdapter {
    * Geo search is available when SQLite has math functions
    * (`SQLITE_ENABLE_MATH_FUNCTIONS` — on by default in better-sqlite3 builds).
    * Distance is computed per row via haversine; declared geo indexes have no
-   * physical artifact on SQLite.
+   * physical artifact on SQLite. Probed once; a busy probe throws the
+   * retryable `LOCK_TIMEOUT` and the next call probes again (a `false` would
+   * turn into a non-retryable `GEO_NOT_SUPPORTED`).
    */
   override isGeoSearchable(): boolean {
     return this._detectMathFns();
@@ -2044,7 +2103,8 @@ export class SqliteAdapter extends BaseDbAdapter {
       try {
         this.driver.get("SELECT radians(0) AS r");
         this._supportsMathFns = true;
-      } catch {
+      } catch (error) {
+        if (isBusy(error)) throw mapBusy(error);
         this._supportsMathFns = false;
         this._log(
           "[atscript-db-sqlite] SQLite math functions unavailable — geo search disabled (rebuild SQLite with SQLITE_ENABLE_MATH_FUNCTIONS).",
