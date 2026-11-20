@@ -11,16 +11,23 @@ import { getKeyProps } from "./patch-types";
  * operations (e.g., SQLite). It performs a read‑modify‑write:
  *
  * 1. Detects `__$` operator keys in the update object
- * 2. Reads the current record to get existing array values
+ * 2. Reads the current record to get existing array values: the column's
+ *   `fromStorage` formatter's result when it is an array (since 0.1.178;
+ *   e.g. a vector stored as a Float32 BLOB on SQLite), else the stored value
+ *   with JSON text parsed; a `null` / missing value is `[]`. A value that is
+ *   still not an array throws (since 0.1.178; it was spread item by item —
+ *   a string into its characters)
  * 3. Applies operations in‑memory
- * 4. Replaces operator keys with resolved plain values
+ * 4. Replaces operator keys with resolved plain values (written as any
+ *   other update value — no `toStorage` formatting of the result)
  *
- * @param update - The decomposed update (from `decomposePatch`), potentially
- *   containing `field.__$insert`, `field.__$remove`, etc.
- * @param currentRecord - The current record fetched from the database (only the
- *   fields that have array ops). Can be `null` if the record doesn't exist.
+ * @param update - The decomposed update (from `decomposePatch`) with physical
+ *   column keys, potentially containing `field.__$insert`, `field.__$remove`, etc.
+ * @param currentRecord - The current record fetched from the database (a raw
+ *   adapter row, physical column keys). Can be `null` if the record doesn't exist.
  * @param table - The AtscriptDbTable for metadata access (key props, unique items).
  * @returns A new update object with all `__$` keys resolved to plain values.
+ * @throws Error when a field's stored value is not an array.
  */
 export function resolveArrayOps(
   update: Record<string, unknown>,
@@ -73,11 +80,22 @@ export function resolveArrayOps(
     }
   }
 
-  // Resolve each field's ops
+  // Resolve each field's ops. `field` is the physical column: the key of the
+  // raw row and of `fromStorageFormatters` (a `@db.column` rename included).
+  const fromStorage = table.getMetadata().fromStorageFormatters;
   for (const [field, ops] of opsMap) {
-    // SQLite stores arrays as JSON text — parse if needed
-    const raw = currentRecord?.[field] ?? [];
-    const current = (typeof raw === "string" ? JSON.parse(raw) : raw) as unknown[];
+    const stored = currentRecord?.[field];
+    const decoded = stored == null ? undefined : fromStorage?.get(field)?.(stored);
+    let current: unknown = Array.isArray(decoded) ? decoded : (stored ?? []);
+    // SQL adapters store an array column as JSON text — parse it
+    if (typeof current === "string") current = JSON.parse(current);
+    if (!Array.isArray(current)) {
+      throw new Error(
+        `Cannot apply array patch operators to "${field}": its stored value is not an array`,
+      );
+    }
+    // Looked up by the PHYSICAL name too: a `@db.column`-renamed or flattened
+    // array column misses its key props, `uniqueItems` and merge strategy here.
     const arrayType = table.flatMap.get(field) as
       | TAtscriptAnnotatedType<TAtscriptTypeArray>
       | undefined;

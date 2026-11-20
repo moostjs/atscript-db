@@ -158,6 +158,53 @@ function busyMapped<R>(fn: () => R): R {
 }
 
 /**
+ * A vector as sqlite-vec's compact form: float32, 4 bytes per number, in the
+ * host's byte order — the order sqlite-vec reads a BLOB in. The stored
+ * vector, its decode and the KNN query vector all use it.
+ */
+function float32Blob(values: readonly number[]): Buffer {
+  return Buffer.from(new Float32Array(values).buffer);
+}
+
+/**
+ * Whether `field` is a JSON-stored array of numbers — a column that may hold
+ * a vector this adapter stored as a Float32 BLOB without being declared one
+ * (see `formatValue`).
+ */
+function isNumberArrayField(field: TDbFieldMeta): boolean {
+  const type = field.type.type;
+  return (
+    field.storage === "json" &&
+    type.kind === "array" &&
+    type.of.type.kind === "" &&
+    type.of.type.designType === "number"
+  );
+}
+
+/**
+ * The numbers of a {@link float32Blob}; any other read value as is — JSON
+ * text is the mapper's to parse, and a blob whose length is not a multiple
+ * of 4 is no vector this adapter wrote. The bytes are copied into a fresh
+ * buffer first: a driver's blob is often a slice of a pooled `ArrayBuffer` at
+ * an offset a `Float32Array` view cannot start at (it needs 4-byte alignment).
+ */
+function decodeFloat32Blob(value: unknown): unknown {
+  if (!(value instanceof Uint8Array) || value.byteLength % 4 !== 0) return value;
+  return Array.from(new Float32Array(new Uint8Array(value).buffer));
+}
+
+/** The numbers of JSON text holding an array of numbers, else `undefined`. */
+function jsonNumberArray(text: string): number[] | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  return Array.isArray(parsed) && parsed.every((n) => typeof n === "number") ? parsed : undefined;
+}
+
+/**
  * SQLite adapter for {@link AtscriptDbTable}.
  *
  * Accepts any {@link TSqliteDriver} implementation — the actual SQLite engine
@@ -259,6 +306,8 @@ export class SqliteAdapter extends BaseDbAdapter {
 
   /** Per-driver transaction gate (shared by every adapter over this driver). */
   private readonly _gate: SqliteTxGate;
+  /** Open {@link _atomically} units of the current (synchronous) call. */
+  private _unitDepth = 0;
   private readonly _txOptions: SqliteAdapterOptions;
   /** `ftsTokenizers` — the FTS5 tokenizer per fulltext language (since 0.1.175). */
   private readonly _ftsTokenizers: SqliteAdapterOptions["ftsTokenizers"];
@@ -318,41 +367,38 @@ export class SqliteAdapter extends BaseDbAdapter {
   }
 
   /**
-   * A vector field. A write reaches the formatter already serialized (the
-   * mapper turns json-storage fields into JSON text first) and is stored as
-   * is; an array that does reach it becomes a Float32 BLOB with sqlite-vec,
-   * JSON text without it. A read accepts either form. Called once while the
-   * table metadata is built, where the extension probe must not run (it may
-   * be busy — see {@link _detectVectorSupport}), so a value decides when it
-   * is formatted.
+   * A vector field (since 0.1.178): with sqlite-vec a Float32 BLOB
+   * ({@link float32Blob}), the column type `typeMapper` gives it — the mapper
+   * hands the formatter JSON text, converted when it holds an array of
+   * numbers (anything else is stored as is); without sqlite-vec, JSON text.
+   * Rows written before hold JSON text and are not rewritten; a vector
+   * changed by an array patch operator is stored as JSON text too
+   * (`resolveArrayOps` writes without `toStorage`). Reads take both forms.
+   * The extension is probed per value, not here — metadata is built where a
+   * busy probe must not run (see {@link _detectVectorSupport}) — so a busy
+   * probe fails the write with `LOCK_TIMEOUT`, never stores JSON text.
+   *
+   * Any other JSON `number[]` column reads a BLOB the same way: a view column
+   * reading a vector (the annotation is not passed to a referring field), or
+   * a field whose annotation was removed.
    */
   override formatValue(field: TDbFieldMeta): TValueFormatterPair | undefined {
     if (!this._vectorFields.has(field.path)) {
-      return undefined;
+      return isNumberArrayField(field)
+        ? { toStorage: (value: unknown) => value, fromStorage: decodeFloat32Blob }
+        : undefined;
     }
     return {
       toStorage: (value: unknown) => {
-        if (!Array.isArray(value)) return value;
-        return this._detectVectorSupport()
-          ? Buffer.from(new Float32Array(value as number[]).buffer)
-          : JSON.stringify(value);
-      },
-      fromStorage: (value: unknown) => {
-        if (value instanceof Uint8Array) {
-          const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
-          return Array.from(
-            new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.byteLength / 4)),
-          );
-        }
         if (typeof value === "string") {
-          try {
-            return JSON.parse(value);
-          } catch {
-            return value;
-          }
+          if (!this._detectVectorSupport()) return value;
+          const values = jsonNumberArray(value);
+          return values ? float32Blob(values) : value;
         }
-        return value;
+        if (!Array.isArray(value)) return value;
+        return this._detectVectorSupport() ? float32Blob(value as number[]) : JSON.stringify(value);
       },
+      fromStorage: decodeFloat32Blob,
     };
   }
 
@@ -1779,8 +1825,11 @@ export class SqliteAdapter extends BaseDbAdapter {
         await apply({ name: ftsTable, action: "rebuild" }, ftsTable, () => {
           // before the drop: a missing tokenizer must not leave the index gone
           this._probeFtsTokenizer(index);
-          this._dropFtsTable(ftsTable);
-          this._createFtsTable(tableName, ftsTable, index);
+          // one unit (since 0.1.178): a failed create keeps the old index
+          this._atomically(() => {
+            this._dropFtsTable(ftsTable);
+            this._createFtsTable(tableName, ftsTable, index);
+          });
         });
       }
     }
@@ -1821,55 +1870,122 @@ export class SqliteAdapter extends BaseDbAdapter {
     return live.length === desired.length && live.every((name, i) => name === desired[i]);
   }
 
-  /** Creates an FTS5 virtual table with sync triggers and rebuilds the index. */
+  /**
+   * Creates an FTS5 virtual table with sync triggers and rebuilds the index —
+   * all or nothing (since 0.1.178, see {@link _atomically}).
+   */
   private _createFtsTable(tableName: string, ftsTable: string, index: TDbIndex): void {
-    // Text members only — integer members are matched by exact number
-    const fields = splitFulltextFields(index).text;
-    const fieldNames = fields.map((f) => `"${esc(f.name)}"`);
-    const fieldList = fieldNames.join(", ");
+    this._atomically(() => {
+      // Text members only — integer members are matched by exact number
+      const fields = splitFulltextFields(index).text;
+      const fieldNames = fields.map((f) => `"${esc(f.name)}"`);
+      const fieldList = fieldNames.join(", ");
 
-    // Create external-content FTS5 virtual table
-    const tokenizer = ftsTokenizer(index, this._configuredFtsTokenizer(index));
-    const tokenize = tokenizer ? `, tokenize='${tokenizer}'` : "";
-    const prefix = this._ftsPrefix ? `, prefix='${this._ftsPrefix}'` : "";
-    const createSql = `CREATE VIRTUAL TABLE IF NOT EXISTS "${esc(ftsTable)}" USING fts5(${fieldList}, content='${tableName.replace(/'/g, "''")}', content_rowid='rowid'${tokenize}${prefix})`;
-    this._log(createSql);
-    this.driver.exec(createSql);
+      // Create external-content FTS5 virtual table
+      const tokenizer = ftsTokenizer(index, this._configuredFtsTokenizer(index));
+      const tokenize = tokenizer ? `, tokenize='${tokenizer}'` : "";
+      const prefix = this._ftsPrefix ? `, prefix='${this._ftsPrefix}'` : "";
+      const createSql = `CREATE VIRTUAL TABLE IF NOT EXISTS "${esc(ftsTable)}" USING fts5(${fieldList}, content='${tableName.replace(/'/g, "''")}', content_rowid='rowid'${tokenize}${prefix})`;
+      this._log(createSql);
+      this.driver.exec(createSql);
 
-    // Create sync triggers
-    const newFields = fields.map((f) => `new."${esc(f.name)}"`).join(", ");
-    const oldFields = fields.map((f) => `old."${esc(f.name)}"`).join(", ");
-    const ef = esc(ftsTable);
+      // Create sync triggers
+      const newFields = fields.map((f) => `new."${esc(f.name)}"`).join(", ");
+      const oldFields = fields.map((f) => `old."${esc(f.name)}"`).join(", ");
+      const ef = esc(ftsTable);
 
-    // AFTER INSERT
-    const aiSql = `CREATE TRIGGER IF NOT EXISTS "${esc(ftsTable + "__ai")}" AFTER INSERT ON "${esc(tableName)}" BEGIN INSERT INTO "${ef}"(rowid, ${fieldList}) VALUES (new.rowid, ${newFields}); END`;
-    this._log(aiSql);
-    this.driver.exec(aiSql);
+      // AFTER INSERT
+      const aiSql = `CREATE TRIGGER IF NOT EXISTS "${esc(ftsTable + "__ai")}" AFTER INSERT ON "${esc(tableName)}" BEGIN INSERT INTO "${ef}"(rowid, ${fieldList}) VALUES (new.rowid, ${newFields}); END`;
+      this._log(aiSql);
+      this.driver.exec(aiSql);
 
-    // AFTER DELETE
-    const adSql = `CREATE TRIGGER IF NOT EXISTS "${esc(ftsTable + "__ad")}" AFTER DELETE ON "${esc(tableName)}" BEGIN INSERT INTO "${ef}"("${ef}", rowid, ${fieldList}) VALUES ('delete', old.rowid, ${oldFields}); END`;
-    this._log(adSql);
-    this.driver.exec(adSql);
+      // AFTER DELETE
+      const adSql = `CREATE TRIGGER IF NOT EXISTS "${esc(ftsTable + "__ad")}" AFTER DELETE ON "${esc(tableName)}" BEGIN INSERT INTO "${ef}"("${ef}", rowid, ${fieldList}) VALUES ('delete', old.rowid, ${oldFields}); END`;
+      this._log(adSql);
+      this.driver.exec(adSql);
 
-    // AFTER UPDATE
-    const auSql = `CREATE TRIGGER IF NOT EXISTS "${esc(ftsTable + "__au")}" AFTER UPDATE ON "${esc(tableName)}" BEGIN INSERT INTO "${ef}"("${ef}", rowid, ${fieldList}) VALUES ('delete', old.rowid, ${oldFields}); INSERT INTO "${ef}"(rowid, ${fieldList}) VALUES (new.rowid, ${newFields}); END`;
-    this._log(auSql);
-    this.driver.exec(auSql);
+      // AFTER UPDATE
+      const auSql = `CREATE TRIGGER IF NOT EXISTS "${esc(ftsTable + "__au")}" AFTER UPDATE ON "${esc(tableName)}" BEGIN INSERT INTO "${ef}"("${ef}", rowid, ${fieldList}) VALUES ('delete', old.rowid, ${oldFields}); INSERT INTO "${ef}"(rowid, ${fieldList}) VALUES (new.rowid, ${newFields}); END`;
+      this._log(auSql);
+      this.driver.exec(auSql);
 
-    // Rebuild index to pick up any existing rows
-    const rebuildSql = `INSERT INTO "${ef}"("${ef}") VALUES ('rebuild')`;
-    this._log(rebuildSql);
-    this.driver.exec(rebuildSql);
+      // Rebuild index to pick up any existing rows
+      const rebuildSql = `INSERT INTO "${ef}"("${ef}") VALUES ('rebuild')`;
+      this._log(rebuildSql);
+      this.driver.exec(rebuildSql);
+    });
   }
 
-  /** Drops an FTS5 virtual table and its sync triggers. */
+  /** Drops an FTS5 virtual table and its sync triggers — all or nothing (since 0.1.178). */
   private _dropFtsTable(ftsTable: string): void {
-    for (const suffix of ["__ai", "__ad", "__au"]) {
-      this.driver.exec(`DROP TRIGGER IF EXISTS "${esc(ftsTable + suffix)}"`);
+    this._atomically(() => {
+      for (const suffix of ["__ai", "__ad", "__au"]) {
+        this.driver.exec(`DROP TRIGGER IF EXISTS "${esc(ftsTable + suffix)}"`);
+      }
+      const sql = `DROP TABLE IF EXISTS "${esc(ftsTable)}"`;
+      this._log(sql);
+      this.driver.exec(sql);
+    });
+  }
+
+  /**
+   * Runs the synchronous `fn` as one all-or-nothing unit (since 0.1.178) —
+   * the FTS5 / vec0 shadow-table steps: a statement failing between a
+   * `CREATE VIRTUAL TABLE` and its triggers left the table without them, and
+   * the next sync, seeing the table, kept it: the index silently stopped
+   * following writes.
+   *
+   * - The unit opens the transaction itself (none is open, no unit around
+   *   it): `BEGIN IMMEDIATE` … `COMMIT`, and on any failure — a `COMMIT`
+   *   refused while another connection reads (rollback-journal mode)
+   *   included — a full `ROLLBACK`, which ends the transaction. IMMEDIATE
+   *   takes the write lock up front, waiting on `busy_timeout`: a read-only
+   *   first statement (`DROP TRIGGER IF EXISTS` of a missing trigger) cannot
+   *   pin a WAL snapshot that a later write then fails on without waiting
+   *   (`SQLITE_BUSY_SNAPSHOT`).
+   * - Inside a transaction (the adapter's own: `recreateTable`, a caller's
+   *   `withTransaction` around a schema call) or another unit (the FTS
+   *   rebuild wraps a drop and a create): a `SAVEPOINT`, rolled back to on
+   *   failure. Nothing commits there, so nothing waits on another connection.
+   *
+   * "Open" is the adapter's view — its transaction state and the unit depth;
+   * the driver interface has no in-transaction flag. Every caller runs under
+   * `_stmt` or `_withExclusiveConnection`, so another context's transaction
+   * is never open on the connection meanwhile; one opened behind the
+   * adapter's back makes `BEGIN IMMEDIATE` fail without running the unit.
+   *
+   * Errors propagate as thrown: the caller's boundary maps SQLITE_BUSY —
+   * at `BEGIN`, `COMMIT` or any statement — to `LOCK_TIMEOUT`. A failing
+   * rollback never replaces the original error; it is logged as an error,
+   * because the connection may then still be in the transaction (the next
+   * `BEGIN` fails, autocommit statements would join it).
+   */
+  private _atomically(fn: () => void): void {
+    const nested = this._unitDepth > 0 || this._getTransactionState() !== undefined;
+    const [begin, end, undo] = nested
+      ? [
+          `SAVEPOINT "atscript_unit"`,
+          `RELEASE "atscript_unit"`,
+          [`ROLLBACK TO "atscript_unit"`, `RELEASE "atscript_unit"`],
+        ]
+      : ["BEGIN IMMEDIATE", "COMMIT", ["ROLLBACK"]];
+    this.driver.exec(begin);
+    this._unitDepth++;
+    try {
+      fn();
+      this.driver.exec(end);
+    } catch (error) {
+      try {
+        for (const sql of undo) this.driver.exec(sql);
+      } catch (undoError) {
+        this.logger.error(
+          `[atscript-db-sqlite] ${undo.join("; ")} failed after a failed schema step — the connection may still be in its transaction: ${(undoError as Error)?.message}`,
+        );
+      }
+      throw error;
+    } finally {
+      this._unitDepth--;
     }
-    const sql = `DROP TABLE IF EXISTS "${esc(ftsTable)}"`;
-    this._log(sql);
-    this.driver.exec(sql);
   }
 
   /** Lists FTS5/vec0 shadow virtual tables for a content table. */
@@ -2046,7 +2162,7 @@ export class SqliteAdapter extends BaseDbAdapter {
         `Vector dimension mismatch: index "${vec.indexName}" expects ${vec.dimensions}, got ${vector.length}`,
       );
     }
-    const vecBuf = Buffer.from(new Float32Array(vector).buffer);
+    const vecBuf = float32Blob(vector);
 
     const controls = (query.controls || {}) as Record<string, unknown>;
     const limit = (controls.$limit as number | undefined) ?? 20;
@@ -2281,49 +2397,54 @@ export class SqliteAdapter extends BaseDbAdapter {
       .filter(Boolean)
       .join(", ");
 
-    const createSql = `CREATE VIRTUAL TABLE IF NOT EXISTS "${esc(vecTable)}" USING vec0(${ddlCols})`;
-    this._log(createSql);
-    this.driver.exec(createSql);
+    // All or nothing (since 0.1.178, see `_atomically`)
+    this._atomically(() => {
+      const createSql = `CREATE VIRTUAL TABLE IF NOT EXISTS "${esc(vecTable)}" USING vec0(${ddlCols})`;
+      this._log(createSql);
+      this.driver.exec(createSql);
 
-    const partCols = partitionCols.map((c) => `"${esc(c.physicalName)}"`);
-    const embCol = `"${esc(embeddingCol)}"`;
-    const insertCols = ["rowid", ...partCols, "embedding"].join(", ");
-    const insertNewVals = [
-      "new.rowid",
-      ...partitionCols.map((c) => `new."${esc(c.physicalName)}"`),
-      `new.${embCol}`,
-    ].join(", ");
-    const seedColList = ["rowid", ...partCols, embCol].join(", ");
+      const partCols = partitionCols.map((c) => `"${esc(c.physicalName)}"`);
+      const embCol = `"${esc(embeddingCol)}"`;
+      const insertCols = ["rowid", ...partCols, "embedding"].join(", ");
+      const insertNewVals = [
+        "new.rowid",
+        ...partitionCols.map((c) => `new."${esc(c.physicalName)}"`),
+        `new.${embCol}`,
+      ].join(", ");
+      const seedColList = ["rowid", ...partCols, embCol].join(", ");
 
-    const ev = esc(vecTable);
-    const et = esc(tableName);
+      const ev = esc(vecTable);
+      const et = esc(tableName);
 
-    const aiSql = `CREATE TRIGGER IF NOT EXISTS "${esc(vecTable + "__ai")}" AFTER INSERT ON "${et}" WHEN new.${embCol} IS NOT NULL BEGIN INSERT INTO "${ev}"(${insertCols}) VALUES(${insertNewVals}); END`;
-    this._log(aiSql);
-    this.driver.exec(aiSql);
+      const aiSql = `CREATE TRIGGER IF NOT EXISTS "${esc(vecTable + "__ai")}" AFTER INSERT ON "${et}" WHEN new.${embCol} IS NOT NULL BEGIN INSERT INTO "${ev}"(${insertCols}) VALUES(${insertNewVals}); END`;
+      this._log(aiSql);
+      this.driver.exec(aiSql);
 
-    const adSql = `CREATE TRIGGER IF NOT EXISTS "${esc(vecTable + "__ad")}" AFTER DELETE ON "${et}" BEGIN DELETE FROM "${ev}" WHERE rowid = old.rowid; END`;
-    this._log(adSql);
-    this.driver.exec(adSql);
+      const adSql = `CREATE TRIGGER IF NOT EXISTS "${esc(vecTable + "__ad")}" AFTER DELETE ON "${et}" BEGIN DELETE FROM "${ev}" WHERE rowid = old.rowid; END`;
+      this._log(adSql);
+      this.driver.exec(adSql);
 
-    // vec0 lacks upsert, so AFTER UPDATE does delete-then-insert
-    const auSql = `CREATE TRIGGER IF NOT EXISTS "${esc(vecTable + "__au")}" AFTER UPDATE ON "${et}" BEGIN DELETE FROM "${ev}" WHERE rowid = old.rowid; INSERT INTO "${ev}"(${insertCols}) SELECT ${insertNewVals} WHERE new.${embCol} IS NOT NULL; END`;
-    this._log(auSql);
-    this.driver.exec(auSql);
+      // vec0 lacks upsert, so AFTER UPDATE does delete-then-insert
+      const auSql = `CREATE TRIGGER IF NOT EXISTS "${esc(vecTable + "__au")}" AFTER UPDATE ON "${et}" BEGIN DELETE FROM "${ev}" WHERE rowid = old.rowid; INSERT INTO "${ev}"(${insertCols}) SELECT ${insertNewVals} WHERE new.${embCol} IS NOT NULL; END`;
+      this._log(auSql);
+      this.driver.exec(auSql);
 
-    const seedSql = `INSERT INTO "${ev}"(${insertCols}) SELECT ${seedColList} FROM "${et}" WHERE ${embCol} IS NOT NULL`;
-    this._log(seedSql);
-    this.driver.exec(seedSql);
+      const seedSql = `INSERT INTO "${ev}"(${insertCols}) SELECT ${seedColList} FROM "${et}" WHERE ${embCol} IS NOT NULL`;
+      this._log(seedSql);
+      this.driver.exec(seedSql);
+    });
   }
 
-  /** Drops a vec0 virtual table and its sync triggers. */
+  /** Drops a vec0 virtual table and its sync triggers — all or nothing (since 0.1.178). */
   private _dropVecTable(vecTable: string): void {
-    for (const suffix of ["__ai", "__ad", "__au"]) {
-      this.driver.exec(`DROP TRIGGER IF EXISTS "${esc(vecTable + suffix)}"`);
-    }
-    const sql = `DROP TABLE IF EXISTS "${esc(vecTable)}"`;
-    this._log(sql);
-    this.driver.exec(sql);
+    this._atomically(() => {
+      for (const suffix of ["__ai", "__ad", "__au"]) {
+        this.driver.exec(`DROP TRIGGER IF EXISTS "${esc(vecTable + suffix)}"`);
+      }
+      const sql = `DROP TABLE IF EXISTS "${esc(vecTable)}"`;
+      this._log(sql);
+      this.driver.exec(sql);
+    });
   }
 
   /** Drops all vec0 virtual shadow tables and triggers for a content table. */

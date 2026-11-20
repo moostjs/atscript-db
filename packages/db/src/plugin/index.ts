@@ -79,7 +79,7 @@ export const dbPlugin: (options?: TDbPluginOptions) => TAtscriptPlugin = (option
                   "  - **MongoDB** → BSON array\n" +
                   "  - **MySQL 9+** → `VECTOR(N)`\n" +
                   "  - **PostgreSQL** → pgvector `vector(N)`\n" +
-                  "  - **SQLite** → JSON",
+                  "  - **SQLite** → Float32 `BLOB` with the `sqlite-vec` extension (since 0.1.178), JSON `TEXT` without it",
                 '@db.search.vector 1536, "cosine"',
                 "embedding: db.vector",
               ),
