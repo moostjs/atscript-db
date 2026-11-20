@@ -776,6 +776,17 @@ export class MongoAdapter extends BaseDbAdapter {
       versionColumn !== undefined ? { ...ops, inc: { ...ops?.inc, [versionColumn]: 1 } } : ops;
     const patcher = new CollectionPatcher(this.getPatcherContext(), patch, effectiveOps);
     const { updateFilter, updateOptions } = patcher.preparePatch();
+    if (updateFilter.length === 0) {
+      // Nothing to set (an empty operator list, `$update` on an array without
+      // key props): the driver rejects an empty pipeline, so the row is only
+      // looked up (since 0.1.180; it threw before)
+      this._log("countDocuments (empty patch)", mongoFilter);
+      const matchedCount = await this.collection.countDocuments(mongoFilter, {
+        limit: 1,
+        ...this._getSessionOpts(),
+      });
+      return { matchedCount, modifiedCount: 0 };
+    }
     this._log("updateOne (patch)", mongoFilter, updateFilter);
     return this._wrapUpdate(() =>
       this.collection.updateOne(mongoFilter, updateFilter, {

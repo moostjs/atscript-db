@@ -343,10 +343,12 @@ describe("[mongo] AsCollection with arrays", () => {
       [
         {
           "$set": {
-            "primitive": [
-              "a",
-              "b",
-            ],
+            "primitive": {
+              "$literal": [
+                "a",
+                "b",
+              ],
+            },
           },
         },
       ]
@@ -366,10 +368,12 @@ describe("[mongo] AsCollection with arrays", () => {
       [
         {
           "$set": {
-            "primitiveComplex": [
-              "a",
-              "b",
-            ],
+            "primitiveComplex": {
+              "$literal": [
+                "a",
+                "b",
+              ],
+            },
           },
         },
       ]
@@ -397,10 +401,12 @@ describe("[mongo] AsCollection with arrays", () => {
                     [],
                   ],
                 },
-                [
-                  "a",
-                  "b",
-                ],
+                {
+                  "$literal": [
+                    "a",
+                    "b",
+                  ],
+                },
               ],
             },
           },
@@ -409,7 +415,8 @@ describe("[mongo] AsCollection with arrays", () => {
     `);
   });
 
-  it("[PRIMITIVE] merge array", async () => {
+  // Since 0.1.180 `$update` without key props sets nothing (before: a `$setUnion`)
+  it("[PRIMITIVE] $update sets nothing", async () => {
     const { ArraysCollection } = await import("./fixtures/arrays-collection.as");
     const result = prepareUpdate(mongo, ArraysCollection, {
       _id: new ObjectId(),
@@ -418,28 +425,7 @@ describe("[mongo] AsCollection with arrays", () => {
       },
     }).updateFilter;
 
-    expect(result).toMatchInlineSnapshot(`
-      [
-        {
-          "$set": {
-            "primitive": {
-              "$setUnion": [
-                {
-                  "$ifNull": [
-                    "$primitive",
-                    [],
-                  ],
-                },
-                [
-                  "a",
-                  "b",
-                ],
-              ],
-            },
-          },
-        },
-      ]
-    `);
+    expect(result).toEqual([]);
   });
 
   it("[PRIMITIVE] remove array", async () => {
@@ -463,10 +449,12 @@ describe("[mongo] AsCollection with arrays", () => {
                     [],
                   ],
                 },
-                [
-                  "a",
-                  "b",
-                ],
+                {
+                  "$literal": [
+                    "a",
+                    "b",
+                  ],
+                },
               ],
             },
           },
@@ -514,14 +502,16 @@ describe("[mongo] AsCollection with arrays", () => {
       [
         {
           "$set": {
-            "withKey": [
-              {
-                "attribute": "123",
-                "key1": "1",
-                "key2": "2",
-                "value": "a",
-              },
-            ],
+            "withKey": {
+              "$literal": [
+                {
+                  "attribute": "123",
+                  "key1": "1",
+                  "key2": "2",
+                  "value": "a",
+                },
+              ],
+            },
           },
         },
       ]
@@ -613,14 +603,16 @@ describe("[mongo] AsCollection with arrays", () => {
                     [],
                   ],
                 },
-                "input": [
-                  {
-                    "attribute": "123",
-                    "key1": "1",
-                    "key2": "2",
-                    "value": "a",
-                  },
-                ],
+                "input": {
+                  "$literal": [
+                    {
+                      "attribute": "123",
+                      "key1": "1",
+                      "key2": "2",
+                      "value": "a",
+                    },
+                  ],
+                },
               },
             },
           },
@@ -709,20 +701,22 @@ describe("[mongo] AsCollection with arrays", () => {
                     [],
                   ],
                 },
-                "input": [
-                  {
-                    "attribute": "555",
-                    "key1": "1",
-                    "key2": "2",
-                    "value": "a",
-                  },
-                  {
-                    "attribute": "666",
-                    "key1": "3",
-                    "key2": "4",
-                    "value": "b",
-                  },
-                ],
+                "input": {
+                  "$literal": [
+                    {
+                      "attribute": "555",
+                      "key1": "1",
+                      "key2": "2",
+                      "value": "a",
+                    },
+                    {
+                      "attribute": "666",
+                      "key1": "3",
+                      "key2": "4",
+                      "value": "b",
+                    },
+                  ],
+                },
               },
             },
           },
@@ -811,17 +805,19 @@ describe("[mongo] AsCollection with arrays", () => {
                   },
                 },
                 "vars": {
-                  "rem": [
-                    {
-                      "attribute": "555",
-                      "key1": "1",
-                      "key2": "2",
-                    },
-                    {
-                      "key1": "3",
-                      "key2": "4",
-                    },
-                  ],
+                  "rem": {
+                    "$literal": [
+                      {
+                        "attribute": "555",
+                        "key1": "1",
+                        "key2": "2",
+                      },
+                      {
+                        "key1": "3",
+                        "key2": "4",
+                      },
+                    ],
+                  },
                 },
               },
             },
@@ -914,18 +910,20 @@ describe("[mongo] AsCollection with arrays", () => {
                     [],
                   ],
                 },
-                "input": [
-                  {
-                    "attribute": "555",
-                    "key1": "1",
-                    "key2": "2",
-                  },
-                  {
-                    "attribute": "666",
-                    "key1": "3",
-                    "key2": "4",
-                  },
-                ],
+                "input": {
+                  "$literal": [
+                    {
+                      "attribute": "555",
+                      "key1": "1",
+                      "key2": "2",
+                    },
+                    {
+                      "attribute": "666",
+                      "key1": "3",
+                      "key2": "4",
+                    },
+                  ],
+                },
               },
             },
           },
@@ -971,13 +969,15 @@ describe("[mongo] AsCollection with arrays", () => {
       [
         {
           "$set": {
-            "withoutKey": [
-              {
-                "attribute": "123",
-                "key": "1",
-                "value": "a",
-              },
-            ],
+            "withoutKey": {
+              "$literal": [
+                {
+                  "attribute": "123",
+                  "key": "1",
+                  "value": "a",
+                },
+              ],
+            },
           },
         },
       ]
@@ -1027,13 +1027,15 @@ describe("[mongo] AsCollection with arrays", () => {
                     [],
                   ],
                 },
-                [
-                  {
-                    "attribute": "123",
-                    "key": "1",
-                    "value": "a",
-                  },
-                ],
+                {
+                  "$literal": [
+                    {
+                      "attribute": "123",
+                      "key": "1",
+                      "value": "a",
+                    },
+                  ],
+                },
               ],
             },
           },
@@ -1042,7 +1044,7 @@ describe("[mongo] AsCollection with arrays", () => {
     `);
   });
 
-  it("[OBJECT_WITHOUT_KEY] merge array", async () => {
+  it("[OBJECT_WITHOUT_KEY] $update sets nothing", async () => {
     const { ArraysCollection } = await import("./fixtures/arrays-collection.as");
 
     // "$update" + without key => all required fields must be present
@@ -1076,34 +1078,7 @@ describe("[mongo] AsCollection with arrays", () => {
       },
     }).toArgs();
 
-    expect(result[1]).toMatchInlineSnapshot(`
-      [
-        {
-          "$set": {
-            "withoutKey": {
-              "$setUnion": [
-                {
-                  "$ifNull": [
-                    "$withoutKey",
-                    [],
-                  ],
-                },
-                [
-                  {
-                    "key": "1",
-                    "value": "555",
-                  },
-                  {
-                    "key": "2",
-                    "value": "666",
-                  },
-                ],
-              ],
-            },
-          },
-        },
-      ]
-    `);
+    expect(result[1]).toEqual([]);
     expect(result[2]).toEqual({});
   });
 
@@ -1153,16 +1128,18 @@ describe("[mongo] AsCollection with arrays", () => {
                     [],
                   ],
                 },
-                [
-                  {
-                    "key": "1",
-                    "value": "555",
-                  },
-                  {
-                    "key": "2",
-                    "value": "666",
-                  },
-                ],
+                {
+                  "$literal": [
+                    {
+                      "key": "1",
+                      "value": "555",
+                    },
+                    {
+                      "key": "2",
+                      "value": "666",
+                    },
+                  ],
+                },
               ],
             },
           },
@@ -1236,14 +1213,16 @@ describe("[mongo] CollectionPatcher — $upsert", () => {
                     [],
                   ],
                 },
-                "input": [
-                  {
-                    "attribute": "attr",
-                    "key1": "1",
-                    "key2": "2",
-                    "value": "new",
-                  },
-                ],
+                "input": {
+                  "$literal": [
+                    {
+                      "attribute": "attr",
+                      "key1": "1",
+                      "key2": "2",
+                      "value": "new",
+                    },
+                  ],
+                },
               },
             },
           },
@@ -1273,13 +1252,15 @@ describe("[mongo] CollectionPatcher — $upsert", () => {
                     [],
                   ],
                 },
-                [
-                  {
-                    "attribute": "c",
-                    "key": "a",
-                    "value": "b",
-                  },
-                ],
+                {
+                  "$literal": [
+                    {
+                      "attribute": "c",
+                      "key": "a",
+                      "value": "b",
+                    },
+                  ],
+                },
               ],
             },
           },
@@ -1309,10 +1290,12 @@ describe("[mongo] CollectionPatcher — $upsert", () => {
                     [],
                   ],
                 },
-                [
-                  "x",
-                  "y",
-                ],
+                {
+                  "$literal": [
+                    "x",
+                    "y",
+                  ],
+                },
               ],
             },
           },
@@ -1376,12 +1359,14 @@ describe("[mongo] CollectionPatcher — single key", () => {
                     [],
                   ],
                 },
-                "input": [
-                  {
-                    "id": "1",
-                    "value": "a",
-                  },
-                ],
+                "input": {
+                  "$literal": [
+                    {
+                      "id": "1",
+                      "value": "a",
+                    },
+                  ],
+                },
               },
             },
           },
@@ -1429,12 +1414,14 @@ describe("[mongo] CollectionPatcher — single key", () => {
                     [],
                   ],
                 },
-                "input": [
-                  {
-                    "id": "1",
-                    "value": "updated",
-                  },
-                ],
+                "input": {
+                  "$literal": [
+                    {
+                      "id": "1",
+                      "value": "updated",
+                    },
+                  ],
+                },
               },
             },
           },
@@ -1486,11 +1473,13 @@ describe("[mongo] CollectionPatcher — single key", () => {
                   },
                 },
                 "vars": {
-                  "rem": [
-                    {
-                      "id": "1",
-                    },
-                  ],
+                  "rem": {
+                    "$literal": [
+                      {
+                        "id": "1",
+                      },
+                    ],
+                  },
                 },
               },
             },
@@ -1526,10 +1515,12 @@ describe("[mongo] CollectionPatcher — uniqueItems", () => {
                     [],
                   ],
                 },
-                [
-                  "a",
-                  "b",
-                ],
+                {
+                  "$literal": [
+                    "a",
+                    "b",
+                  ],
+                },
               ],
             },
           },
@@ -1559,12 +1550,14 @@ describe("[mongo] CollectionPatcher — uniqueItems", () => {
                     [],
                   ],
                 },
-                [
-                  {
-                    "name": "a",
-                    "score": 1,
-                  },
-                ],
+                {
+                  "$literal": [
+                    {
+                      "name": "a",
+                      "score": 1,
+                    },
+                  ],
+                },
               ],
             },
           },
@@ -1577,7 +1570,9 @@ describe("[mongo] CollectionPatcher — uniqueItems", () => {
 describe("[mongo] CollectionPatcher — withoutKeyMerge", () => {
   beforeAll(prepareFixtures);
 
-  it("[WITHOUT_KEY_MERGE] $update uses $setUnion (no keys)", async () => {
+  // Since 0.1.180: without key props there is no element to find, as on the
+  // other adapters (before: a `$setUnion` that added the items to the array)
+  it("[WITHOUT_KEY_MERGE] $update without keys sets nothing", async () => {
     const { ArraysCollection } = await import("./fixtures/arrays-collection.as");
     const result = prepareUpdate(mongo, ArraysCollection, {
       _id: new ObjectId(),
@@ -1586,31 +1581,7 @@ describe("[mongo] CollectionPatcher — withoutKeyMerge", () => {
       },
     }).updateFilter;
 
-    expect(result).toMatchInlineSnapshot(`
-      [
-        {
-          "$set": {
-            "withoutKeyMerge": {
-              "$setUnion": [
-                {
-                  "$ifNull": [
-                    "$withoutKeyMerge",
-                    [],
-                  ],
-                },
-                [
-                  {
-                    "attribute": "x",
-                    "key": "1",
-                    "value": "a",
-                  },
-                ],
-              ],
-            },
-          },
-        },
-      ]
-    `);
+    expect(result).toEqual([]);
   });
 
   it("[WITHOUT_KEY_MERGE] $remove uses $setDifference", async () => {
@@ -1634,13 +1605,15 @@ describe("[mongo] CollectionPatcher — withoutKeyMerge", () => {
                     [],
                   ],
                 },
-                [
-                  {
-                    "attribute": "x",
-                    "key": "1",
-                    "value": "a",
-                  },
-                ],
+                {
+                  "$literal": [
+                    {
+                      "attribute": "x",
+                      "key": "1",
+                      "value": "a",
+                    },
+                  ],
+                },
               ],
             },
           },
@@ -1726,16 +1699,20 @@ describe("[mongo] CollectionPatcher — edge cases", () => {
       [
         {
           "$set": {
-            "primitive": [
-              "a",
-              "b",
-            ],
-            "withoutKey": [
-              {
-                "key": "1",
-                "value": "v",
-              },
-            ],
+            "primitive": {
+              "$literal": [
+                "a",
+                "b",
+              ],
+            },
+            "withoutKey": {
+              "$literal": [
+                {
+                  "key": "1",
+                  "value": "v",
+                },
+              ],
+            },
           },
         },
       ]

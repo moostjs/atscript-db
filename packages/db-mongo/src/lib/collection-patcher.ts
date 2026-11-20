@@ -17,6 +17,14 @@ import { joinPath } from "./path-utils";
  * shapes aggregation `$set` would evaluate as field paths / operators instead
  * of treating as literal data. Caller must wrap such values in `{ $literal }`.
  */
+/**
+ * `items` of an array operator as an aggregation operand. Always a
+ * `$literal`: the items are data, and an aggregation expression would read a
+ * `$`-prefixed string in them as a field path — storing another field's
+ * value, a secret one included, where the string was sent (since 0.1.180).
+ */
+const literal = (items: unknown[]): Document => ({ $literal: items });
+
 function containsAggregationExpr(v: unknown): boolean {
   if (typeof v === "string") return v.startsWith("$");
   if (Array.isArray(v)) return v.some(containsAggregationExpr);
@@ -232,6 +240,13 @@ export class CollectionPatcher {
         typeof childValue === "object" && childValue !== null && !Array.isArray(childValue);
       const propIsJson = propType.metadata?.has("db.json");
       const propIsMerge = propType.metadata?.get("db.patch.strategy") === "merge";
+      // An array operator on an array of this object (since 0.1.180; before,
+      // the operator object itself was stored as the field's value)
+      const childFlatType = this.collection.flatMap.get(childKey);
+      if (childIsObject && !propIsJson && childFlatType?.metadata?.get("db.__topLevelArray")) {
+        this.parseArrayPatch(childKey, childValue, childFlatType);
+        continue;
+      }
       if (childIsObject && propType.type.kind === "object" && !propIsJson) {
         if (propIsMerge) {
           this.flattenPayload(childValue, childKey);
@@ -265,11 +280,14 @@ export class CollectionPatcher {
         : new Set<string>();
     const keys = keyProps.size > 0 ? [...keyProps] : [];
 
+    // The documented order, as the read-modify-write of the other adapters
+    // applies them: remove → update → upsert → insert (since 0.1.180; before,
+    // insert → upsert → update)
     this._remove(key, toRemove, keys, flatType);
     this._replace(key, toReplace);
-    this._insert(key, toInsert, keys, flatType);
-    this._upsert(key, toUpsert, keys, flatType);
     this._update(key, toUpdate, keys, flatType);
+    this._upsert(key, toUpsert, keys, flatType);
+    this._insert(key, toInsert, keys, flatType);
   }
 
   /**
@@ -301,7 +319,7 @@ export class CollectionPatcher {
    */
   private _replace(key: string, input: any[] | undefined) {
     if (input) {
-      this._set(key, input);
+      this._set(key, literal(input));
     }
   }
 
@@ -327,10 +345,7 @@ export class CollectionPatcher {
     } else {
       // classic `$push ... $each`  →  $concatArrays
       this._set(key, {
-        $concatArrays: [
-          { $ifNull: [`$${key}`, []] },
-          input, // literal items
-        ],
+        $concatArrays: [{ $ifNull: [`$${key}`, []] }, literal(input)],
       });
     }
   }
@@ -382,7 +397,7 @@ export class CollectionPatcher {
 
       this._set(key, {
         $reduce: {
-          input, // literal payload
+          input: literal(input),
           initialValue: { $ifNull: [`$${key}`, []] },
           in: {
             $let: {
@@ -408,14 +423,16 @@ export class CollectionPatcher {
 
     // ── no key → behave like $addToSet (deep equality) ────────────
     this._set(key, {
-      $setUnion: [{ $ifNull: [`$${key}`, []] }, input],
+      $setUnion: [{ $ifNull: [`$${key}`, []] }, literal(input)],
     });
   }
 
   /**
    * `$update`
    * - keyed       → map array and merge / replace matching element(s)
-   * - non-keyed   → behave like `$addToSet` (insert only when not present)
+   * - non-keyed   → nothing: there is no key to find an element by (since
+   *   0.1.180, as on every other adapter; before, the items were added to
+   *   the array as a set union)
    */
   private _update(
     key: string,
@@ -423,41 +440,34 @@ export class CollectionPatcher {
     keys: string[],
     flatType: TAtscriptAnnotatedType,
   ) {
-    if (!input?.length) {
+    if (!input?.length || keys.length === 0) {
       return;
     }
 
-    if (keys.length > 0) {
-      const mergeStrategy = flatType.metadata?.get("db.patch.strategy") === "merge";
+    const mergeStrategy = flatType.metadata?.get("db.patch.strategy") === "merge";
 
-      // sequentially apply each patch item
-      this._set(key, {
-        $reduce: {
-          input,
-          initialValue: { $ifNull: [`$${key}`, []] },
-          in: {
-            $map: {
-              input: "$$value",
-              as: "el",
-              in: {
-                $cond: [
-                  this._keysEqual(keys, "$$el", "$$this"),
-                  mergeStrategy
-                    ? { $mergeObjects: ["$$el", "$$this"] } // merge
-                    : "$$this", // replace
-                  "$$el",
-                ],
-              },
+    // sequentially apply each patch item
+    this._set(key, {
+      $reduce: {
+        input: literal(input),
+        initialValue: { $ifNull: [`$${key}`, []] },
+        in: {
+          $map: {
+            input: "$$value",
+            as: "el",
+            in: {
+              $cond: [
+                this._keysEqual(keys, "$$el", "$$this"),
+                mergeStrategy
+                  ? { $mergeObjects: ["$$el", "$$this"] } // merge
+                  : "$$this", // replace
+                "$$el",
+              ],
             },
           },
         },
-      });
-    } else {
-      // non-keyed “update” means insert-if-missing
-      this._set(key, {
-        $setUnion: [{ $ifNull: [`$${key}`, []] }, input],
-      });
-    }
+      },
+    });
   }
 
   /**
@@ -478,7 +488,7 @@ export class CollectionPatcher {
     if (keys.length > 0) {
       this._set(key, {
         $let: {
-          vars: { rem: input },
+          vars: { rem: literal(input) },
           in: {
             $filter: {
               input: { $ifNull: [`$${key}`, []] },
@@ -501,7 +511,7 @@ export class CollectionPatcher {
     } else {
       // deep-equality removal for primitives / whole objects
       this._set(key, {
-        $setDifference: [{ $ifNull: [`$${key}`, []] }, input],
+        $setDifference: [{ $ifNull: [`$${key}`, []] }, literal(input)],
       });
     }
   }
