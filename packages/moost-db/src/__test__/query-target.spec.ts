@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-extraneous-class -- decorated test containers */
 import { describe, it, expect, beforeAll, vi } from "vite-plus/test";
-import type { FilterExpr } from "@atscript/db";
+import { DbError, type FilterExpr } from "@atscript/db";
 import { createAdapter } from "@atscript/db-memory";
+import { ValidatorError } from "@atscript/typescript/utils";
 import { HttpError, Post } from "@moostjs/event-http";
 import { Inherit, current, getMoostInfact, key } from "moost";
 
@@ -67,6 +68,8 @@ interface TBoot {
   denySearch?: boolean;
   /** The streamed handler throws on this batch (0-based). */
   failOnBatch?: number;
+  /** What the handler throws on `failOnBatch` (default: an `HttpError` 503). */
+  failWith?: unknown;
   /** Collects the `prepareRequest` contexts of READ (`query`) requests. */
   readContexts?: TDbRequestContext[];
 }
@@ -166,7 +169,7 @@ async function boot(opts: TBoot = {}) {
       for await (const { ids, rows } of target.batches()) {
         handled.push({ action: "stream", ids: rows.map((r) => r.id) });
         if (ids.some((id) => id.id === 2)) target.fail({ id: 2 }, "locked");
-        if (opts.failOnBatch === batch) throw new HttpError(503, "backend down");
+        if (opts.failOnBatch === batch) throw opts.failWith ?? new HttpError(503, "backend down");
         await opts.onBatch?.(batch, issues);
         batch++;
       }
@@ -608,6 +611,26 @@ describe("query targets — a streamed handler failing mid-run", () => {
       aborted: { status: 503, message: "backend down" },
     });
     expect(res.body.failed.map((f: any) => f.id.id).toSorted()).toEqual([1, 2, 4, 5]);
+  });
+
+  // Since 0.1.180 `aborted.status` is the status the same error gets as a
+  // request's answer: before, an error that is not an `HttpError` (a
+  // `DbError` the handler's write threw, a validation error) counted as 500.
+  it.each([
+    ["a unique-index conflict", new DbError("CONFLICT", [{ path: "sku", message: "taken" }]), 409],
+    ["lock contention", new DbError("LOCK_TIMEOUT", [{ path: "", message: "busy" }]), 503],
+    ["a rejected query", new DbError("INVALID_QUERY", [{ path: "", message: "bad" }]), 400],
+    [
+      "a validation error",
+      new ValidatorError([{ path: "qty", message: "Expected number", code: "TYPE" }]),
+      400,
+    ],
+    ["any other error", new Error("boom"), 500],
+  ])("aborted.status of %s", async (_name, failWith, status) => {
+    const { query } = await boot({ failOnBatch: 0, failWith });
+    const res = await query("stream", "status=open");
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.aborted.status).toBe(status);
   });
 
   it("an error before any batch reached the handler stays an error", async () => {

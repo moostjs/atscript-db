@@ -1,4 +1,8 @@
+import { DbError } from "@atscript/db";
 import { HttpError } from "@moostjs/event-http";
+
+import { validatorErrorToHttp } from "../http-errors";
+import { dbErrorToHttp } from "../validation-interceptor";
 
 /**
  * Why a query-targeted action request was refused:
@@ -63,8 +67,15 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** The HTTP status of an error a target batch failed with (500 when it carries none). */
+/**
+ * The HTTP status of an error a target batch failed with: an HTTP error's own;
+ * a `DbError` or validation error's as the request itself would be answered
+ * (since 0.1.180 — a unique-index conflict is 409, contention 503; both were
+ * 500 before); 500 for anything else.
+ */
 export function errorStatus(error: unknown): number {
-  const status = (error as { body?: { statusCode?: unknown } } | null)?.body?.statusCode;
+  const http =
+    error instanceof DbError ? dbErrorToHttp(error) : (validatorErrorToHttp(error) ?? error);
+  const status = (http as { body?: { statusCode?: unknown } } | null)?.body?.statusCode;
   return typeof status === "number" ? status : 500;
 }
