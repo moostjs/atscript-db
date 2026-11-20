@@ -44,7 +44,15 @@ await users.updateOne({
 });
 ```
 
-Key-based ops (`$upsert`, `$update`, `$remove`) require `@expect.array.key` on the element's key field so the patcher knows what to match on.
+Key-based ops (`$upsert`, `$update`, `$remove`) require `@expect.array.key` on the element's key field so the patcher knows what to match on. `@expect.array.uniqueItems` → `$insert` skips items already stored; `@db.patch.strategy 'merge'` on a keyed array → `$upsert` of a matching element merges into it (else replaces).
+
+Read-modify-write (every adapter but MongoDB, which patches natively; one transaction: read row → apply ops → write the whole array):
+
+| #   | Rule                                                                                                                                                                                                                                                                                                                                            |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | The stored array is decoded as a read decodes it (0.1.178) — a SQLite sqlite-vec vector (Float32 `BLOB`) is patched as its numbers and stored back as JSON text ([adapters-sqlite.md](adapters-sqlite.md)).                                                                                                                                     |
+| 2   | Stored value not an array (JSON text of a string / object written by raw SQL) → throws `Cannot apply array patch operators to "<column>": its stored value is not an array` (physical column: `box__labels`, the `@db.column` name), nothing written (0.1.178; before: spread item by item, a string into characters). `null` / missing = `[]`. |
+| 3   | `uniqueItems` and the merge strategy apply to arrays renamed with `@db.column` and inside flattened nested objects too (0.1.178; before: `$insert` stored duplicates, `$upsert` replaced instead of merging there).                                                                                                                             |
 
 Item validation (since 0.1.153) = plain-array-set validation: optional item fields accept `null` in `$update`; errors name the item prop (`items.$update[0].qty`, `tags.$remove[1]`); primitive `$remove`/`$update` values are checked per element (array-level `@expect.minLength` no longer applies to the payload). `$inc`/`$dec`/`$mul` inside any array item (plain set, `$insert`, `$upsert`, `$update`) → validation error (used to be stored verbatim).
 

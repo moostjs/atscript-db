@@ -113,7 +113,7 @@ Since 0.1.153, when MySQL or PostgreSQL picks your transaction as a **deadlock**
 
 Since 0.1.175 the same codes cover every statement and `COMMIT`, not only writes:
 
-- **PostgreSQL / MySQL:** a plain read (a `SERIALIZABLE` read that cannot be serialized, for example) and a `COMMIT` that fails on a deadlock or serialization failure throw the retryable `DbError` too.
+- **PostgreSQL / MySQL:** a plain read (a `SERIALIZABLE` read that cannot be serialized, for example) and a `COMMIT` that fails on a deadlock or serialization failure throw the retryable `DbError` too. On MySQL, since 0.1.178, so do the schema-sync statements that run on a connection of their own (column changes, the primary-key rebuild, the `recreate` copy) and table drops.
 - **SQLite:** `SQLITE_BUSY` (another connection holds the database lock past `busy_timeout`, including extended codes such as `SQLITE_BUSY_SNAPSHOT`) throws `LOCK_TIMEOUT`. Since 0.1.177 this applies at `BEGIN IMMEDIATE`, on every read and write inside or outside a transaction, in schema operations and at `COMMIT`. In 0.1.175 and 0.1.176 it applied only at `COMMIT`. A busy `BEGIN IMMEDIATE` opens nothing and does not run the callback. See [SQLite concurrency](/adapters/sqlite#concurrency-and-transactions).
 - **MongoDB:** a transaction that still fails after the driver's own retries of a transient error (`TransientTransactionError`, `UnknownTransactionCommitResult`, a write conflict) throws `SERIALIZATION_FAILURE`.
 

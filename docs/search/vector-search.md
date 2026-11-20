@@ -250,12 +250,12 @@ Cosine similarity is the default and works well for most text embedding models (
 
 ## Adapter Support
 
-| Adapter        | Column type                                                     | Index type            | Notes                                                                      |
-| -------------- | --------------------------------------------------------------- | --------------------- | -------------------------------------------------------------------------- |
-| **PostgreSQL** | `vector(N)` via pgvector                                        | HNSW index            | Auto-provisions pgvector extension; distance operators `<->`, `<#>`, `<=>` |
-| **MongoDB**    | Embedded array                                                  | Atlas `$vectorSearch` | Requires Atlas M10+ cluster                                                |
-| **MySQL**      | `VECTOR(N)`                                                     | Native (9.0+)         | `VEC_DISTANCE_*` functions                                                 |
-| **SQLite**     | `BLOB` (`vec0`) when `sqlite-vec` loaded; JSON `TEXT` otherwise | `vec0` virtual table  | Requires the `sqlite-vec` extension; falls back to JSON storage without it |
+| Adapter        | Column type                                                                       | Index type            | Notes                                                                                                                                                                    |
+| -------------- | --------------------------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **PostgreSQL** | `vector(N)` via pgvector                                                          | HNSW index            | Auto-provisions pgvector extension; distance operators `<->`, `<#>`, `<=>`                                                                                               |
+| **MongoDB**    | Embedded array                                                                    | Atlas `$vectorSearch` | Requires Atlas M10+ cluster                                                                                                                                              |
+| **MySQL**      | `VECTOR(N)`                                                                       | Native (9.0+)         | `VEC_DISTANCE_*` functions                                                                                                                                               |
+| **SQLite**     | Float32 `BLOB` when `sqlite-vec` is loaded (since 0.1.178); JSON `TEXT` otherwise | `vec0` virtual table  | Requires the `sqlite-vec` extension; falls back to JSON storage without it. Older rows and read-back precision: [SQLite vector storage](/adapters/sqlite#vector-storage) |
 
 ::: warning SQLite vector search requires `sqlite-vec`
 SQLite supports vector search only when the [`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension is loaded. Construct the driver with `new BetterSqlite3Driver(path, { vector: true })` and ensure the extension is installed.

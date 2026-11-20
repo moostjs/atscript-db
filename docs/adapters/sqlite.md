@@ -57,17 +57,18 @@ SQLite has **no adapter-specific annotations**. All generic `@db.*` annotations 
 
 Atscript types map to SQLite column types as follows:
 
-| Atscript Type     | SQLite Type       | Notes                                                               |
-| ----------------- | ----------------- | ------------------------------------------------------------------- |
-| `string`          | `TEXT`            |                                                                     |
-| `number`          | `REAL`            | `INTEGER` for primary keys (aliases `rowid`)                        |
-| `decimal`         | `REAL`            | Runtime value is string; coerced on read                            |
-| `boolean`         | `INTEGER`         | Stored as `0` / `1`                                                 |
-| arrays            | `TEXT`            | JSON-serialized                                                     |
-| nested objects    | flattened columns | `parent__child` naming convention                                   |
-| `T \| null`       | the column of `T` | nullable; see [Nullable and Union Fields](/api/storage#unions)      |
-| `@db.json` fields | `TEXT`            | JSON-serialized                                                     |
-| `db.geoPoint`     | `TEXT`            | JSON `[lng, lat]`; haversine-based [geo search](/search/geo-search) |
+| Atscript Type       | SQLite Type                           | Notes                                                                                       |
+| ------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `string`            | `TEXT`                                |                                                                                             |
+| `number`            | `REAL`                                | `INTEGER` for primary keys (aliases `rowid`)                                                |
+| `decimal`           | `REAL`                                | Runtime value is string; coerced on read                                                    |
+| `boolean`           | `INTEGER`                             | Stored as `0` / `1`                                                                         |
+| arrays              | `TEXT`                                | JSON-serialized                                                                             |
+| nested objects      | flattened columns                     | `parent__child` naming convention                                                           |
+| `T \| null`         | the column of `T`                     | nullable; see [Nullable and Union Fields](/api/storage#unions)                              |
+| `@db.json` fields   | `TEXT`                                | JSON-serialized                                                                             |
+| `@db.search.vector` | `BLOB` with `sqlite-vec`, else `TEXT` | Float32 with `sqlite-vec` (since 0.1.178), else JSON; see [Vector storage](#vector-storage) |
+| `db.geoPoint`       | `TEXT`                                | JSON `[lng, lat]`; haversine-based [geo search](/search/geo-search)                         |
 
 ## Features
 
@@ -142,6 +143,8 @@ const results = await articles.search("database optimization", {});
 ```
 
 Without a `$sort`, results are ordered by FTS5 `bm25()` (with the index's per-field weights), then the primary key (since 0.1.165; before, in rowid order). With `$rank: false` (since 0.1.175) no `bm25()` is computed and the order is the primary key — see [Unranked search](/search/#unranked).
+
+Since 0.1.178 schema sync creates, rebuilds and drops an FTS5 table together with its triggers as one unit: either all of it is there or none of it. A failure, contention included (the retryable `LOCK_TIMEOUT`), leaves the previous state, so a failed rebuild keeps the old index, and the next sync retries. The unit runs in a transaction of its own (`BEGIN IMMEDIATE`, which waits for the write lock up to `busy_timeout`), or as a savepoint when a transaction is already open. The `vec0` tables of [vector indexes](#vector-storage) are handled the same way. Before, a failure between the table and its triggers could leave a table that no longer followed writes, and the next sync kept it.
 
 ::: warning Raw SQL against FTS5 tables: bind rowids as integers
 better-sqlite3 binds a JavaScript integer as `REAL`, and FTS5 silently ignores a `rowid = ?` constraint whose value is `REAL` — the query returns every match. atscript-db's own queries never bind a rowid (they join on `rowid`), but in your own SQL write `rowid = CAST(? AS INTEGER)` or bind a `BigInt`.
@@ -232,10 +235,18 @@ export interface Document {
 
 `dimensions` is any positive integer matching your embedding model ([Vector Search](/search/vector-search)). Similarity options: `cosine` (default), `euclidean`, `dotProduct`.
 
-#### Storage
+#### Storage {#vector-storage}
 
-- **With `sqlite-vec` loaded** — the adapter creates a companion `vec0` virtual table per index (`<table>__vec__<indexName>`) with sync triggers, and routes `vectorSearch()` through KNN queries on that shadow table.
+- **With `sqlite-vec` loaded** — the vector column is a `BLOB`, and since 0.1.178 each vector is written as Float32: 4 bytes per number, in the host's byte order, the form `sqlite-vec` reads. The adapter creates a companion `vec0` virtual table per index (`<table>__vec__<indexName>`) with sync triggers, and routes `vectorSearch()` through KNN queries on that shadow table.
 - **Without the extension** — vector fields are stored as JSON `TEXT` on the main table. The data is preserved, but `vectorSearch()` throws because no indexed similarity search is available.
+
+Reads accept both forms, a Float32 `BLOB` and JSON text, through the table, a view over the vector and the HTTP API alike. Rows written before 0.1.178 hold JSON text; they are read, searched and indexed as they are, with no migration, and a write of the whole vector stores it as Float32. An [array patch operator](/api/update-patch#read-modify-write) on the vector stores the result as JSON text.
+
+**DO / DON'T**
+
+- **Do expect float32 precision.** A Float32 vector reads back as the nearest float32 number, so a stored `0.1` reads as `0.10000000149011612`. Compare a read vector with the written one using a tolerance, not exact equality.
+- **Do decode both forms in your own SQL.** A query that reads the column directly gets a `BLOB` for rows written since 0.1.178 and JSON text for older or patched rows; `typeof(<column>)` returns `'blob'` or `'text'`.
+- **Don't switch `sqlite-vec` on or off for an existing database** and expect schema sync to follow. The column's type depends on the extension, so the next sync refuses the table as a type change, `Type change on <table>.<column> (BLOB → json)` when the extension is gone or `(TEXT → json)` when it is new, until you add `@db.sync.method 'recreate'` or `'drop'` or migrate the table yourself. Rows of either form still read back meanwhile.
 
 #### Querying
 
@@ -296,7 +307,7 @@ SQLite does not support `ALTER COLUMN` for type changes. When schema sync detect
 2. Copies data from the old table (with `COALESCE` for new NOT NULL columns)
 3. Drops the old table and renames the new one into place
 
-Since 0.1.138 these steps run in one transaction: a step that fails rolls them all back, so the table keeps its rows and its full-text and vector indexes.
+Since 0.1.138 these steps run in one transaction: a step that fails rolls them all back, so the table keeps its rows and its full-text and vector indexes. Before, a failure left a `<table>__tmp_<ts>` table behind. Foreign key checks are temporarily disabled during recreation to avoid constraint errors on intermediate states. To opt a table into this behavior, annotate it with `@db.sync.method 'recreate'`. See [Schema Sync](/sync/) for details.
 
 ::: tip Copy the database before a migration
 `VACUUM INTO` writes a consistent copy of a live database to a new file, on every SQLite driver and without stopping writers. Take one before a schema sync that rebuilds tables or runs [data steps](/sync/programmatic#data-steps), so you can go back:
@@ -307,7 +318,7 @@ await syncSchema(db, types, { dataSteps });
 ```
 
 The target file must not exist yet. There is no adapter API for it — run it on the driver you created.
-::: Before, a failure left a `<table>__tmp_<ts>` table behind. Foreign key checks are temporarily disabled during recreation to avoid constraint errors on intermediate states. To opt a table into this behavior, annotate it with `@db.sync.method 'recreate'`. See [Schema Sync](/sync/) for details.
+:::
 
 ### Read-Only Database Files {#read-only-files}
 
@@ -541,7 +552,7 @@ A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141) is 
 - **No database schemas** — the `@db.schema` annotation is ignored (SQLite has no schema namespaces).
 - **Vector search is opt-in via `sqlite-vec`** — see [Vector Search](#vector-search). Without the extension, `@db.search.vector` fields are stored as JSON `TEXT` and `vectorSearch()` throws.
 - **No native boolean type** — booleans are stored as `INTEGER` (`0`/`1`).
-- **No native array/JSON operations** — array patch operators (`$push`, `$pull`) use generic read-modify-write instead of native operations.
+- **No native array/JSON operations** — array patch operators (`$insert`, `$remove`, …) use generic [read-modify-write](/api/update-patch#read-modify-write) instead of native operations.
 - **Synchronous driver** — both `better-sqlite3` and `node:sqlite` are synchronous; the adapter wraps calls in promises for the async `BaseDbAdapter` contract.
 - **No native UUID generation** — UUIDs must be generated application-side.
 

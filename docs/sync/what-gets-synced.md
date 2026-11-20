@@ -255,7 +255,17 @@ One failing index does not stop the table's other index changes. Contention is t
 exception (since 0.1.177): a lock timeout, deadlock or serialization failure
 (another connection holding a lock) ends the table's index pass at once. The entry
 then reports that retryable error instead of one failure per remaining index, and
-the next run retries.
+the next run retries. Since 0.1.178 the failures collected before the contention
+stay on that error: the `DbError` lists the contention entries first, then one
+entry per earlier failure (`path: ""`, `message: "<label> failed"`, the engine's
+text in `details`), and the entry's error line names them after the contention
+message:
+
+```text
+Index/FK sync failed on users: database is locked; create index "a" failed: duplicate rows
+```
+
+Before 0.1.178 they were dropped, and showed up only on the next run.
 
 Two annotation-driven special cases participate in the schema hash like any
 other change:

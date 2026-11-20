@@ -272,6 +272,10 @@ Items are validated like the items of a plain array set (since 0.1.153): an opti
 In relational databases (SQLite, PostgreSQL, MySQL), arrays are stored as JSON columns. Patch operators work via read-modify-write. For collections that need frequent partial updates in SQL, consider modeling them as separate tables with [FROM or VIA relations](/relations/patches) instead.
 :::
 
+### Read-modify-write {#read-modify-write}
+
+On every adapter but MongoDB, which applies the operators natively, the update reads the row, applies the operators to the stored array and writes the whole array back, in one transaction. Since 0.1.178 the stored array is decoded the way a read decodes it, so a [SQLite vector](/adapters/sqlite#vector-storage) stored as a Float32 `BLOB` is patched as its numbers (and stored back as JSON text). A stored value that is still not an array, such as JSON text of a string or an object written by SQL of your own, fails the update with `Cannot apply array patch operators to "<column>": its stored value is not an array`, and nothing is written. `<column>` is the column as stored (`box__labels` for `box.labels`, the `@db.column` name of a renamed field). Before 0.1.178 such a value was spread item by item, a string into its characters.
+
 ## Primitive Arrays
 
 For simple value arrays like `tags: string[]`, operators work by **value equality** — no key fields are needed:
@@ -305,6 +309,8 @@ import { $insert } from "@atscript/db/ops";
 await table.updateOne({ id: 1, tags: $insert(["api", "frontend"]) });
 // Result: ['api', 'backend', 'frontend'] — 'api' was silently skipped
 ```
+
+This holds for an array renamed with `@db.column` and for one inside a nested object too. Before 0.1.178, on every adapter but MongoDB, `$insert` on such a field could store a duplicate.
 
 ## Keyed Object Arrays
 
@@ -377,6 +383,8 @@ await table.updateOne({
 });
 // Result: [{ name: 'size', value: 'XL', visible: true }] — 'visible' preserved
 ```
+
+`$upsert` of an element that matches a stored one merges into it the same way. This holds for an array renamed with `@db.column` and for one inside a nested object too. Before 0.1.178, on every adapter but MongoDB, `$upsert` on such a field replaced the matched element instead.
 
 ## Keyless Object Arrays
 
