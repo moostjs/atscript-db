@@ -152,6 +152,8 @@ Override these methods to declare what your database supports. All return `false
 
 Return `true` if your database handles array patch operators natively (e.g., MongoDB's `$push`, `$pull`). When `false`, the table layer decomposes patch operations into read-modify-write cycles using standard `updateOne`.
 
+A native implementation must give the array that the documented [array patch operators](/api/update-patch) give: the same order of operators, the same handling of key props, `@expect.array.uniqueItems` and `@db.patch.strategy`. The built-in adapters all do since 0.1.180, so an app can move between them without its patches changing meaning.
+
 In that cycle the table reads the row with your `findOne` and decodes each patched column with your [`formatValue`](#formatvalue-field) `fromStorage`, as a read does (since 0.1.178). It uses the decoded value when it is an array; otherwise it takes the stored value, parsing JSON text, and throws `Cannot apply array patch operators to "<column>": its stored value is not an array` when that is no array either. The resulting array reaches `updateOne` as a plain array, not passed through `toStorage`, so your `updateOne` must be able to store a plain array in that column. See [Read-modify-write](/api/update-patch#read-modify-write).
 
 ### `supportsNestedObjects()`
