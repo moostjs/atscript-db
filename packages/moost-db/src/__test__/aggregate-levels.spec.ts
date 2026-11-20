@@ -249,7 +249,7 @@ describe("the inner level of $from is gated like a standalone query, before reso
           $from: { $groupBy: ["region"], $select: [{ $fn: "count", $field: "*", $as: "region" }] },
           $select: [{ $fn: "count", $field: "*", $as: "t" }],
         },
-      } as never)
+      })
       .catch((e: unknown) => e);
     expect(errorsOf(err)).toEqual((sdk as { errors: unknown[] }).errors);
   });

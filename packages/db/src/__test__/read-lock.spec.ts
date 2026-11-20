@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vite-plus/test";
 
-import { ALL_ISOLATION_LEVELS, DbError, DbSpace } from "../index";
+import { ALL_ISOLATION_LEVELS, DbError, DbSpace, type TDbErrorEntry } from "../index";
 import type { DbQuery, TDbIsolationLevel, TTransactionOptions } from "../types";
 import { MockAdapter, prepareFixtures } from "./test-utils";
 
@@ -35,6 +35,13 @@ class LockingAdapter extends MockAdapter {
   }
 }
 
+/** A {@link LockingAdapter} whose transactions always run serializable (as SQLite's, memory's). */
+class SerializableAdapter extends LockingAdapter {
+  protected override _inherentIsolation(): TDbIsolationLevel {
+    return "serializable";
+  }
+}
+
 function setup(make: () => MockAdapter = () => new LockingAdapter()) {
   let last: MockAdapter | undefined;
   const space = new DbSpace(() => (last = make()));
@@ -45,7 +52,11 @@ function setup(make: () => MockAdapter = () => new LockingAdapter()) {
 const sentQuery = (adapter: MockAdapter, method: "findOne" | "findMany"): DbQuery =>
   adapter.calls.findLast((c) => c.method === method)!.args[0] as DbQuery;
 
-async function rejects(promise: Promise<unknown>, code: string, message?: RegExp) {
+async function rejects(
+  promise: Promise<unknown>,
+  code: string,
+  message?: RegExp,
+): Promise<DbError> {
   const error = await promise.then(
     () => undefined,
     (e: unknown) => e,
@@ -53,6 +64,7 @@ async function rejects(promise: Promise<unknown>, code: string, message?: RegExp
   expect(error).toBeInstanceOf(DbError);
   expect((error as DbError).code).toBe(code);
   if (message) expect((error as DbError).message).toMatch(message);
+  return error as DbError;
 }
 
 describe("locking reads", () => {
@@ -226,14 +238,7 @@ describe("withTransaction isolation", () => {
   });
 
   it("an adapter with an inherent level satisfies every nested request", async () => {
-    const { adapter } = setup(
-      () =>
-        new (class extends LockingAdapter {
-          protected override _inherentIsolation(): TDbIsolationLevel {
-            return "serializable";
-          }
-        })(),
-    );
+    const { adapter } = setup(() => new SerializableAdapter());
     await adapter().withTransaction(() =>
       adapter().withTransaction(async () => {}, { isolation: "serializable" }),
     );
@@ -251,5 +256,148 @@ describe("withTransaction isolation", () => {
       "ISOLATION_NOT_SUPPORTED",
     );
     expect(adapter().begins).toEqual([]);
+  });
+
+  it("a failed 'atLeast' join codes its entry ISOLATION_MISMATCH (default and explicit join)", async () => {
+    const { adapter } = setup();
+    for (const join of [undefined, "atLeast"] as const) {
+      const entry = await mismatch(
+        adapter().withTransaction(
+          () => adapter().withTransaction(async () => {}, { isolation: "serializable", join }),
+          { isolation: "read committed" },
+        ),
+      );
+      expect(entry).toMatchObject({
+        path: "isolation",
+        code: "ISOLATION_MISMATCH",
+        params: { requested: "serializable", open: "read committed", join: "atLeast" },
+      });
+    }
+    // Under the engine default the open level is unknown — `null`, not a guess.
+    const entry = await mismatch(
+      adapter().withTransaction(() =>
+        adapter().withTransaction(async () => {}, { isolation: "read committed" }),
+      ),
+    );
+    expect(entry.params).toEqual({ requested: "read committed", open: null, join: "atLeast" });
+  });
+});
+
+/** The single entry of the `INVALID_QUERY` a failed nested `join` check throws. */
+async function mismatch(promise: Promise<unknown>): Promise<TDbErrorEntry> {
+  const { errors } = await rejects(promise, "INVALID_QUERY");
+  expect(errors).toHaveLength(1);
+  return errors[0]!;
+}
+
+/**
+ * `withTransaction(fn, { isolation, join: 'same' })` (since 0.1.177): a nested
+ * call joins only a transaction whose OUTERMOST call asked for exactly that
+ * level. The rule compares requested levels, never the level the engine runs
+ * at, so a mock with an inherent level (SQLite, memory) answers like any other
+ * adapter — the point of the option: a test on those adapters catches an
+ * outer call opened at the wrong level.
+ */
+describe("withTransaction join: 'same'", () => {
+  const RC = { isolation: "read committed", join: "same" } as const;
+
+  it("an outermost 'same' call opens the transaction at its level, like without join", async () => {
+    const { adapter } = setup();
+    await adapter().withTransaction(async () => {}, RC);
+    expect(adapter().begins).toEqual([{ isolation: "read committed" }]);
+  });
+
+  // The same answers with and without an inherent level: 'same' compares
+  // requested levels, never the level the engine runs at.
+  describe.each([
+    ["no inherent level", () => new LockingAdapter()],
+    ["an inherent serializable level", () => new SerializableAdapter()],
+  ])("on an adapter with %s", (_label, make) => {
+    it("a nested 'same' call joins a transaction opened at the same level", async () => {
+      const { adapter } = setup(make);
+      const result = await adapter().withTransaction(
+        () => adapter().withTransaction(async () => 42, RC),
+        { isolation: "read committed" },
+      );
+      expect(result).toBe(42);
+      expect(adapter().begins).toHaveLength(1);
+    });
+
+    it.each([
+      // a stricter outer level — 'atLeast' would join
+      ["repeatable read", "read committed"],
+      // a weaker outer level
+      ["read committed", "serializable"],
+      // no outer level — the engine default is not "the same" as any level
+      [undefined, "read committed"],
+    ] as const)(
+      "outer %s, nested %s with 'same' → ISOLATION_MISMATCH",
+      async (outer, requested) => {
+        const { adapter } = setup(make);
+        const entry = await mismatch(
+          adapter().withTransaction(
+            () => adapter().withTransaction(async () => {}, { isolation: requested, join: "same" }),
+            outer && { isolation: outer },
+          ),
+        );
+        expect(entry).toMatchObject({ path: "isolation", code: "ISOLATION_MISMATCH" });
+        expect(entry.params).toEqual({ requested, open: outer ?? null, join: "same" });
+      },
+    );
+  });
+
+  it("compares against the OUTERMOST call, not an intermediate nested request", async () => {
+    const { adapter } = setup();
+    // The middle call asks read committed and joins under 'atLeast'; the
+    // transaction still runs at what the outermost call opened it with.
+    const entry = await mismatch(
+      adapter().withTransaction(
+        () =>
+          adapter().withTransaction(() => adapter().withTransaction(async () => {}, RC), {
+            isolation: "read committed",
+          }),
+        { isolation: "repeatable read" },
+      ),
+    );
+    expect(entry.params).toMatchObject({ open: "repeatable read" });
+  });
+
+  it("the portability case: on an inherent level 'atLeast' joins where 'same' throws", async () => {
+    const { adapter } = setup(() => new SerializableAdapter());
+    // the inherent serializable level satisfies read committed under no outer level…
+    await adapter().withTransaction(() =>
+      adapter().withTransaction(async () => {}, { isolation: "read committed" }),
+    );
+    // …while 'same' sees that the outer call asked for none
+    const entry = await mismatch(
+      adapter().withTransaction(() => adapter().withTransaction(async () => {}, RC)),
+    );
+    expect(entry.message).toMatch(/without a level/);
+  });
+
+  it("join without isolation, or an unknown join, is INVALID_QUERY before any transaction opens", async () => {
+    const { adapter } = setup();
+    await rejects(
+      adapter().withTransaction(async () => {}, { join: "same" }),
+      "INVALID_QUERY",
+      /requires `isolation`/,
+    );
+    await rejects(
+      adapter().withTransaction(async () => {}, {
+        isolation: "read committed",
+        join: "exact" as any,
+      }),
+      "INVALID_QUERY",
+      /Unknown join mode/,
+    );
+    expect(adapter().begins).toEqual([]);
+    // Nested: validated the same way (no silent join).
+    await rejects(
+      adapter().withTransaction(() => adapter().withTransaction(async () => {}, { join: "same" }), {
+        isolation: "read committed",
+      }),
+      "INVALID_QUERY",
+      /requires `isolation`/,
+    );
   });
 });

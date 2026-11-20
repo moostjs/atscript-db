@@ -1,10 +1,14 @@
+import { isRetryableDbError } from "../db-error";
+
 /**
  * Collects failures from a batch of independent operations so one failing
  * operation (e.g. CREATE UNIQUE INDEX over duplicate rows) doesn't abort the
  * rest. Run every operation through `attempt`, then call `throwIfAny()` to
  * rethrow the collected failures as a single aggregate error — so the caller
  * (schema sync) still marks the entry errored and skips persisting the schema
- * hash, and the next boot retries.
+ * hash, and the next boot retries. Contention (a retryable `DbError`: lock
+ * timeout, deadlock, serialization failure) is not collected: it fails the
+ * batch at once, as is (since 0.1.177) — the rest would meet the same lock.
  */
 export function createFailureCollector(what: string): {
   /** Runs `op`; `true` when it succeeded, `false` when its failure was collected. */
@@ -18,6 +22,7 @@ export function createFailureCollector(what: string): {
         await op();
         return true;
       } catch (error) {
+        if (isRetryableDbError(error)) throw error;
         failures.push(`${label}: ${(error as Error).message}`);
         return false;
       }
@@ -37,8 +42,8 @@ export function createFailureCollector(what: string): {
  * planning and syncing share one code path. `apply(change, label, op)`
  * records `change` straight away in a dry run; otherwise it runs `op` first:
  * through `attempt` when given (a {@link createFailureCollector} collector —
- * a failure is collected and the change not recorded), else directly (a
- * failure throws).
+ * a failure is collected and the change not recorded; contention is rethrown),
+ * else directly (a failure throws).
  * @since 0.1.162
  */
 export function createChangeRecorder<C>(

@@ -240,9 +240,10 @@ export class AsDbController<
    * Runs `fn` inside the bound table's adapter transaction (nested calls
    * join it). For custom actions and routes that need one transaction across
    * several table operations. `opts.isolation` (since 0.1.162) sets the
-   * level of the transaction this call opens — see `TTransactionOptions`.
-   * Inside it, `this.table.findOne(q, { lock: 'update' })` is a locking read
-   * (never reachable from a URL — it is a server-side option only).
+   * level of the transaction this call opens, `opts.join` (since 0.1.177)
+   * how a nested call checks it — see `TTransactionOptions`. Inside it,
+   * `this.table.findOne(q, { lock: 'update' })` is a locking read (never
+   * reachable from a URL — it is a server-side option only).
    */
   protected withTransaction<R>(fn: () => Promise<R>, opts?: TTransactionOptions): Promise<R> {
     return this.table.getAdapter().withTransaction(fn, opts);

@@ -35,6 +35,13 @@ export type {
   AggregateControls,
   AggregateQuery,
   AggregateResult,
+  // two-level aggregates (re-exported since 0.1.177)
+  AggregateStage,
+  NestedAggregateControls,
+  NestedAggregateQuery,
+  NestedAggregateResult,
+  StageRow,
+  ValidNested,
 } from "@uniqu/core";
 
 // ── Resolved query types (adapter-facing) ──────────────────────────────────
@@ -121,10 +128,10 @@ export interface TReadLockOptions {
 export type TDbIsolationLevel = "read committed" | "repeatable read" | "serializable";
 
 /**
- * Options of `withTransaction(fn, opts)` (since 0.1.162). Apply to the
- * outermost call only — a nested call joins the open transaction and may
- * request an isolation level only when the open transaction was started with
- * the same or a stricter one (otherwise `INVALID_QUERY`).
+ * Options of `withTransaction(fn, opts)` (since 0.1.162). `isolation` opens
+ * the outermost call's transaction at that level. A nested call joins the
+ * open transaction; it may request a level only when the open transaction
+ * passes the {@link join} check (otherwise `INVALID_QUERY`).
  */
 export interface TTransactionOptions {
   /**
@@ -133,6 +140,21 @@ export interface TTransactionOptions {
    * (PostgreSQL READ COMMITTED, MySQL REPEATABLE READ).
    */
   isolation?: TDbIsolationLevel;
+  /**
+   * How a NESTED call checks the open transaction (since 0.1.177; requires `isolation`):
+   * - `'atLeast'` (default): joins when the open transaction runs at `isolation`
+   *   or stricter. An adapter's inherent level counts, so SQLite / memory satisfy every request.
+   * - `'same'`: joins only when the open transaction's OUTERMOST call asked for exactly
+   *   `isolation`. Inherent levels do not count, so the rule holds alike on every adapter.
+   *
+   * A mismatch throws `DbError("INVALID_QUERY")`, entry code `ISOLATION_MISMATCH`,
+   * params `{ requested, open, join }` — `open` is the level the rule compared (`'atLeast'`:
+   * the level the transaction runs at; `'same'`: the level its outermost call asked for),
+   * `null` when there is none. The outermost call is unaffected: it opens
+   * the transaction at `isolation` (SQLite still runs it serializable — the "at least"
+   * contract).
+   */
+  join?: "atLeast" | "same";
 }
 
 // ── Search Index Metadata ───────────────────────────────────────────────────

@@ -56,4 +56,54 @@ describe("MemoryAdapter — locking reads and isolation", () => {
       ).resolves.toBe(1);
     }
   });
+
+  // `join: 'same'` (since 0.1.177) compares the level the outermost call ASKED
+  // for, not the serializable level the memory adapter reports — so a unit
+  // test on memory catches an outer call opened at the wrong level, as
+  // PostgreSQL / MySQL would.
+  describe("join: 'same'", () => {
+    const RC = { isolation: "read committed", join: "same" } as const;
+    const mismatch = (outer?: { isolation: "repeatable read" }) => {
+      const adapter = users.getAdapter();
+      return expect(
+        adapter.withTransaction(() => adapter.withTransaction(async () => 1, RC), outer),
+      ).rejects.toMatchObject({
+        code: "INVALID_QUERY",
+        errors: [
+          {
+            code: "ISOLATION_MISMATCH",
+            params: {
+              requested: "read committed",
+              open: outer?.isolation ?? null,
+              join: "same",
+            },
+          },
+        ],
+      });
+    };
+
+    it("outer opened with no level: a nested read committed 'same' throws although memory reports serializable", async () => {
+      const adapter = users.getAdapter();
+      // the default join accepts it — the reported serializable level satisfies any request
+      await expect(
+        adapter.withTransaction(() =>
+          adapter.withTransaction(async () => 1, { isolation: "read committed" }),
+        ),
+      ).resolves.toBe(1);
+      await mismatch();
+    });
+
+    it("outer opened at repeatable read: a nested read committed 'same' throws", async () => {
+      await mismatch({ isolation: "repeatable read" });
+    });
+
+    it("outer opened at read committed: a nested 'same' joins", async () => {
+      const adapter = users.getAdapter();
+      await expect(
+        adapter.withTransaction(() => adapter.withTransaction(async () => 1, RC), {
+          isolation: "read committed",
+        }),
+      ).resolves.toBe(1);
+    });
+  });
 });

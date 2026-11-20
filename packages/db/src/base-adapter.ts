@@ -99,12 +99,25 @@ const ISOLATION_RANK: Record<TDbIsolationLevel, number> = {
   serializable: 3,
 };
 
+/** How a nested `withTransaction` checks the open transaction (`TTransactionOptions.join`). */
+type TJoinMode = NonNullable<TTransactionOptions["join"]>;
+
+const JOIN_MODES: ReadonlySet<string> = new Set<TJoinMode>(["atLeast", "same"]);
+
 /**
- * Validates `opts.isolation`: `undefined` when none is requested.
- * @throws DbError `INVALID_QUERY` for an unknown level.
+ * Validates `opts.isolation` and `opts.join`: `undefined` when no level is requested.
+ * @throws DbError `INVALID_QUERY` for an unknown level, an unknown `join`, or
+ * `join` without `isolation` (it checks the level a nested call asks for).
  */
 function requestedIsolation(opts: TTransactionOptions | undefined): TDbIsolationLevel | undefined {
   const level = opts?.isolation;
+  const join = opts?.join;
+  if (join !== undefined) {
+    if (!JOIN_MODES.has(join)) {
+      throw invalidQuery("join", `Unknown join mode "${String(join)}" — use 'atLeast' or 'same'`);
+    }
+    if (level === undefined) throw invalidQuery("join", "`join` requires `isolation`");
+  }
   if (level === undefined) return undefined;
   if (!ALL_ISOLATION_LEVELS.has(level)) {
     throw invalidQuery(
@@ -113,6 +126,23 @@ function requestedIsolation(opts: TTransactionOptions | undefined): TDbIsolation
     );
   }
   return level;
+}
+
+/** The error of a failed nested `join` check — see `TTransactionOptions.join` (since 0.1.177). */
+function isolationMismatch(
+  requested: TDbIsolationLevel,
+  open: TDbIsolationLevel | undefined,
+  join: TJoinMode,
+  message: string,
+): DbError {
+  return new DbError("INVALID_QUERY", [
+    {
+      path: "isolation",
+      message,
+      code: "ISOLATION_MISMATCH",
+      params: { requested, open: open ?? null, join },
+    },
+  ]);
 }
 
 /** Every view capability — what the bundled adapters return from `viewCapabilities()`. @since 0.1.147 */
@@ -137,6 +167,8 @@ interface TxContext {
   readonly parent: TxContext | undefined;
   /** The level the transaction was opened with (or the adapter's inherent one); `undefined` = engine default. */
   readonly isolation?: TDbIsolationLevel;
+  /** The level the outermost call asked for (inherent levels do not count); `undefined` = none. */
+  readonly requested?: TDbIsolationLevel;
 }
 const txStorage = new AsyncLocalStorage<TxContext>();
 
@@ -476,15 +508,14 @@ export abstract class BaseDbAdapter {
    * transaction this call opens — "at least this level". An adapter whose
    * {@link isolationLevels} lacks it throws `ISOLATION_NOT_SUPPORTED`. A
    * nested call joins the open transaction; it may request a level only when
-   * that transaction was opened with the same or a stricter one, else it
+   * that transaction passes `opts.join` (see {@link _checkJoin}), else it
    * throws `INVALID_QUERY` (the level of a running transaction cannot change).
    */
   async withTransaction<T>(fn: () => Promise<T>, opts?: TTransactionOptions): Promise<T> {
     const owner = this._transactionOwner();
     const isolation = this._checkIsolation(opts);
-    const open = findTxContext(owner);
-    if (open) {
-      if (isolation) this._assertJoinIsolation(open.isolation, isolation);
+    if (findTxContext(owner)) {
+      this._checkJoin(isolation, opts?.join);
       return fn();
     }
 
@@ -493,6 +524,7 @@ export abstract class BaseDbAdapter {
       state: undefined,
       parent: txStorage.getStore(),
       isolation: this._inherentIsolation() ?? isolation,
+      requested: isolation,
     };
     ctx.state = await this._beginTransaction(isolation ? { isolation } : undefined);
     return txStorage.run(ctx, async () => {
@@ -525,7 +557,8 @@ export abstract class BaseDbAdapter {
    * The level every transaction of this adapter runs at regardless of the
    * request (since 0.1.162) — SQLite's `BEGIN IMMEDIATE` is always
    * serializable. A nested `withTransaction` asking for any level then joins
-   * without error. Default `undefined` (the engine default / what was asked).
+   * without error under `join: 'atLeast'`; `join: 'same'` ignores it (since
+   * 0.1.177). Default `undefined` (the engine default / what was asked).
    */
   protected _inherentIsolation(): TDbIsolationLevel | undefined {
     return undefined;
@@ -534,7 +567,8 @@ export abstract class BaseDbAdapter {
   /**
    * Validates a `withTransaction` isolation request against
    * {@link isolationLevels} — the requested level, or `undefined`.
-   * @throws DbError `INVALID_QUERY` (unknown level) / `ISOLATION_NOT_SUPPORTED`.
+   * @throws DbError `INVALID_QUERY` (unknown level, unknown `join`, `join`
+   * without `isolation`) / `ISOLATION_NOT_SUPPORTED`.
    */
   protected _checkIsolation(opts: TTransactionOptions | undefined): TDbIsolationLevel | undefined {
     const level = requestedIsolation(opts);
@@ -554,17 +588,51 @@ export abstract class BaseDbAdapter {
   /**
    * A nested `withTransaction` asked for `requested` while a transaction
    * opened at `open` runs: fine when `open` is at least as strict.
-   * @throws DbError `INVALID_QUERY` otherwise.
+   * @throws DbError `INVALID_QUERY` otherwise (entry `ISOLATION_MISMATCH`,
+   * `join: 'atLeast'`, since 0.1.177).
    */
   protected _assertJoinIsolation(
     open: TDbIsolationLevel | undefined,
     requested: TDbIsolationLevel,
   ): void {
     if (open && ISOLATION_RANK[open] >= ISOLATION_RANK[requested]) return;
-    throw invalidQuery(
-      "isolation",
+    throw isolationMismatch(
+      requested,
+      open,
+      "atLeast",
       `A nested withTransaction cannot request isolation '${requested}': the open transaction ` +
         `runs at ${open ? `'${open}'` : "the engine default"} — set the level on the outermost call`,
+    );
+  }
+
+  /**
+   * The `join` check (see `TTransactionOptions.join`) of a nested
+   * `withTransaction` that asked for `requested`, against the innermost open
+   * transaction of this adapter's owner (since 0.1.177). No level requested or
+   * no open transaction: nothing to check. An adapter that overrides
+   * `withTransaction` calls it before joining and passes the level to
+   * {@link _runInTransactionContext}.
+   * @throws DbError `INVALID_QUERY`, entry `ISOLATION_MISMATCH`.
+   */
+  protected _checkJoin(
+    requested: TDbIsolationLevel | undefined,
+    join: TJoinMode = "atLeast",
+  ): void {
+    if (!requested) return;
+    const open = findTxContext(this._transactionOwner());
+    if (!open) return;
+    if (join === "atLeast") {
+      this._assertJoinIsolation(open.isolation, requested);
+      return;
+    }
+    if (open.requested === requested) return;
+    throw isolationMismatch(
+      requested,
+      open.requested,
+      "same",
+      `A nested withTransaction with join 'same' requires isolation '${requested}': the open ` +
+        `transaction was opened ${open.requested ? `at '${open.requested}'` : "without a level"} — ` +
+        `set the level on the outermost call`,
     );
   }
 
@@ -627,13 +695,33 @@ export abstract class BaseDbAdapter {
    * `session.withTransaction()` Convenient API) use this to set up the
    * shared context so that nested adapters see the same session.
    * If a context of the same owner already exists (nesting), it's reused.
+   * `isolation` (since 0.1.177) is the level the outermost call asked for —
+   * what a nested call's `join: 'same'` check ({@link _checkJoin}) reads. For
+   * the `'atLeast'` check the context records the level the transaction runs
+   * at, `_inherentIsolation() ?? isolation` as `withTransaction` does: since
+   * 0.1.177 an adapter with an inherent level that opens its context here
+   * satisfies a nested `{ isolation }` request (before, the context had no
+   * level and the nested call threw).
    */
-  protected _runInTransactionContext<T>(state: unknown, fn: () => Promise<T>): Promise<T> {
+  protected _runInTransactionContext<T>(
+    state: unknown,
+    fn: () => Promise<T>,
+    isolation?: TDbIsolationLevel,
+  ): Promise<T> {
     const owner = this._transactionOwner();
     if (findTxContext(owner)) {
       return fn();
     }
-    return txStorage.run({ owner, state, parent: txStorage.getStore() }, fn);
+    return txStorage.run(
+      {
+        owner,
+        state,
+        parent: txStorage.getStore(),
+        isolation: this._inherentIsolation() ?? isolation,
+        requested: isolation,
+      },
+      fn,
+    );
   }
 
   /**

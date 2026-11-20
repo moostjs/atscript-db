@@ -4,6 +4,7 @@ import {
   resolveAlias,
   resolveNested,
   type AggregateQuery,
+  type NestedAggregateQuery,
   type NestedResolution,
   type QueryIssue,
 } from "@uniqu/core";
@@ -119,7 +120,7 @@ export function metaIsNumericField(meta: TableMetadata): (field: string) => bool
  *
  * @since 0.1.168
  */
-export function innerAggregateQuery(query: AggregateQuery): AggregateQuery {
+export function innerAggregateQuery(query: NestedAggregateQuery): AggregateQuery {
   const root = query.controls as unknown as Record<string, unknown>;
   const stage = root.$from as Record<string, unknown>;
   const controls: Record<string, unknown> = {};

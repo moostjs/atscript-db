@@ -20,6 +20,7 @@ import type {
   AggregateQuery,
   BucketUnit,
   FilterExpr,
+  NestedAggregateQuery,
   ResolvedRowOrderKey,
   UniqueryControls,
   Uniquery,
@@ -271,16 +272,24 @@ function isRowRead(controls: UniqueryControls | undefined): boolean {
 
 /**
  * `query` with `$groupBy` defaulted to `[]` — an aggregate without one is the
- * ungrouped query (one group), as `$groupBy: []` documents it.
+ * ungrouped query (one group), as `$groupBy: []` documents it. A two-level
+ * query's outer `$groupBy` defaults the same way.
  * @throws DbError `INVALID_QUERY` when `$groupBy` is present but not an array.
  */
-function withGroupBy(query: AggregateQuery): AggregateQuery {
-  const controls = (query.controls ?? {}) as Partial<AggregateQuery["controls"]>;
+function withGroupBy<Q extends AggregateQuery | NestedAggregateQuery>(query: Q): Q {
+  const controls = (query.controls ?? {}) as { $groupBy?: unknown };
   if (Array.isArray(controls.$groupBy)) return query;
   if (controls.$groupBy !== undefined && controls.$groupBy !== null) {
     throw invalidQuery("$groupBy", "$groupBy must be an array of field names");
   }
-  return { ...query, controls: { ...controls, $groupBy: [] } } as AggregateQuery;
+  return { ...query, controls: { ...controls, $groupBy: [] } } as Q;
+}
+
+/** Whether `query` is a two-level aggregate (`controls.$from`, since 0.1.168). */
+function isNestedAggregate(
+  query: AggregateQuery | NestedAggregateQuery,
+): query is NestedAggregateQuery {
+  return query.controls.$from !== undefined;
 }
 
 /**
@@ -1500,16 +1509,20 @@ export class AtscriptDbReadable<
    * the inner level is validated as a standalone grouped query over the
    * filter, then uniqu's `resolveNested` resolves both levels; the outer
    * level reads inner columns only. Needs `supportsNestedAggregates()`
-   * (`AGG_NESTED_NOT_SUPPORTED`).
+   * (`AGG_NESTED_NOT_SUPPORTED`). The parameter accepts a
+   * `NestedAggregateQuery` at the type level since 0.1.177 (the runtime ran
+   * it since 0.1.168); rows are untyped for both shapes.
    *
    * Translates field names, delegates to adapter.aggregate(),
    * then reverse-maps and applies fromStorage formatters on results.
    */
-  public async aggregate(query: AggregateQuery): Promise<Array<Record<string, unknown>>> {
+  public async aggregate(
+    query: AggregateQuery | NestedAggregateQuery,
+  ): Promise<Array<Record<string, unknown>>> {
     this._ensureBuilt();
     query = withGroupBy(query);
     checkAggregateControls(query.controls as unknown as Record<string, unknown>);
-    if ((query.controls as { $from?: unknown }).$from !== undefined) {
+    if (isNestedAggregate(query)) {
       return this._aggregateNested(query);
     }
     const checked = this._checkAggregate(query);
@@ -1702,7 +1715,9 @@ export class AtscriptDbReadable<
    * arithmetic, conditions, field lists, calendar buckets over inner
    * timestamp columns).
    */
-  private async _aggregateNested(query: AggregateQuery): Promise<Array<Record<string, unknown>>> {
+  private async _aggregateNested(
+    query: NestedAggregateQuery,
+  ): Promise<Array<Record<string, unknown>>> {
     if (!this.adapter.supportsNestedAggregates()) {
       throw new DbError("AGG_NESTED_NOT_SUPPORTED", [
         {
@@ -1738,11 +1753,14 @@ export class AtscriptDbReadable<
     // The outer `$sort` keys that are inner `$groupBy` fields take their
     // `@db.sort.nulls` like any grouped field; any other key (an alias) a
     // request entry only.
-    const sortKeys = Object.keys(
-      (query.controls.$sort as Record<string, unknown> | undefined) ?? {},
-    );
+    const sortKeys = Object.keys(query.controls.$sort ?? {});
     const sortAliases = new Set(sortKeys.filter((name) => columns.get(name)?.kind !== "key"));
-    const outer = this._aggregateNulls(query, undefined, sortAliases).query;
+    // The outer level is a grouped query over the inner columns (`aggregate()` defaulted its `$groupBy`).
+    const outer = this._aggregateNulls(
+      query as unknown as AggregateQuery,
+      undefined,
+      sortAliases,
+    ).query;
     const dbQuery = this._fieldMapper.translateNestedAggregate(
       outer,
       this._meta,

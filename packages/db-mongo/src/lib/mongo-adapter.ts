@@ -307,11 +307,14 @@ export class MongoAdapter extends BaseDbAdapter {
    * snapshot, which satisfies `'read committed'` and `'repeatable read'`;
    * `'serializable'` throws `ISOLATION_NOT_SUPPORTED` (snapshot isolation
    * allows write skew), and so does any level where `fn` would run without
-   * a transaction.
+   * a transaction. A nested call under `join: 'atLeast'` joins with no level
+   * check (the snapshot satisfies both levels); `join: 'same'` (since
+   * 0.1.177) is checked as on every adapter.
    */
   override async withTransaction<T>(fn: () => Promise<T>, opts?: TTransactionOptions): Promise<T> {
     const isolation = this._checkIsolation(opts);
     if (this._getTransactionState()) {
+      if (opts?.join === "same") this._checkJoin(isolation, "same");
       return fn();
     }
     const passThrough = (reason: string): Promise<T> => {
@@ -335,7 +338,7 @@ export class MongoAdapter extends BaseDbAdapter {
     try {
       let result!: T;
       await session.withTransaction(async () => {
-        result = await this._runInTransactionContext(session, fn);
+        result = await this._runInTransactionContext(session, fn, isolation);
       });
       return result;
     } catch (error) {

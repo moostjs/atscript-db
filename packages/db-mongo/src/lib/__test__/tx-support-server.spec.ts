@@ -87,6 +87,66 @@ describe.each(MODES)("withTransaction — %s", (_label, kind, transactions) => {
       expect((error as DbError).message).toMatch(/standalone mongod/);
     },
   );
+
+  // `join: 'same'` (since 0.1.177): the override's nested branch joins with no
+  // level check by default (the snapshot satisfies both levels); with 'same' it
+  // checks the level the outermost call asked for, like every other adapter.
+  it.runIf(transactions)(
+    "join 'same': a nested call joins only a transaction requested at the same level",
+    async () => {
+      const client = await connect();
+      const adapter = new MongoAdapter(client.db("tx_join"), client);
+      const RC = { isolation: "read committed", join: "same" } as const;
+      await expect(
+        adapter.withTransaction(
+          () => adapter.withTransaction(async () => adapter.isInTransaction(), RC),
+          { isolation: "read committed" },
+        ),
+      ).resolves.toBe(true);
+      // the default join stays check-free on MongoDB: both pairs would fail the
+      // base 'atLeast' rank check (a stricter nested level; none on the outer call)
+      await expect(
+        adapter.withTransaction(
+          () => adapter.withTransaction(async () => 1, { isolation: "repeatable read" }),
+          { isolation: "read committed" },
+        ),
+      ).resolves.toBe(1);
+      await expect(
+        adapter.withTransaction(() =>
+          adapter.withTransaction(async () => 1, { isolation: "read committed" }),
+        ),
+      ).resolves.toBe(1);
+      for (const outer of [{ isolation: "repeatable read" as const }, undefined]) {
+        await expect(
+          adapter.withTransaction(() => adapter.withTransaction(async () => 1, RC), outer),
+        ).rejects.toMatchObject({
+          code: "INVALID_QUERY",
+          errors: [
+            {
+              code: "ISOLATION_MISMATCH",
+              params: { requested: "read committed", open: outer?.isolation ?? null, join: "same" },
+            },
+          ],
+        });
+      }
+    },
+  );
+
+  // the override validates `join` before any server call — a lazy client never connects
+  it.runIf(transactions)(
+    "join without isolation, or an unknown join, is INVALID_QUERY",
+    async () => {
+      const client = await connect(true);
+      const adapter = new MongoAdapter(client.db("tx_join_check"), client);
+      await expect(adapter.withTransaction(async () => 1, { join: "same" })).rejects.toMatchObject({
+        code: "INVALID_QUERY",
+        errors: [{ path: "join" }],
+      });
+      await expect(
+        adapter.withTransaction(async () => 1, { isolation: "read committed", join: "x" as never }),
+      ).rejects.toMatchObject({ code: "INVALID_QUERY", errors: [{ path: "join" }] });
+    },
+  );
 });
 
 describe("transactionSupport on an uninitiated --replSet member", () => {

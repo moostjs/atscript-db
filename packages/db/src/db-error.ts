@@ -80,7 +80,14 @@ export type DbErrorCode =
    * `innodb_lock_wait_timeout`, PostgreSQL 55P03 `lock_timeout` / `NOWAIT`).
    * The statement failed; MySQL keeps the transaction open unless
    * `innodb_rollback_on_timeout` is set, PostgreSQL aborts it — retry the
-   * whole transaction. `retryable` is `true`. @since 0.1.153
+   * whole transaction. On SQLite: `SQLITE_BUSY` (any extended busy code —
+   * another connection held the database lock past `busy_timeout`) at
+   * `BEGIN IMMEDIATE`, on any statement and at `COMMIT` (since 0.1.177;
+   * before 0.1.177 only `COMMIT`). A busy `BEGIN` opened nothing and the
+   * callback did not run; the failing statement did not run — earlier
+   * statements of a non-transactional schema call may have applied; a busy
+   * `COMMIT` is rolled back by `withTransaction` before the error reaches the
+   * caller. The driver error is the `cause`. `retryable` is `true`. @since 0.1.153
    */
   | "LOCK_TIMEOUT"
   /**
@@ -133,6 +140,10 @@ const RETRYABLE_CODES: ReadonlySet<DbErrorCode> = new Set<DbErrorCode>([
  * `FIELD_NESTED_OBJECT` / `FIELD_ENCRYPTED` `{ field, op }`, `FIELD_IN_JSON`
  * `{ field, column, op }`, else `INVALID_QUERY` — the codes moost-db answers
  * over HTTP (its `MOOST_DB_MESSAGES` holds their English templates).
+ *
+ * A nested `withTransaction` that fails its `join` check (`INVALID_QUERY`,
+ * `path` `isolation`, since 0.1.177) codes its entry `ISOLATION_MISMATCH`
+ * `{ requested, open, join }` — see `TTransactionOptions.join`.
  */
 export type TDbErrorEntryCode = "UNIQUE" | "FK_MISSING" | "FK_RESTRICT";
 

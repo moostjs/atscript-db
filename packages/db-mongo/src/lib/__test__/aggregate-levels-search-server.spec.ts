@@ -52,7 +52,7 @@ const perCategory = (extra: Record<string, unknown> = {}) =>
       ],
       ...extra,
     },
-  } as never);
+  });
 
 describe("[mongo] two-level aggregate + $search ($text)", () => {
   it("searches the rows the inner level groups", async () => {
