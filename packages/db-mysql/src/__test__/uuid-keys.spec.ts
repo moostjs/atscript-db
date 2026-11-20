@@ -253,6 +253,7 @@ async function syncColumnsOf(
   );
   const execs = driver.calls.filter((c) => c.method === "exec");
   return {
+    driver,
     outcome,
     ddl: execs.filter((c) => !c.sql.startsWith("SET")).map((c) => c.sql),
     all: execs.map((c) => c.sql),
@@ -438,6 +439,65 @@ describe("MySQL — foreign keys over a column whose type changes", () => {
       "SET SESSION foreign_key_checks = @atscript_fk_checks",
       "SET SESSION sql_mode = @atscript_sql_mode",
     ]);
+  });
+
+  // Since 0.1.180: the session would still skip foreign-key checks, so the
+  // connection is closed instead of handed to the pool's next borrower
+  it("a foreign_key_checks restore that fails closes the connection", async () => {
+    const boom = new Error("restore refused");
+    const { driver, outcome, all } = await syncColumnsOf(
+      fx.UkParent,
+      { typeChanged: ["id"] },
+      {
+        ...liveFks(parentFks),
+        execError: (sql) =>
+          sql === "SET SESSION foreign_key_checks = @atscript_fk_checks" ? boom : undefined,
+      },
+    );
+    expect(outcome).toBe(boom);
+    expect(all.at(-1)).toBe("SET SESSION sql_mode = @atscript_sql_mode");
+    expect(driver.destroyCount()).toBe(1);
+    expect(driver.releaseCount()).toBe(0);
+  });
+
+  it("the type change and the foreign_key_checks restore both failing: the type change's error wins; closed", async () => {
+    const modify = new Error("Data truncated for column 'id'");
+    const { driver, outcome } = await syncColumnsOf(
+      fx.UkParent,
+      { typeChanged: ["id"] },
+      {
+        ...liveFks(parentFks),
+        execError: (sql) =>
+          sql.includes("MODIFY COLUMN")
+            ? modify
+            : sql === "SET SESSION foreign_key_checks = @atscript_fk_checks"
+              ? new Error("restore refused")
+              : undefined,
+      },
+    );
+    expect(outcome).toBe(modify);
+    expect(driver.destroyCount()).toBe(1);
+    expect(driver.releaseCount()).toBe(0);
+  });
+
+  // Since 0.1.180: the switch only spares MySQL the row check, so its failure
+  // no longer leaves every dropped constraint dropped (and unnamed)
+  it("a foreign_key_checks switch that fails: the constraints are re-created with the checks on", async () => {
+    const { driver, outcome, ddl, all } = await syncColumnsOf(
+      fx.UkParent,
+      { typeChanged: ["id"] },
+      {
+        ...liveFks(parentFks),
+        execError: (sql) =>
+          sql.startsWith("SET @atscript_fk_checks") ? new Error("switch refused") : undefined,
+      },
+    );
+    expect(outcome).toBeUndefined();
+    expect(ddl.slice(-2)).toEqual([ADD_CHILD_1, ADD_LINKS]);
+    // nothing was switched, so nothing is restored
+    expect(all).not.toContain("SET SESSION foreign_key_checks = @atscript_fk_checks");
+    expect(driver.destroyCount()).toBe(0);
+    expect(driver.releaseCount()).toBe(1);
   });
 
   it("a grouped re-create that fails is retried constraint by constraint", async () => {

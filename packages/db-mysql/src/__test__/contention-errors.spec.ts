@@ -51,6 +51,9 @@ const addColumn = (table: any) => ({
 /** An `execError` failing exactly the statements named. */
 const failOn = (failures: Record<string, Error>) => (sql: string) => failures[sql];
 
+const OFF = "SET FOREIGN_KEY_CHECKS = 0";
+const ON = "SET FOREIGN_KEY_CHECKS = 1";
+
 /** Every statement the mock driver ran, as `<pool|conn>:<sql>`. */
 const sqls = (driver: ReturnType<typeof createMockDriver>) =>
   driver.calls.map((c) => `${c.via}:${c.sql}`);
@@ -240,8 +243,6 @@ describe("[mysql] contention errors", () => {
   // failure: a failing `SET FOREIGN_KEY_CHECKS = 0` leaked it (it ran outside
   // the try), and so did a failing restore (the release came after it).
   describe("dropTableByName hands the connection back on every failure", () => {
-    const OFF = "SET FOREIGN_KEY_CHECKS = 0";
-    const ON = "SET FOREIGN_KEY_CHECKS = 1";
     const DROP = "DROP TABLE IF EXISTS `ce_items`";
 
     it("a failing SET … = 0: mapped, the restore still runs, released exactly once", async () => {
@@ -282,6 +283,98 @@ describe("[mysql] contention errors", () => {
       const boom = mysqlError(1105);
       const { driver, adapter } = setup({ destroyable: false, execError: failOn({ [ON]: boom }) });
       expect(await rejection(adapter.dropTableByName("ce_items"))).toBe(boom);
+      expect(driver.releaseCount()).toBe(1);
+    });
+  });
+
+  // Since 0.1.180 a strict-session step or a recreate that cannot put its
+  // session setting back closes the connection: before, it returned to the
+  // pool still in the changed `sql_mode`, or with foreign-key checks off for
+  // the next borrower. The step's own error still wins over the restore's.
+  describe("a session setting that cannot be restored closes the connection", () => {
+    const MODE = "SET SESSION sql_mode = @atscript_sql_mode";
+
+    it("syncColumns: a failing sql_mode restore is the error; closed, not released", async () => {
+      const boom = mysqlError(1105);
+      const { driver, table, adapter } = setup({ execError: failOn({ [MODE]: boom }) });
+      expect(await rejection(adapter.syncColumns(addColumn(table) as any))).toBe(boom);
+      expect(driver.destroyCount()).toBe(1);
+      expect(driver.releaseCount()).toBe(0);
+    });
+
+    it("syncColumns: the step and the restore both failing — the step's error wins; closed", async () => {
+      const step = mysqlError(1213);
+      const { driver, table, adapter } = setup({
+        execError: (sql) =>
+          sql.includes("ADD COLUMN") ? step : sql === MODE ? timeout() : undefined,
+      });
+      const error = await caught(adapter.syncColumns(addColumn(table) as any));
+      expect(error.code).toBe("DEADLOCK");
+      expect(error.cause).toBe(step);
+      expect(driver.destroyCount()).toBe(1);
+      expect(driver.releaseCount()).toBe(0);
+    });
+
+    it("recreateTable: a failing FOREIGN_KEY_CHECKS restore — sql_mode is still restored; closed", async () => {
+      const boom = mysqlError(1105);
+      const { driver, adapter } = setup({ execError: failOn({ [ON]: boom }) });
+      expect(await rejection(adapter.recreateTable())).toBe(boom);
+      expect(sqls(driver).slice(-2)).toEqual([`conn:${ON}`, `conn:${MODE}`]);
+      expect(driver.destroyCount()).toBe(1);
+      expect(driver.releaseCount()).toBe(0);
+    });
+
+    it("recreateTable: the copy and the FK restore both failing — the copy's error wins; closed", async () => {
+      const create = mysqlError(1205);
+      const { driver, adapter } = setup({
+        execError: (sql) =>
+          sql.startsWith("CREATE TABLE") ? create : sql === ON ? timeout() : undefined,
+      });
+      const error = await caught(adapter.recreateTable());
+      expect(error.code).toBe("LOCK_TIMEOUT");
+      expect(error.cause).toBe(create);
+      expect(driver.destroyCount()).toBe(1);
+      expect(driver.releaseCount()).toBe(0);
+    });
+
+    it("on a transaction's connection: closed when the transaction ends, after its ROLLBACK", async () => {
+      const boom = mysqlError(1105);
+      const { driver, table, adapter } = setup({ execError: failOn({ [MODE]: boom }) });
+      expect(
+        await rejection(
+          adapter.withTransaction(() => adapter.syncColumns(addColumn(table) as any)),
+        ),
+      ).toBe(boom);
+      expect(sqls(driver).slice(-2)).toEqual([`conn:${MODE}`, "conn:ROLLBACK"]);
+      expect(driver.destroyCount()).toBe(1);
+      expect(driver.releaseCount()).toBe(0);
+    });
+
+    it("on a transaction's connection that commits: closed after the COMMIT", async () => {
+      const { driver, table, adapter } = setup({ execError: failOn({ [MODE]: mysqlError(1105) }) });
+      await adapter.withTransaction(async () => {
+        await rejection(adapter.syncColumns(addColumn(table) as any));
+      });
+      expect(sqls(driver).at(-1)).toBe("conn:COMMIT");
+      expect(driver.destroyCount()).toBe(1);
+      expect(driver.releaseCount()).toBe(0);
+    });
+
+    it("a restore that succeeds leaves the connection pooled (syncColumns, recreateTable)", async () => {
+      const { driver, table, adapter } = setup();
+      await adapter.syncColumns(addColumn(table) as any);
+      await adapter.recreateTable();
+      expect(driver.destroyCount()).toBe(0);
+      expect(driver.releaseCount()).toBe(2);
+    });
+
+    it("a driver without destroy(): the connection is released once", async () => {
+      const boom = mysqlError(1105);
+      const { driver, table, adapter } = setup({
+        destroyable: false,
+        execError: failOn({ [MODE]: boom }),
+      });
+      expect(await rejection(adapter.syncColumns(addColumn(table) as any))).toBe(boom);
       expect(driver.releaseCount()).toBe(1);
     });
   });

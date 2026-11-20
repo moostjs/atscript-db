@@ -296,6 +296,9 @@ function isServerError(error: unknown): boolean {
 
 /** Closes `conn` — or, for a driver without `destroy()`, rolls it back (best effort) and releases it. */
 async function discardConnection(conn: TMysqlConnection): Promise<void> {
+  // Closed (or released) here: no mark may outlive it on a driver that hands
+  // the same connection object out again
+  dirtySession.delete(conn);
   if (conn.destroy) {
     conn.destroy();
     return;
@@ -306,6 +309,48 @@ async function discardConnection(conn: TMysqlConnection): Promise<void> {
     /* the connection is released regardless */
   }
   conn.release();
+}
+
+/**
+ * Connections whose session state must not reach the pool's next borrower:
+ * a setting that could not be put back (see {@link withSessionRestore}), a
+ * pending one-shot isolation level. {@link releaseConnection} closes them.
+ */
+const dirtySession = new WeakSet<TMysqlConnection>();
+
+/**
+ * Runs `fn`, then `restoreSql` on `conn` whether `fn` failed or not; `fn`'s
+ * error is the one thrown. A failing restore marks `conn`, so
+ * {@link releaseConnection} closes it instead of handing the pool's next
+ * borrower a session that skips foreign-key checks or runs another
+ * `sql_mode` (since 0.1.180).
+ */
+async function withSessionRestore<T>(
+  conn: TMysqlConnection,
+  restoreSql: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  let done = false;
+  try {
+    const result = await fn();
+    done = true;
+    return result;
+  } finally {
+    await conn.exec(restoreSql).catch((error: unknown) => {
+      dirtySession.add(conn);
+      // `fn`'s own error wins over the restore's
+      if (done) throw error;
+    });
+  }
+}
+
+/**
+ * Hands `conn` back to the pool — closed instead when it is in
+ * {@link dirtySession} (a driver without `destroy()` can only release it).
+ */
+function releaseConnection(conn: TMysqlConnection): void {
+  if (dirtySession.delete(conn) && conn.destroy) conn.destroy();
+  else conn.release();
 }
 
 /** `exec` whose statements reject with the retryable `DbError` on contention (any statement can be the deadlock victim). */
@@ -560,8 +605,8 @@ export class MysqlAdapter extends BaseDbAdapter {
     } catch (err) {
       // A pending one-shot `SET TRANSACTION` level must not reach the next
       // borrower of this pooled connection: close it instead of releasing it.
-      if (levelPending && conn.destroy) conn.destroy();
-      else conn.release();
+      if (levelPending) dirtySession.add(conn);
+      releaseConnection(conn);
       throw err;
     }
   }
@@ -576,12 +621,12 @@ export class MysqlAdapter extends BaseDbAdapter {
       // it back): the released connection must not see the caller's ROLLBACK. A
       // client-side one (a timeout) leaves the transaction in an unknown state.
       endedTx.add(conn);
-      if (isServerError(error)) conn.release();
+      if (isServerError(error)) releaseConnection(conn);
       else await discardConnection(conn);
       // A deadlock victim / lock wait timeout can surface at COMMIT itself
       throw mapContention(error);
     }
-    conn.release();
+    releaseConnection(conn);
   }
 
   protected override async _rollbackTransaction(state: unknown): Promise<void> {
@@ -591,7 +636,7 @@ export class MysqlAdapter extends BaseDbAdapter {
       this._log("ROLLBACK");
       await conn.exec("ROLLBACK");
     } finally {
-      conn.release();
+      releaseConnection(conn);
     }
   }
 
@@ -624,11 +669,9 @@ export class MysqlAdapter extends BaseDbAdapter {
       await conn.exec(
         "SET @atscript_sql_mode = @@SESSION.sql_mode, SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'STRICT_ALL_TABLES')",
       );
-      try {
-        return await fn(conn);
-      } finally {
-        await conn.exec("SET SESSION sql_mode = @atscript_sql_mode");
-      }
+      return await withSessionRestore(conn, "SET SESSION sql_mode = @atscript_sql_mode", () =>
+        fn(conn),
+      );
     } catch (error) {
       // `conn` (a dedicated connection, or the transaction's own) is used
       // unwrapped, without `_exec()`'s mapping: contention (a metadata lock on
@@ -636,8 +679,9 @@ export class MysqlAdapter extends BaseDbAdapter {
       // own catch blocks still see the driver error (since 0.1.178)
       throw mapContention(error);
     } finally {
+      // The transaction's own connection is released when the transaction ends
       if (!tx) {
-        conn.release();
+        releaseConnection(conn);
       }
     }
   }
@@ -1037,13 +1081,16 @@ export class MysqlAdapter extends BaseDbAdapter {
     return this._groupInsertedIds(group, result.insertId, step);
   }
 
-  /** Runs `fn` on a dedicated pool connection (one session, autocommit), released after. */
+  /**
+   * Runs `fn` on a dedicated pool connection (one session, autocommit),
+   * released after ({@link releaseConnection}).
+   */
   private async _onDedicatedConnection<T>(fn: (conn: TMysqlConnection) => Promise<T>): Promise<T> {
     const conn = await this.driver.getConnection();
     try {
       return await fn(conn);
     } finally {
-      conn.release();
+      releaseConnection(conn);
     }
   }
 
@@ -2394,7 +2441,7 @@ export class MysqlAdapter extends BaseDbAdapter {
     } catch (error) {
       failure = error as Error;
     }
-    const lost = await this._restoreForeignKeys(conn, dropped);
+    const { lost, restoreError } = await this._restoreForeignKeys(conn, dropped);
     if (lost.length > 0) {
       const named = lost
         .map(
@@ -2407,7 +2454,9 @@ export class MysqlAdapter extends BaseDbAdapter {
         : `Foreign keys not restored after the type change: ${named}`;
       throw new Error(message, { cause: failure });
     }
+    // `fn`'s error wins over a `foreign_key_checks` restore that failed
     if (failure) throw failure;
+    if (restoreError) throw restoreError;
   }
 
   /**
@@ -2416,13 +2465,16 @@ export class MysqlAdapter extends BaseDbAdapter {
    * so MySQL adds them in place instead of rebuilding the table (the rows
    * met them before the change). A table whose statement fails has its
    * constraints re-tried one by one. Returns those that could not be
-   * re-created.
+   * re-created (`lost`) and the error of a `foreign_key_checks` restore
+   * that failed (`restoreError`; the connection is then closed, not pooled —
+   * see {@link withSessionRestore}). Never throws, so the caller can report
+   * the lost constraints next to its own failure.
    */
   private async _restoreForeignKeys(
     conn: TMysqlConnection,
     fks: readonly TLiveForeignKey[],
-  ): Promise<TLiveForeignKey[]> {
-    if (fks.length === 0) return [];
+  ): Promise<{ lost: TLiveForeignKey[]; restoreError?: unknown }> {
+    if (fks.length === 0) return { lost: [] };
     const byTable = new Map<string, TLiveForeignKey[]>();
     for (const fk of fks) {
       const group = byTable.get(fk.table);
@@ -2444,10 +2496,8 @@ export class MysqlAdapter extends BaseDbAdapter {
       return undefined;
     };
     const lost: TLiveForeignKey[] = [];
-    await conn.exec(
-      "SET @atscript_fk_checks = @@SESSION.foreign_key_checks, SESSION foreign_key_checks = 0",
-    );
-    try {
+    // Collects its failures in `lost`; never throws
+    const recreate = async () => {
       for (const [table, group] of byTable) {
         const error = await add(table, group);
         if (!error) continue;
@@ -2461,10 +2511,28 @@ export class MysqlAdapter extends BaseDbAdapter {
           }
         }
       }
-    } finally {
-      await conn.exec("SET SESSION foreign_key_checks = @atscript_fk_checks");
+    };
+    try {
+      await conn.exec(
+        "SET @atscript_fk_checks = @@SESSION.foreign_key_checks, SESSION foreign_key_checks = 0",
+      );
+    } catch {
+      // The switch only spares MySQL the row check: the constraints are
+      // re-created with the checks on (since 0.1.180; before, the failure left
+      // every dropped constraint dropped and unnamed)
+      await recreate();
+      return { lost };
     }
-    return lost;
+    try {
+      await withSessionRestore(
+        conn,
+        "SET SESSION foreign_key_checks = @atscript_fk_checks",
+        recreate,
+      );
+    } catch (restoreError) {
+      return { lost, restoreError };
+    }
+    return { lost };
   }
 
   /**
@@ -2728,72 +2796,72 @@ export class MysqlAdapter extends BaseDbAdapter {
     // so a copied value that does not convert fails the copy.
     return this._withStrictSession(async (conn) => {
       await conn.exec("SET FOREIGN_KEY_CHECKS = 0");
-      // MySQL DDL auto-commits, so nothing rolls the temp table back: a failure
-      // before the original is dropped drops it here. After that the temp table
-      // holds the only copy of the rows and is left in place.
-      let originalDropped = false;
-      try {
-        // 1. Create new table with temp name
-        const createSql = buildCreateTable(
-          tempName,
-          this._table.fieldDescriptors,
-          this._table.foreignKeys,
-          this._tableOptions(),
-        );
-        this._log(createSql);
-        await conn.exec(createSql);
-
-        // 2. Get columns that exist in both old and new
-        // Read on the held connection: a second pool checkout could wait forever
-        // on a one-connection pool.
-        // Generated (derived) columns are computed, never inserted — the new
-        // table recomputes them from the copied JSON source.
-        const oldCols = (await this._readColumns(conn, this._table.tableName)).map((c) => c.name);
-        const newCols = this._table.storedDescriptors.map((f) => f.physicalName);
-        const oldColSet = new Set(oldCols);
-        const commonCols = newCols.filter((c) => oldColSet.has(c));
-
-        if (commonCols.length > 0) {
-          // 3. Copy data
-          const fieldsByName = new Map(
-            this._table.fieldDescriptors.map((f) => [f.physicalName, f]),
+      await withSessionRestore(conn, "SET FOREIGN_KEY_CHECKS = 1", async () => {
+        // MySQL DDL auto-commits, so nothing rolls the temp table back: a failure
+        // before the original is dropped drops it here. After that the temp table
+        // holds the only copy of the rows and is left in place.
+        let originalDropped = false;
+        try {
+          // 1. Create new table with temp name
+          const createSql = buildCreateTable(
+            tempName,
+            this._table.fieldDescriptors,
+            this._table.foreignKeys,
+            this._tableOptions(),
           );
-          const colNames = commonCols.map((c) => qi(c)).join(", ");
-          const selectExprs = commonCols
-            .map((c) => {
-              const field = fieldsByName.get(c);
-              if (field && !field.optional && !field.isPrimaryKey) {
-                const fallback =
-                  field.defaultValue?.kind === "value"
-                    ? mysqlValueLiteral(field.designType, field.defaultValue.value)
-                    : defaultValueForType(field.designType);
-                return `COALESCE(${qi(c)}, ${fallback}) AS ${qi(c)}`;
-              }
-              return qi(c);
-            })
-            .join(", ");
-          const copySql = `INSERT INTO ${qi(tempName)} (${colNames}) SELECT ${selectExprs} FROM ${quoteTableName(tableName)}`;
-          this._log(copySql);
-          await conn.exec(copySql);
-        }
+          this._log(createSql);
+          await conn.exec(createSql);
 
-        // 4. Drop old, rename new. Not an atomic `RENAME TABLE t TO old, tmp TO t`:
-        //    InnoDB would re-point other tables' foreign keys at the renamed original.
-        await conn.exec(`DROP TABLE IF EXISTS ${quoteTableName(tableName)}`);
-        originalDropped = true;
-        await conn.exec(`RENAME TABLE ${qi(tempName)} TO ${quoteTableName(tableName)}`);
-      } catch (error) {
-        if (originalDropped) {
-          throw new Error(
-            `Recreate of "${tableName}" failed after the original table was dropped; its rows are in "${tempName}"`,
-            { cause: error },
-          );
+          // 2. Get columns that exist in both old and new
+          // Read on the held connection: a second pool checkout could wait forever
+          // on a one-connection pool.
+          // Generated (derived) columns are computed, never inserted — the new
+          // table recomputes them from the copied JSON source.
+          const oldCols = (await this._readColumns(conn, this._table.tableName)).map((c) => c.name);
+          const newCols = this._table.storedDescriptors.map((f) => f.physicalName);
+          const oldColSet = new Set(oldCols);
+          const commonCols = newCols.filter((c) => oldColSet.has(c));
+
+          if (commonCols.length > 0) {
+            // 3. Copy data
+            const fieldsByName = new Map(
+              this._table.fieldDescriptors.map((f) => [f.physicalName, f]),
+            );
+            const colNames = commonCols.map((c) => qi(c)).join(", ");
+            const selectExprs = commonCols
+              .map((c) => {
+                const field = fieldsByName.get(c);
+                if (field && !field.optional && !field.isPrimaryKey) {
+                  const fallback =
+                    field.defaultValue?.kind === "value"
+                      ? mysqlValueLiteral(field.designType, field.defaultValue.value)
+                      : defaultValueForType(field.designType);
+                  return `COALESCE(${qi(c)}, ${fallback}) AS ${qi(c)}`;
+                }
+                return qi(c);
+              })
+              .join(", ");
+            const copySql = `INSERT INTO ${qi(tempName)} (${colNames}) SELECT ${selectExprs} FROM ${quoteTableName(tableName)}`;
+            this._log(copySql);
+            await conn.exec(copySql);
+          }
+
+          // 4. Drop old, rename new. Not an atomic `RENAME TABLE t TO old, tmp TO t`:
+          //    InnoDB would re-point other tables' foreign keys at the renamed original.
+          await conn.exec(`DROP TABLE IF EXISTS ${quoteTableName(tableName)}`);
+          originalDropped = true;
+          await conn.exec(`RENAME TABLE ${qi(tempName)} TO ${quoteTableName(tableName)}`);
+        } catch (error) {
+          if (originalDropped) {
+            throw new Error(
+              `Recreate of "${tableName}" failed after the original table was dropped; its rows are in "${tempName}"`,
+              { cause: error },
+            );
+          }
+          await conn.exec(`DROP TABLE IF EXISTS ${qi(tempName)}`).catch(() => undefined);
+          throw error;
         }
-        await conn.exec(`DROP TABLE IF EXISTS ${qi(tempName)}`).catch(() => undefined);
-        throw error;
-      } finally {
-        await conn.exec("SET FOREIGN_KEY_CHECKS = 1");
-      }
+      });
     });
   }
 
@@ -2846,33 +2914,21 @@ export class MysqlAdapter extends BaseDbAdapter {
   override async dropTableByName(tableName: string): Promise<void> {
     const ddl = `DROP TABLE IF EXISTS ${quoteTableName(tableName)}`;
     this._log(ddl);
-    const conn = await this.driver.getConnection();
-    // Its own connection, not `_exec()`'s: contention (a metadata lock) is
-    // the retryable DbError here too (since 0.1.178)
-    const exec = contentionExec(conn);
     // Every failure hands the connection back (since 0.1.178: a failing
-    // `SET … = 0` or restore leaked it); the first error wins
-    let failed = false;
-    let failure: unknown;
+    // `SET … = 0` or restore leaked it); the first error wins. A failing
+    // restore closes it: the session may still skip foreign-key checks.
     try {
-      await exec.exec("SET FOREIGN_KEY_CHECKS = 0");
-      await exec.exec(ddl);
+      await this._onDedicatedConnection((conn) =>
+        withSessionRestore(conn, "SET FOREIGN_KEY_CHECKS = 1", async () => {
+          await conn.exec("SET FOREIGN_KEY_CHECKS = 0");
+          await conn.exec(ddl);
+        }),
+      );
     } catch (error) {
-      failed = true;
-      failure = error;
+      // Its own connection, not `_exec()`'s: contention (a metadata lock) is
+      // the retryable DbError here too (since 0.1.178)
+      throw mapContention(error);
     }
-    try {
-      await exec.exec("SET FOREIGN_KEY_CHECKS = 1");
-    } catch (error) {
-      // The session may still skip foreign-key checks: closed rather than
-      // handed to the pool's next borrower (a driver without `destroy()` can
-      // only release it)
-      if (conn.destroy) conn.destroy();
-      else conn.release();
-      throw failed ? failure : error;
-    }
-    conn.release();
-    if (failed) throw failure;
   }
 
   override async dropViewByName(viewName: string): Promise<void> {
