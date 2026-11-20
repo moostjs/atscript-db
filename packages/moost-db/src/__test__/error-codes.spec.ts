@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-extraneous-class -- decorated test containers */
 import { describe, it, expect, beforeAll } from "vite-plus/test";
 import { createAdapter } from "@atscript/db-memory";
-import { Inherit, getMoostInfact } from "moost";
+import { Get } from "@moostjs/event-http";
+import { Inherit, formatMessage, getMoostInfact, setTranslator } from "moost";
 
 import { AsDbController } from "../as-db.controller";
 import { TableController } from "../decorators";
@@ -31,7 +32,15 @@ beforeAll(async () => {
 
   @TableController(items, prefix)
   @Inherit()
-  class Items extends AsDbController {}
+  class Items extends AsDbController {
+    /** A nested `join: 'same'` call inside a transaction opened without a level. */
+    @Get("nested-tx")
+    nestedTx() {
+      return this.withTransaction(() =>
+        this.withTransaction(async () => 1, { isolation: "read committed", join: "same" }),
+      );
+    }
+  }
 
   send = await bootHttp(Items);
   expect((await send("POST", `/${prefix}`, { id: 1, title: "a", version: 1 })).status).toBe(201);
@@ -125,6 +134,39 @@ describe("coded error envelopes", () => {
     ]);
     const whole = await send("PATCH", `/${prefix}`, { id: 1, tags: ["x", "y"] });
     expect(whole.status).toBe(200);
+  });
+
+  // The core's entry code (since 0.1.177) has a template since 0.1.178. Its
+  // `open` param is `null` here, so the template names `{requested}` only.
+  it("ISOLATION_MISMATCH { requested, open, join } — a nested withTransaction refused", async () => {
+    const res = await send("GET", `/${prefix}/nested-tx`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("INVALID_QUERY");
+    expect(res.body.errors).toEqual([
+      {
+        path: "isolation",
+        message: expect.stringContaining("join 'same'"),
+        code: "ISOLATION_MISMATCH",
+        params: { requested: "read committed", open: null, join: "same" },
+      },
+    ]);
+    expect(formatMessage(MOOST_DB_MESSAGES.ISOLATION_MISMATCH, res.body.errors[0].params)).toBe(
+      'The open transaction does not satisfy isolation "read committed" — set the level on the outermost call',
+    );
+  });
+
+  it("ISOLATION_MISMATCH: the template is registered (served in $i18n), the entry translated by code", async () => {
+    const german = 'Isolation "{requested}" ist nicht erfüllt';
+    setTranslator({ en: {}, de: { ISOLATION_MISMATCH: german } });
+    try {
+      const de = { "accept-language": "de" };
+      const res = await send("GET", `/${prefix}/nested-tx`, undefined, de);
+      expect(res.body.errors[0].message).toBe('Isolation "read committed" ist nicht erfüllt');
+      const meta = await send("GET", `/${prefix}/meta`, undefined, de);
+      expect(meta.body.type.$i18n.ISOLATION_MISMATCH).toBe(german);
+    } finally {
+      setTranslator(undefined);
+    }
   });
 
   it("VERSION_MISMATCH { currentVersion } — `kind` kept", async () => {

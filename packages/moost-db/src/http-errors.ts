@@ -45,6 +45,10 @@ import type { TCapabilityVerdict } from "./meta/field-capabilities";
  * - `VERSION_MISMATCH` `{ currentVersion }` — the 409 of a stale `$cas` /
  *   `If-Match` write (the body keeps `kind: "version_mismatch"`);
  * - `ACTION_FORBIDDEN` `{ action }` — the 403 of a refused action;
+ * - `ISOLATION_MISMATCH` `{ requested, open, join }` — the entry of the 400
+ *   (`INVALID_QUERY`) a nested `withTransaction` throws when the open
+ *   transaction fails its `join` check (the template since 0.1.178; `open` is
+ *   `null` when there is no level to compare, so it names `{requested}` only);
  * - `INVALID_QUERY` — every other malformed request (bad query string,
  *   unsupported control or combination, unknown search index, …). Also the
  *   top-level code of the core's query errors, whose entries carry the
@@ -66,6 +70,8 @@ export const MOOST_DB_MESSAGES = {
   EXPECTED_OBJECT: "Expected an object",
   VERSION_MISMATCH: "The record was changed by someone else",
   ACTION_FORBIDDEN: 'Action "{action}" is not allowed',
+  ISOLATION_MISMATCH:
+    'The open transaction does not satisfy isolation "{requested}" — set the level on the outermost call',
   INVALID_QUERY: "Invalid query",
 } as const;
 
