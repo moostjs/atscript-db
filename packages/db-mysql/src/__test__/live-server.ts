@@ -64,3 +64,26 @@ export async function recreateMysqlDatabase(database: string): Promise<string> {
   await run(`CREATE DATABASE \`${database}\``);
   return mysqlDbUrl(database);
 }
+
+/**
+ * The column definitions mysql2 reads for `sql` on `database` (a fresh
+ * connection, no typeCast).
+ * @throws a redacted `Error`
+ */
+export async function mysqlFields(
+  database: string,
+  sql: string,
+): Promise<import("mysql2").FieldPacket[]> {
+  try {
+    const mysql = await import("mysql2/promise");
+    const conn = await mysql.createConnection({ uri: mysqlServer.dbUrl(database) });
+    try {
+      const [, fields] = await conn.query(sql);
+      return fields;
+    } finally {
+      await conn.end();
+    }
+  } catch (error) {
+    throw mysqlServer.error("MySQL metadata query failed", error);
+  }
+}

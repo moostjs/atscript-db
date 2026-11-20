@@ -30,8 +30,14 @@ export function sanitizeParams(params?: unknown[]): unknown[] {
  */
 function atscriptTypeCast(field: any, next: () => any): any {
   if (field.type === "JSON") {
-    // JSON arrives with the binary charset; its text is UTF-8.
-    return field.string("utf8");
+    // UTF-8 bytes: a table column reports charset 63, a view / expression
+    // column the connection's (utf8mb4 by default; a non-UTF-8 pool `charset`
+    // has the server transcode it, still decoded as UTF-8 — as before, and as
+    // mysql2's own JSON path does). Bytes, not `string()`: it warns
+    // "interpreted as BINARY" whenever the encoding asked for equals the
+    // reported one, which the typeCast field does not expose.
+    const bytes: Buffer | null = field.buffer();
+    return bytes === null ? null : bytes.toString("utf8");
   }
   if (field.type === "TIMESTAMP" || field.type === "DATETIME") {
     const str = field.string();
