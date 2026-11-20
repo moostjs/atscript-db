@@ -1,6 +1,6 @@
 import { DbError } from "@atscript/db";
 import type { HttpError } from "@moostjs/event-http";
-import { defineInterceptor, Intercept, TInterceptorPriority } from "moost";
+import { defineInterceptor, Intercept, TInterceptorPriority, useLogger } from "moost";
 
 import { errorEnvelope, validatorErrorToHttp } from "./http-errors";
 
@@ -48,6 +48,15 @@ export function dbErrorToHttp(error: DbError): HttpError {
     ...(code === undefined ? {} : { code }),
     ...(params === undefined ? {} : { params }),
   }));
+  // A nested `withTransaction` that fails its `join` check is a fault of the
+  // server's code (the outermost call opened the transaction at another level,
+  // or at none) — no request can fix it, although the core codes the error
+  // `INVALID_QUERY`. Answered 500 under the entry's code (since 0.1.179; 400
+  // `INVALID_QUERY` before).
+  const [first] = errors;
+  if (error.code === "INVALID_QUERY" && first?.code === "ISOLATION_MISMATCH") {
+    return errorEnvelope(500, error.message, errors, first.code, first.params);
+  }
   return errorEnvelope(dbErrorCodeToStatus[error.code] ?? 400, error.message, errors, error.code);
 }
 
@@ -56,7 +65,11 @@ function transformValidationError(error: unknown, reply: (response: unknown) => 
   if (validation) {
     reply(validation);
   } else if (error instanceof DbError) {
-    reply(dbErrorToHttp(error));
+    const http = dbErrorToHttp(error);
+    // A 500 is a fault of the server's code, and an `HttpError` reply is not
+    // logged by the HTTP layer — without this line it would leave no trace.
+    if (http.body.statusCode === 500) useLogger("moost-db").error(error.message, error);
+    reply(http);
   }
 }
 

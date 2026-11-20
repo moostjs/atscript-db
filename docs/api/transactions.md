@@ -252,7 +252,7 @@ Because `'same'` compares requested levels, it fails the same way on every adapt
 
 - **The outermost call is never refused.** There is nothing to join, so it opens the transaction at `isolation` exactly as without `join`.
 - **The comparison is always with the outermost call.** A call in between that joined under `'atLeast'` does not change the level a later `'same'` call is compared with.
-- **A mismatch throws `DbError("INVALID_QUERY")`** with one entry `{ path: "isolation", code: "ISOLATION_MISMATCH", params: { requested, open, join } }`. `open` is the level the rule compared (`'same'`: what the outermost call asked for; `'atLeast'`: the level the transaction runs at), or `null` when there is none. Since 0.1.177 the default `'atLeast'` failure carries the same entry code.
+- **A mismatch throws `DbError("INVALID_QUERY")`** with one entry `{ path: "isolation", code: "ISOLATION_MISMATCH", params: { requested, open, join } }`. `open` is the level the rule compared (`'same'`: what the outermost call asked for; `'atLeast'`: the level the transaction runs at), or `null` when there is none. Since 0.1.177 the default `'atLeast'` failure carries the same entry code. Inside a `moost-db` request the answer is HTTP 500 with `code: "ISOLATION_MISMATCH"` and a server log line (since 0.1.179; 400 `INVALID_QUERY` before), because the fault is in the server's code, not in the request.
 - **`join` without `isolation`**, or a value other than `'atLeast'` / `'same'`, throws `INVALID_QUERY` before any transaction opens.
 - **MongoDB** checks a nested call's level only with `join: 'same'`. With the default it joins without a check, because the snapshot satisfies both levels MongoDB accepts.
 

@@ -6,6 +6,12 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.179 {#v0-1-179}
+
+### Changes
+
+- **`moost-db`: a refused nested transaction level answers 500, not 400.** When a nested `withTransaction(fn, { isolation })` is refused inside a request (with the default `join` or with `join: 'same'`), the response is now `500` with `code: "ISOLATION_MISMATCH"` and `params: { requested, open, join }` on the body and on its entry, and the error is logged on the server. Before, it was `400` with `code: "INVALID_QUERY"` and no log line. The outermost call in your server code opened the transaction at a weaker level or without one, so no request can fix it. Monitoring that counts 5xx responses now sees it, and a client that branched on `INVALID_QUERY` for this case no longer matches. The `DbError` the core throws is unchanged (`INVALID_QUERY`, entry code `ISOLATION_MISMATCH`). See [Requiring the same level](/api/transactions#join).
+
 ## 0.1.177 {#v0-1-177}
 
 ### Features

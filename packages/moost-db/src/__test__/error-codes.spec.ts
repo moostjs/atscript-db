@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-extraneous-class -- decorated test containers */
-import { describe, it, expect, beforeAll } from "vite-plus/test";
+import { describe, it, expect, beforeAll, vi } from "vite-plus/test";
 import { createAdapter } from "@atscript/db-memory";
 import { Get } from "@moostjs/event-http";
 import { Inherit, formatMessage, getMoostInfact, setTranslator } from "moost";
@@ -138,34 +138,48 @@ describe("coded error envelopes", () => {
 
   // The core's entry code (since 0.1.177) has a template since 0.1.178. Its
   // `open` param is `null` here, so the template names `{requested}` only.
-  it("ISOLATION_MISMATCH { requested, open, join } — a nested withTransaction refused", async () => {
-    const res = await send("GET", `/${prefix}/nested-tx`);
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe("INVALID_QUERY");
-    expect(res.body.errors).toEqual([
-      {
-        path: "isolation",
-        message: expect.stringContaining("join 'same'"),
-        code: "ISOLATION_MISMATCH",
-        params: { requested: "read committed", open: null, join: "same" },
-      },
-    ]);
-    expect(formatMessage(MOOST_DB_MESSAGES.ISOLATION_MISMATCH, res.body.errors[0].params)).toBe(
-      'The open transaction does not satisfy isolation "read committed" — set the level on the outermost call',
-    );
+  // Since 0.1.179 the answer is 500 under that code (400 `INVALID_QUERY`
+  // before): the server's code opened the transaction at the wrong level — no
+  // request can fix it. The HTTP layer does not log an `HttpError` reply, so
+  // the interceptor logs it.
+  it("ISOLATION_MISMATCH { requested, open, join } — a nested withTransaction refused: 500, logged", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await send("GET", `/${prefix}/nested-tx`);
+      expectCoded(
+        res,
+        500,
+        "ISOLATION_MISMATCH",
+        { requested: "read committed", open: null, join: "same" },
+        "isolation",
+      );
+      expect(res.body.errors[0].message).toContain("join 'same'");
+      expect(formatMessage(MOOST_DB_MESSAGES.ISOLATION_MISMATCH, res.body.params)).toBe(
+        'The open transaction does not satisfy isolation "read committed" — set the level on the outermost call',
+      );
+      expect(logged).toHaveBeenCalledTimes(1);
+      expect(logged.mock.calls[0][0]).toContain("moost-db");
+      expect(logged.mock.calls[0][0]).toContain("join 'same'");
+    } finally {
+      logged.mockRestore();
+    }
   });
 
-  it("ISOLATION_MISMATCH: the template is registered (served in $i18n), the entry translated by code", async () => {
+  it("ISOLATION_MISMATCH: the template is registered (served in $i18n), the entry and the top message translated by code", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const german = 'Isolation "{requested}" ist nicht erfüllt';
     setTranslator({ en: {}, de: { ISOLATION_MISMATCH: german } });
     try {
       const de = { "accept-language": "de" };
       const res = await send("GET", `/${prefix}/nested-tx`, undefined, de);
       expect(res.body.errors[0].message).toBe('Isolation "read committed" ist nicht erfüllt');
+      // the top message is translated by the same code, with the same params
+      expect(res.body.message).toBe('Isolation "read committed" ist nicht erfüllt');
       const meta = await send("GET", `/${prefix}/meta`, undefined, de);
       expect(meta.body.type.$i18n.ISOLATION_MISMATCH).toBe(german);
     } finally {
       setTranslator(undefined);
+      logged.mockRestore();
     }
   });
 
