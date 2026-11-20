@@ -247,7 +247,7 @@ The `state` value you return from `_beginTransaction` is passed to commit and ro
 
 Transaction context is tracked via `AsyncLocalStorage` — nested `withTransaction()` calls within the same async chain automatically reuse the existing transaction. Inside any method, call `this._getTransactionState()` to retrieve the current transaction state.
 
-Map your engine's contention errors to the retryable `DbError` codes on every statement and in `_commitTransaction`, since a serialization failure or a deadlock can surface at `COMMIT` too: a deadlock victim as `DEADLOCK`, a lock not granted in time as `LOCK_TIMEOUT`, a transaction that could not be serialized as `SERIALIZATION_FAILURE`. Keep the driver error as `cause` (`new DbError(code, [{ path: "", message }], undefined, { cause: error })`, since 0.1.175). Callers retry on `retryable`; see [Retrying](/api/transactions#retrying). A `COMMIT` that fails on the client (a timeout, a lost socket) leaves the transaction in an unknown state: discard that connection instead of returning it to a pool.
+Map your engine's contention errors to the retryable `DbError` codes on every statement and in `_commitTransaction`, since a serialization failure or a deadlock can surface at `COMMIT` too: a deadlock victim as `DEADLOCK`, a lock not granted in time as `LOCK_TIMEOUT`, a transaction that could not be serialized as `SERIALIZATION_FAILURE`. Keep the driver error as `cause` (`new DbError(code, [{ path: "", message }], undefined, { cause: error })`, since 0.1.175). Callers retry on `retryable`; see [Retrying](/api/transactions#retrying). A `COMMIT` that fails on the client (a timeout, a lost socket) leaves the transaction in an unknown state: discard that connection instead of returning it to a pool. Since 0.1.177 the bundled SQLite adapter follows the same contract for `SQLITE_BUSY`, at `BEGIN IMMEDIATE` and in schema statements too.
 
 Since 0.1.151 a single-row write that is one statement — one row, no `guard` / `check`, no nested navigation data, and foreign keys enforced by the database (or none) — calls your adapter **outside** any transaction: `insertMany([row])`, `replaceOne`, `updateOne` / `nativePatch` (or `count` for an empty patch). A batch, a guarded or checked write, a nested write, an array-operator read-modify-write and an application-level FK check still run inside `withTransaction`. If your `insertMany` opens its own transaction, a one-row call reached this way can skip it when that row is a single atomic statement.
 
@@ -256,11 +256,29 @@ Since 0.1.151 a single-row write that is one statement — one row, no `guard` /
 These two capabilities default to off, so a third-party adapter fails closed:
 
 - **`supportsReadLocks()`** defaults to `false`, and a [locking read](/api/transactions#locking-reads) throws `LOCK_NOT_SUPPORTED`. Return `true` to receive the lock on `DbQuery.lock` (`{ mode: 'update' | 'share', wait: 'block' | 'nowait' | 'skipLocked' }`) in `findOne` / `findMany`. The core sets it only on a table read inside your owner's `withTransaction` scope. A SQL adapter can append `readLockSql(query.lock)` from `@atscript/db-sql-tools`, or pass the lock as `buildSelect`'s last argument. An engine whose transactions already serialise writers may return `true` and ignore the lock. Map the engine's NOWAIT / lock-timeout / deadlock errors on the **read** path to `LOCK_TIMEOUT` / `DEADLOCK`.
-- **`isolationLevels()`** defaults to empty, and `withTransaction(fn, { isolation })` throws `ISOLATION_NOT_SUPPORTED`. Return the levels you support (`ALL_ISOLATION_LEVELS` for all three), then apply `opts.isolation` in `_beginTransaction(opts)`. The core validates the level before it calls you. If every transaction already runs at a fixed level (SQLite: serializable), override `_inherentIsolation()` so nested requests join.
+- **`isolationLevels()`** defaults to empty, and `withTransaction(fn, { isolation })` throws `ISOLATION_NOT_SUPPORTED`. Return the levels you support (`ALL_ISOLATION_LEVELS` for all three), then apply `opts.isolation` in `_beginTransaction(opts)`. The core validates the level before it calls you. If every transaction already runs at a fixed level (SQLite: serializable), override `_inherentIsolation()` so nested requests join under the default `join: 'atLeast'`. A nested [`join: 'same'`](/api/transactions#join) ignores the inherent level and compares the level the outermost call asked for (since 0.1.177).
 
 ### Advanced: Custom Transaction Flow
 
-If your database has a specialized transaction API (e.g., MongoDB's `session.withTransaction()`), override `withTransaction()` directly and use `_runInTransactionContext(state, fn)` to set up the shared context. This ensures that nested adapters within the same async chain see the same transaction state. If a context already exists (nesting), it is reused.
+If your database has a specialized transaction API (e.g., MongoDB's `session.withTransaction()`), override `withTransaction()` directly and use `_runInTransactionContext(state, fn, isolation)` to set up the shared context. This ensures that nested adapters within the same async chain see the same transaction state. If a context already exists (nesting), it is reused.
+
+Since 0.1.177 an override keeps `isolation` and `join` working with three calls:
+
+```typescript
+override async withTransaction<T>(fn: () => Promise<T>, opts?: TTransactionOptions): Promise<T> {
+  // 1. validate: unknown level or `join`, `join` without `isolation`, a level isolationLevels() lacks
+  const isolation = this._checkIsolation(opts)
+  if (this._getTransactionState() !== undefined) {
+    // 2. nested: apply the `join` rule to the open transaction (INVALID_QUERY, ISOLATION_MISMATCH)
+    this._checkJoin(isolation, opts?.join)
+    return fn()
+  }
+  // 3. outermost: open the transaction with your engine's API, record the requested level
+  return this.client.transaction((session) => this._runInTransactionContext(session, fn, isolation))
+}
+```
+
+`_checkJoin(requested, join)` does nothing when no level is requested or no transaction of this adapter is open. The third argument of `_runInTransactionContext` is the level the outermost call asked for, which a nested `join: 'same'` compares with. The `'atLeast'` check uses `_inherentIsolation() ?? isolation`, as the built-in `withTransaction` does. Without that argument, a nested call that names a level always fails `'same'`, and fails `'atLeast'` unless your adapter has an inherent level. Before 0.1.177 a context opened here recorded no level, so even an adapter with an inherent level refused nested `{ isolation }` requests.
 
 ## Adapter Hooks
 
@@ -657,6 +675,8 @@ The helper:
 
 You can override the prefix via the `prefix` option (defaults to `'atscript__'`).
 
+A failing `createIndex` / `dropIndex`, such as a unique index over duplicate rows, does not stop the rest. The helper collects the failures and throws them together after the pass, and schema sync reports them on the table's entry. A retryable `DbError` (`DEADLOCK`, `LOCK_TIMEOUT`, `SERIALIZATION_FAILURE`) is the exception: since 0.1.177 the helper rethrows it at once, as it is, because the remaining indexes would meet the same lock. Map your engine's contention errors inside `createIndex` / `dropIndex` like any statement ([Transaction Support](#transaction-support)), or the helper collects them as ordinary failures. `createFailureCollector(what)` from `@atscript/db` is the same collector for batches of your own: run each operation through `attempt(label, op)`, then call `throwIfAny()`.
+
 Since 0.1.162 the helper returns the changes it made as `TIndexChange[]` (`{ name, action: 'add' | 'drop' | 'rebuild' }`). With `dryRun: true` it computes the changes and issues no DDL. `syncIndexes()` reports the work on the run entry and `planIndexes()` on the plan entry, both marked `alter`. An adapter that overrides `syncIndexes()` itself, as before 0.1.162, still works: it plans no index work, and a `syncIndexes()` that returns `void` reports none.
 
 Two more options keep a converged schema free of false index work:
@@ -666,7 +686,7 @@ Two more options keep a converged schema free of false index work:
 
 `renderDesiredDefinition(index)` (since 0.1.168) compares what a column list does not show. Return the part of the definition you care about, rendered the way `listExisting` reports it in an entry's `definition` (for example the text search configuration of a fulltext index); when both are defined and differ, the helper drops and recreates the index. Return `undefined` to skip the comparison.
 
-Any artifacts you sync outside the helper, such as FTS shadow tables, should be added to the returned list. `createChangeRecorder(dryRun, attempt?)` (from `@atscript/db`) records such changes: its `apply(change, label, op)` runs `op` unless `dryRun` is set, then records `change`.
+Any artifacts you sync outside the helper, such as FTS shadow tables, should be added to the returned list. `createChangeRecorder(dryRun, attempt?)` (from `@atscript/db`) records such changes: its `apply(change, label, op)` runs `op` unless `dryRun` is set, then records `change`. Given a collector's `attempt`, a failed `op` is collected and its change not recorded. A retryable `DbError` is rethrown instead (since 0.1.177).
 
 ### Foreign key sync helper
 

@@ -64,6 +64,43 @@ The inner level is checked exactly like a standalone grouped query — field vis
 
 `$from` anywhere but an aggregate query — `findMany`, `count`, `/pages`, a `$with` relation, a [query target](/http/query-targets) — is rejected, never ignored. An adapter without two-level aggregates answers `AGG_NESTED_NOT_SUPPORTED` (HTTP 400); [`/meta.nestedAggregates`](/http/crud#get-meta) says whether an endpoint takes them.
 
+## Types {#types}
+
+`table.aggregate()` and `view.aggregate()` accept the two-level query as it is written above, with no cast (since 0.1.177). Before, the parameter was typed `AggregateQuery`, which rejects `$from`, so a server-side call needed a cast even though the runtime ran the query (since 0.1.168). The parameter is `AggregateQuery | NestedAggregateQuery`, and rows are `Record<string, unknown>` for both shapes.
+
+The two-level types are exported by `@atscript/db` and `@atscript/db/agg`, so you need no import from the query-language package:
+
+```typescript
+import type { AggregateStage, NestedAggregateQuery } from "@atscript/db";
+
+const perCustomer = {
+  $groupBy: ["region", "customerId"],
+  $select: [{ $fn: "sum", $field: "amount", $as: "spent" }],
+} satisfies AggregateStage;
+
+const query: NestedAggregateQuery = {
+  filter: { status: "paid" },
+  controls: {
+    $from: perCustomer,
+    $groupBy: ["region"],
+    $select: ["region", { $fn: "avg", $field: "spent", $as: "avgSpent" }],
+  },
+};
+
+const rows = await orders.aggregate(query);
+```
+
+| Export                    | What it types                                                                                                        |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `NestedAggregateQuery`    | The whole two-level query: `filter` plus `NestedAggregateControls`                                                   |
+| `NestedAggregateControls` | The outer level, with `$from`. Its `$groupBy` is optional                                                            |
+| `AggregateStage`          | The inner level (`$from`)                                                                                            |
+| `ValidNested`             | A check type that turns an outer name that is not an inner column into a compile error, for your own typed signature |
+| `NestedAggregateResult`   | The row type of a two-level query, from the inner columns                                                            |
+| `StageRow`                | The row type of the inner level: its inner columns                                                                   |
+
+The [HTTP client](/http/client#aggregate) types its own `aggregate()` with `ValidNested` and `NestedAggregateResult`.
+
 ## DOs and DON'Ts
 
 - **Do** group the inner level by the entity you want counted or summed once (`customerId`, `orderId`), then summarize at the outer level.

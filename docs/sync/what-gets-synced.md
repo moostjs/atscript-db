@@ -251,6 +251,12 @@ does not throw: the table's entry reports `status: 'error'`, the data is left
 untouched, and the schema hash is **not** persisted — so the next sync run
 retries automatically. Clean up the conflicting data and re-run.
 
+One failing index does not stop the table's other index changes. Contention is the
+exception (since 0.1.177): a lock timeout, deadlock or serialization failure
+(another connection holding a lock) ends the table's index pass at once. The entry
+then reports that retryable error instead of one failure per remaining index, and
+the next run retries.
+
 Two annotation-driven special cases participate in the schema hash like any
 other change:
 

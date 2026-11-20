@@ -74,7 +74,7 @@ await adapter.withTransaction(async () => {
 });
 ```
 
-This means library code can safely call `withTransaction()` without worrying about whether the caller has already started one. If a transaction is active, the inner call joins it; otherwise, a new one begins.
+This means library code can safely call `withTransaction()` without worrying about whether the caller has already started one. If a transaction is active, the inner call joins it; otherwise, a new one begins. A nested call that passes `isolation` checks the level of the transaction it joins; `join: 'same'` makes that check exact. See [Isolation level](#isolation).
 
 ## Deep Operations Are Transactional
 
@@ -114,7 +114,7 @@ Since 0.1.153, when MySQL or PostgreSQL picks your transaction as a **deadlock**
 Since 0.1.175 the same codes cover every statement and `COMMIT`, not only writes:
 
 - **PostgreSQL / MySQL:** a plain read (a `SERIALIZABLE` read that cannot be serialized, for example) and a `COMMIT` that fails on a deadlock or serialization failure throw the retryable `DbError` too.
-- **SQLite:** a `COMMIT` that fails with `SQLITE_BUSY` (another process holds the database lock past `busy_timeout`) throws `LOCK_TIMEOUT`.
+- **SQLite:** `SQLITE_BUSY` (another connection holds the database lock past `busy_timeout`, including extended codes such as `SQLITE_BUSY_SNAPSHOT`) throws `LOCK_TIMEOUT`. Since 0.1.177 this applies at `BEGIN IMMEDIATE`, on every read and write inside or outside a transaction, in schema operations and at `COMMIT`. In 0.1.175 and 0.1.176 it applied only at `COMMIT`. A busy `BEGIN IMMEDIATE` opens nothing and does not run the callback. See [SQLite concurrency](/adapters/sqlite#concurrency-and-transactions).
 - **MongoDB:** a transaction that still fails after the driver's own retries of a transient error (`TransientTransactionError`, `UnknownTransactionCommitResult`, a write conflict) throws `SERIALIZATION_FAILURE`.
 
 The driver's error is kept as the `DbError`'s `cause`. Branch on `retryable` or the `DbError` code, never on the driver's code (`40001`, `ER_LOCK_DEADLOCK`). The database has already rolled the transaction back (a MySQL lock wait timeout fails only the statement, but `withTransaction` rolls the rest back as the error propagates), so retry the **whole** callback, not the failed statement:
@@ -208,19 +208,53 @@ await adapter.withTransaction(
 ```
 
 - **It means "at least this level".** An engine that always runs stricter satisfies every level.
-- **Set it on the outermost call.** A nested `withTransaction` joins the open transaction. It may name a level only when that transaction was opened at the same or a stricter one; otherwise it throws `INVALID_QUERY`, because a running transaction's level cannot change.
+- **Set it on the outermost call.** A nested `withTransaction` joins the open transaction. By default it may name a level only when that transaction runs at the same or a stricter one; otherwise it throws `INVALID_QUERY`, because a running transaction's level cannot change. [`join: 'same'`](#join) requires the exact level instead.
 - **Expect retries at the stricter levels.** PostgreSQL `repeatable read` / `serializable` transactions can fail with `SERIALIZATION_FAILURE`, so [retry the whole callback](#retrying).
 - **Without it** you get the engine default: READ COMMITTED on PostgreSQL, REPEATABLE READ on MySQL.
 
-| Adapter    | `isolation`                                                                                                                                                                                                                                              |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| PostgreSQL | `BEGIN ISOLATION LEVEL …`                                                                                                                                                                                                                                |
-| MySQL      | `SET TRANSACTION ISOLATION LEVEL …` on the transaction's connection, right before `START TRANSACTION`                                                                                                                                                    |
-| SQLite     | Every level is satisfied: `BEGIN IMMEDIATE` transactions are serializable                                                                                                                                                                                |
-| MongoDB    | `'read committed'` / `'repeatable read'` are satisfied by the transaction's snapshot. `'serializable'` throws `ISOLATION_NOT_SUPPORTED` (snapshot isolation allows write skew), and so does any level on a standalone server, which has no transactions. |
-| Memory     | Accepted and ignored                                                                                                                                                                                                                                     |
+| Adapter    | `isolation`                                                                                                                                                                                                                                                                                                      |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PostgreSQL | `BEGIN ISOLATION LEVEL …`                                                                                                                                                                                                                                                                                        |
+| MySQL      | `SET TRANSACTION ISOLATION LEVEL …` on the transaction's connection, right before `START TRANSACTION`                                                                                                                                                                                                            |
+| SQLite     | Every level is satisfied: `BEGIN IMMEDIATE` transactions are serializable. `join: 'same'` is still checked against the requested level                                                                                                                                                                           |
+| MongoDB    | `'read committed'` / `'repeatable read'` are satisfied by the transaction's snapshot. `'serializable'` throws `ISOLATION_NOT_SUPPORTED` (snapshot isolation allows write skew), and so does any level on a standalone server, which has no transactions. A nested call checks its level only with `join: 'same'` |
+| Memory     | Accepted and ignored. `join: 'same'` is still checked against the requested level                                                                                                                                                                                                                                |
 
-In a `moost-db` controller, `this.withTransaction(fn, { isolation })` forwards the option.
+In a `moost-db` controller, `this.withTransaction(fn, { isolation, join })` forwards both options.
+
+### Requiring the same level: `join` {#join}
+
+`join` (since 0.1.177) sets how a **nested** call checks the transaction it joins. It requires `isolation`.
+
+| `join`                | A nested call joins when …                                                                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'atLeast'` (default) | the open transaction runs at `isolation` or a stricter level. An adapter that always runs stricter satisfies every request (SQLite and memory: serializable). |
+| `'same'`              | the outermost call **asked for** exactly `isolation`. The level the engine actually runs at does not count.                                                   |
+
+Use `'same'` in code that is correct at one level only and must not join a transaction opened at another level or without one:
+
+```typescript
+async function settleOrders() {
+  await adapter.withTransaction(
+    async () => {
+      // reads and writes written for read committed semantics
+    },
+    { isolation: "read committed", join: "same" },
+  );
+}
+
+await settleOrders(); // outermost: opens the transaction at read committed
+await adapter.withTransaction(settleOrders, { isolation: "read committed" }); // joins
+await adapter.withTransaction(settleOrders); // throws INVALID_QUERY (ISOLATION_MISMATCH), on SQLite too
+```
+
+Because `'same'` compares requested levels, it fails the same way on every adapter. A test suite on SQLite or the memory adapter therefore catches a caller that opens the transaction at the wrong level or without one. On PostgreSQL or MySQL that caller would run your code at the wrong level. With the default `'atLeast'`, SQLite's serializable transactions accept every nested request.
+
+- **The outermost call is never refused.** There is nothing to join, so it opens the transaction at `isolation` exactly as without `join`.
+- **The comparison is always with the outermost call.** A call in between that joined under `'atLeast'` does not change the level a later `'same'` call is compared with.
+- **A mismatch throws `DbError("INVALID_QUERY")`** with one entry `{ path: "isolation", code: "ISOLATION_MISMATCH", params: { requested, open, join } }`. `open` is the level the rule compared (`'same'`: what the outermost call asked for; `'atLeast'`: the level the transaction runs at), or `null` when there is none. Since 0.1.177 the default `'atLeast'` failure carries the same entry code.
+- **`join` without `isolation`**, or a value other than `'atLeast'` / `'same'`, throws `INVALID_QUERY` before any transaction opens.
+- **MongoDB** checks a nested call's level only with `join: 'same'`. With the default it joins without a check, because the snapshot satisfies both levels MongoDB accepts.
 
 ## Adapter Behavior
 

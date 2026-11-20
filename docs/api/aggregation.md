@@ -28,11 +28,11 @@ The same query over HTTP is `GET /orders/query?status=paid&$groupBy=region&$sele
 
 ## The query
 
-`aggregate()` takes an `AggregateQuery` — a `filter` plus required `controls`:
+`aggregate()` takes an `AggregateQuery` — a `filter` plus required `controls`. A query with `$from` is a `NestedAggregateQuery`, which the parameter type accepts since 0.1.177 ([Two-level aggregates — Types](./two-level-aggregates#types)):
 
 | Control             | Meaning                                                                                                                                                                                                                                                        |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `$groupBy`          | Field paths to group by, or the alias of a [calendar bucket](./calendar-buckets) declared in `$select`. `[]` (or no `$groupBy`) is the [ungrouped query](#ungrouped): one row over the filtered set.                                                           |
+| `$groupBy`          | Field paths to group by, or the alias of a [calendar bucket](./calendar-buckets) declared in `$select`. `[]` is the [ungrouped query](#ungrouped): one row over the filtered set. Required in TypeScript.                                                      |
 | `$select`           | What each result row carries: plain fields (each must also appear in `$groupBy`), aggregate entries `{ $fn, $field, $as? }`, [expression entries](#arithmetic-expressions) `{ $expr, $as }` / `{ $fn, $expr, $as }`, calendar-bucket entries `{ $bucket, … }`. |
 | `$rowOrder`         | The order of the rows **inside each group** that [`first` / `last`](#representative-row-first-last) read (since 0.1.148). Same shape as `$sort`. Required with `first` / `last`, rejected without them.                                                        |
 | `$having`           | A filter on the groups — its keys must be aggregate aliases, bucket aliases or `$groupBy` fields.                                                                                                                                                              |
@@ -251,7 +251,23 @@ URL: `fn(field|<filter>):alias` — `sum(amount|status=paid):revenue`, `count(*|
 
 ## Ungrouped queries {#ungrouped}
 
-An ungrouped query (`$groupBy: []`, or no `$groupBy` at all — over HTTP an aggregate `$select` without `$groupBy`, [since 0.1.155](/http/advanced#ungrouped)) is one group on every adapter, so over no matching row it returns **one row**: counts `0`, every other aggregate, `first` / `last` and the expressions over them `null`. With `$count: true` such a query answers `{ count: 1 }` (the one aggregated row), or `{ count: 0 }` when a `$having` filters it out — the number of rows the data query returns.
+An ungrouped query (`$groupBy: []`) is one group on every adapter, so over no matching row it returns **one row**: counts `0`, every other aggregate, `first` / `last` and the expressions over them `null`. With `$count: true` such a query answers `{ count: 1 }` (the one aggregated row), or `{ count: 0 }` when a `$having` filters it out — the number of rows the data query returns.
+
+In TypeScript, write `$groupBy: []`: the `AggregateQuery` controls type requires the key. Over HTTP (an aggregate `$select` without `$groupBy`, [since 0.1.155](/http/advanced#ungrouped)) and from plain JavaScript the key may be left out, and `aggregate()` reads a missing `$groupBy` as `[]`. The outer level of a [two-level aggregate](./two-level-aggregates) is the exception: its `$groupBy` is optional in TypeScript too.
+
+```typescript
+const [totals] = await orders.aggregate({
+  filter: { status: "paid" },
+  controls: {
+    $groupBy: [],
+    $select: [
+      { $fn: "sum", $field: "amount", $as: "revenue" },
+      { $fn: "count", $field: "*", $as: "orders" },
+    ],
+  },
+});
+// over no matching row: { revenue: null, orders: 0 }
+```
 
 ## Result rows
 

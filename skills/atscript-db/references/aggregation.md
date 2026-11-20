@@ -1,6 +1,6 @@
 # aggregation (grouped queries — `table.aggregate()`, `$groupBy`)
 
-`table.aggregate(q)` is a **distinct method** from `findMany` — it takes an `AggregateQuery` (`filter?`, **required** `controls`). Only `aggregate()` interprets `$groupBy`; route every grouped read through it. HTTP: `GET /query?$groupBy=…`; an aggregate `$select` WITHOUT `$groupBy` (`/query?$select=sum(amount):total,count(*):n`) = the ungrouped query, one row (0.1.155; ≤ 0.1.154 a 400) — URL form in [http-query-syntax.md](http-query-syntax.md). Group by hour/day/week/month → [calendar-buckets.md](calendar-buckets.md).
+`table.aggregate(q)` is a **distinct method** from `findMany` — it takes an `AggregateQuery` (`filter?`, **required** `controls`) or, with `controls.$from`, a `NestedAggregateQuery` (parameter = the union since 0.1.177 — no cast; rows `Record<string, unknown>` for both). Only `aggregate()` interprets `$groupBy`; route every grouped read through it. HTTP: `GET /query?$groupBy=…`; an aggregate `$select` WITHOUT `$groupBy` (`/query?$select=sum(amount):total,count(*):n`) = the ungrouped query, one row (0.1.155; ≤ 0.1.154 a 400) — URL form in [http-query-syntax.md](http-query-syntax.md). Group by hour/day/week/month → [calendar-buckets.md](calendar-buckets.md).
 
 ## Quick start
 
@@ -23,19 +23,19 @@ await orders.aggregate({
 
 ## Controls
 
-| Control             | Rule                                                                                                                                                                                          |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `$groupBy`          | `string[]`: field paths or bucket aliases from `$select`. `[]` or omitted = ungrouped (one group).                                                                                            |
-| `$select`           | Plain fields (each also in `$groupBy`), `{ $fn, $field, $as? }` aggregates, `{ $fn, $expr, $as }` / `{ $expr, $as }` expressions (0.1.148), `{ $bucket, $field, … }` buckets. Always pass it. |
-| `$rowOrder`         | `{ field: 1 \| -1 }` — order of the rows INSIDE each group for `first` / `last` (0.1.148). Required with them, rejected without.                                                              |
-| `$having`           | Keys = aggregate aliases, bucket aliases or `$groupBy` fields ONLY.                                                                                                                           |
-| `$sort`             | Grouped field or alias. No implicit order.                                                                                                                                                    |
-| `$skip` / `$limit`  | Page over groups.                                                                                                                                                                             |
-| `$count`            | `[{ count: N }]` = groups surviving `$having` (since 0.1.129).                                                                                                                                |
-| `$search`, `$index` | Not declared on the type (ride the `$`-key pass-through) — text search applied BEFORE grouping (since 0.1.130), see below.                                                                    |
-| `$from`             | Inner grouped query whose rows this one aggregates — two-level aggregate (0.1.168), see below.                                                                                                |
-| `$with`             | Not allowed (HTTP 400; `aggregate()` rejects a non-empty one since 0.1.168).                                                                                                                  |
-| anything else       | `INVALID_QUERY` / 400 `Unknown aggregate control "$x"` (0.1.168; before: silently ignored → wrong numbers). `$actions` on HTTP `/query` is tolerated and ignored.                             |
+| Control             | Rule                                                                                                                                                                                                                                                                    |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `$groupBy`          | `string[]`: field paths or bucket aliases from `$select`. `[]` = ungrouped (one group). TS: REQUIRED on `AggregateControls` → write `$groupBy: []`; omitting it works only untyped (HTTP, plain JS — read as `[]`). A two-level OUTER `$groupBy` is optional in TS too. |
+| `$select`           | Plain fields (each also in `$groupBy`), `{ $fn, $field, $as? }` aggregates, `{ $fn, $expr, $as }` / `{ $expr, $as }` expressions (0.1.148), `{ $bucket, $field, … }` buckets. Always pass it.                                                                           |
+| `$rowOrder`         | `{ field: 1 \| -1 }` — order of the rows INSIDE each group for `first` / `last` (0.1.148). Required with them, rejected without.                                                                                                                                        |
+| `$having`           | Keys = aggregate aliases, bucket aliases or `$groupBy` fields ONLY.                                                                                                                                                                                                     |
+| `$sort`             | Grouped field or alias. No implicit order.                                                                                                                                                                                                                              |
+| `$skip` / `$limit`  | Page over groups.                                                                                                                                                                                                                                                       |
+| `$count`            | `[{ count: N }]` = groups surviving `$having` (since 0.1.129).                                                                                                                                                                                                          |
+| `$search`, `$index` | Not declared on the type (ride the `$`-key pass-through) — text search applied BEFORE grouping (since 0.1.130), see below.                                                                                                                                              |
+| `$from`             | Inner grouped query whose rows this one aggregates — two-level aggregate (0.1.168), see below.                                                                                                                                                                          |
+| `$with`             | Not allowed (HTTP 400; `aggregate()` rejects a non-empty one since 0.1.168).                                                                                                                                                                                            |
+| anything else       | `INVALID_QUERY` / 400 `Unknown aggregate control "$x"` (0.1.168; before: silently ignored → wrong numbers). `$actions` on HTTP `/query` is tolerated and ignored.                                                                                                       |
 
 ## Invariants
 
@@ -123,6 +123,7 @@ await orders.aggregate({
 | 21  | `$from` = inner level: `$groupBy` (required, non-empty), `$select`, `$having`, `$rowOrder`, `$nulls` ONLY; the query `filter` / `$search` feed it. Root = outer level: reads INNER COLUMNS only (inner `$groupBy` keys + inner aliases) — a table field that is not one → `AGG_NESTED_UNKNOWN_COLUMN`. Outer `$having`/`$sort` name outer result columns. Outer may group by an inner alias and bucket an inner timestamp column (timestamp key or `min`/`max`/`first`/`last` of one); strict mode does not apply to it. No outer `$groupBy` = one row. Depth 2; no `$with`.                                                                                                                                                                                                                                                                                                                                                                   |
 | 22  | Inner level is validated like a standalone grouped query FIRST (visibility, writeOnly, encryption, strict), then the level rules (codes `AGG_NESTED_DEPTH` / `_CONTROL` / `_UNGROUPED` / `_DUPLICATE_COLUMN` / `_UNKNOWN_COLUMN` / `_NOT_NUMERIC` on the error entries). `$from` on `findMany`/`count`/`/pages`/`$with`/query targets/value-help → rejected. Flag `supportsNestedAggregates()` else `AGG_NESTED_NOT_SUPPORTED`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | 23  | All three run on every bundled adapter; `/meta`: `distinctFieldLists`, `conditionalAggregates`, `nestedAggregates`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| 24  | Typing (0.1.177): `table.aggregate()` / `view.aggregate()` accept `AggregateQuery \| NestedAggregateQuery` → a `$from` literal compiles as is; DELETE old `as never` / `as any` casts. `Parameters<AtscriptDbTable["aggregate"]>[0]` is now the union; mocks/stand-ins of `aggregate` should take the union. Server rows untyped; for typed rows write your own signature with `ValidNested` + `NestedAggregateResult` (as db-client does). Import nested types from `@atscript/db` / `@atscript/db/agg`, not `@uniqu/core`.                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 Full rules: [docs → Two-Level Aggregates](https://db.atscript.dev/api/two-level-aggregates), [Conditional aggregates](https://db.atscript.dev/api/aggregation#conditional-aggregates).
 
@@ -140,7 +141,14 @@ Search narrows the ROWS, `$groupBy` shapes what is left — the adapter applies 
 import type { AggregateQuery, AggregateExpr, AggregateResult } from "@atscript/db/agg";
 import { resolveAlias, isAggregateExpr, isBucketExpr, assertAggregateFn } from "@atscript/db/agg";
 import { evaluateExpr, aggregateColumns } from "@atscript/db"; // adapter authors: expression evaluator, an aggregate's columns
-import type { NestedAggregateQuery, NestedAggregateResult, ValidNested } from "@uniqu/core"; // two-level typing
+import type {
+  NestedAggregateQuery,
+  NestedAggregateControls,
+  AggregateStage,
+  NestedAggregateResult,
+  StageRow,
+  ValidNested,
+} from "@atscript/db/agg"; // two-level typing — also from "@atscript/db" (0.1.177)
 ```
 
 ## References
