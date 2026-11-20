@@ -232,18 +232,17 @@ function applyUpsert(
         result.push(item);
       }
     } else {
-      // Object: find by key, merge/replace or append
+      // Object: merge into / replace every element of that key, in place —
+      // or append when none has it
       const itemObj = item as Record<string, unknown>;
-      const idx = result.findIndex((el) =>
-        matchByKeys(el as Record<string, unknown>, itemObj, keyProps),
-      );
-      if (idx >= 0) {
-        result[idx] = mergeStrategy
-          ? { ...(result[idx] as Record<string, unknown>), ...itemObj }
-          : itemObj;
-      } else {
-        result.push(item);
+      let found = false;
+      for (let i = 0; i < result.length; i++) {
+        const elObj = result[i] as Record<string, unknown>;
+        if (!matchByKeys(elObj, itemObj, keyProps)) continue;
+        found = true;
+        result[i] = mergeStrategy ? { ...elObj, ...itemObj } : itemObj;
       }
+      if (!found) result.push(item);
     }
   }
   return result;
@@ -255,11 +254,14 @@ function applyInsert(
   keyProps: Set<string>,
   uniqueItems: boolean,
 ): unknown[] {
-  if (!uniqueItems) {
+  // A plain array without `uniqueItems` takes every item
+  if (!uniqueItems && keyProps.size === 0) {
     return [...arr, ...items];
   }
 
-  // Deduplicate: only add items not already present
+  // An item whose key is already there is skipped — two elements with one key
+  // are never meant (since 0.1.180; before, only under `uniqueItems`). Under
+  // `uniqueItems` without key props an item equal to a stored one is skipped.
   const result = [...arr];
   for (const item of items) {
     const exists =

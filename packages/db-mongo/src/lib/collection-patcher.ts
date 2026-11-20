@@ -329,9 +329,43 @@ export class CollectionPatcher {
   }
 
   /**
-   * `$insert`
-   * - plain append      → $concatArrays
-   * - unique / keyed    → delegate to _upsert (insert-or-update)
+   * `cond` whether an element of `$$value` (the array being built inside a
+   * `$reduce`) has the key(s) of `$$this` (the current item).
+   */
+  private _keyStored(keys: string[]): Document {
+    return {
+      $anyElementTrue: {
+        $map: { input: "$$value", as: "el", in: this._keysEqual(keys, "$$el", "$$this") },
+      },
+    };
+  }
+
+  /**
+   * Items applied one after another: each is appended to the array built so
+   * far unless `stored` holds for it — then `whenStored` (default: the
+   * array as it is) is the result.
+   */
+  private _appendUnless(
+    key: string,
+    input: any[],
+    stored: Document,
+    whenStored: unknown = "$$value",
+  ): void {
+    this._set(key, {
+      $reduce: {
+        input: literal(input),
+        initialValue: { $ifNull: [`$${key}`, []] },
+        in: { $cond: [stored, whenStored, { $concatArrays: ["$$value", ["$$this"]] }] },
+      },
+    });
+  }
+
+  /**
+   * `$insert` — what the read-modify-write of the other adapters does (since
+   * 0.1.180; before, a keyed or unique insert was an upsert / a set union):
+   * - keyed  → append, skipping an item whose key is already stored
+   * - unique → append, skipping an item equal to a stored one
+   * - else   → append every item
    */
   private _insert(
     key: string,
@@ -343,12 +377,11 @@ export class CollectionPatcher {
       return;
     }
 
-    const uniqueItems = flatType.metadata?.has("expect.array.uniqueItems");
-
-    if (uniqueItems || keys.length > 0) {
-      this._upsert(key, input, keys, flatType);
+    if (keys.length > 0) {
+      this._appendUnless(key, input, this._keyStored(keys));
+    } else if (flatType.metadata?.has("expect.array.uniqueItems")) {
+      this._appendUnless(key, input, { $in: ["$$this", "$$value"] });
     } else {
-      // classic `$push ... $each`  →  $concatArrays
       this._set(key, {
         $concatArrays: [{ $ifNull: [`$${key}`, []] }, literal(input)],
       });
@@ -356,9 +389,12 @@ export class CollectionPatcher {
   }
 
   /**
-   * `$upsert`
-   * - keyed  → remove existing matching by key(s) then append candidate
-   * - unique → $setUnion (deep equality)
+   * `$upsert` — as on the other adapters (since 0.1.180; before, a keyed
+   * upsert moved the element to the end and a key-less one was a set union,
+   * which also dropped duplicates already stored):
+   * - keyed    → replace / merge into the element(s) of that key in place,
+   *              or append when none has it
+   * - key-less → append unless an equal element is stored
    */
   private _upsert(
     key: string,
@@ -370,65 +406,24 @@ export class CollectionPatcher {
       return;
     }
 
-    // ── keyed upsert ──────────────────────────────────────────────────────────
-    if (keys.length > 0) {
-      const mergeStrategy = flatType.metadata?.get("db.patch.strategy") === "merge";
-
-      const vars: Record<string, any> = { acc: "$$value", cand: "$$this" };
-      let appendExpr: any = "$$cand";
-
-      if (mergeStrategy) {
-        // Find the existing element to merge with
-        vars.existing = {
-          $arrayElemAt: [
-            {
-              $filter: {
-                input: "$$value",
-                as: "el",
-                cond: this._keysEqual(keys, "$$el", "$$this"),
-              },
-            },
-            0,
-          ],
-        };
-        appendExpr = {
-          $cond: [
-            { $ifNull: ["$$existing", false] },
-            { $mergeObjects: ["$$existing", "$$cand"] },
-            "$$cand",
-          ],
-        };
-      }
-
-      this._set(key, {
-        $reduce: {
-          input: literal(input),
-          initialValue: { $ifNull: [`$${key}`, []] },
-          in: {
-            $let: {
-              vars,
-              in: {
-                $concatArrays: [
-                  {
-                    $filter: {
-                      input: "$$acc",
-                      as: "el",
-                      cond: { $not: this._keysEqual(keys, "$$el", "$$cand") },
-                    },
-                  },
-                  [appendExpr],
-                ],
-              },
-            },
-          },
-        },
-      });
+    if (keys.length === 0) {
+      this._appendUnless(key, input, { $in: ["$$this", "$$value"] });
       return;
     }
 
-    // ── no key → behave like $addToSet (deep equality) ────────────
-    this._set(key, {
-      $setUnion: [{ $ifNull: [`$${key}`, []] }, literal(input)],
+    const mergeStrategy = flatType.metadata?.get("db.patch.strategy") === "merge";
+    this._appendUnless(key, input, this._keyStored(keys), {
+      $map: {
+        input: "$$value",
+        as: "el",
+        in: {
+          $cond: [
+            this._keysEqual(keys, "$$el", "$$this"),
+            mergeStrategy ? { $mergeObjects: ["$$el", "$$this"] } : "$$this",
+            "$$el",
+          ],
+        },
+      },
     });
   }
 
@@ -477,8 +472,10 @@ export class CollectionPatcher {
 
   /**
    * `$remove`
-   * - keyed     → filter out any element whose key set matches a payload item
-   * - non-keyed → deep equality remove (`$setDifference`)
+   * - keyed    → filter out any element whose key set matches a payload item
+   * - key-less → filter out every element equal to a payload item (since
+   *              0.1.180; before, a `$setDifference`, which also dropped
+   *              duplicates of the elements that stay)
    */
   private _remove(
     key: string,
@@ -490,13 +487,14 @@ export class CollectionPatcher {
       return;
     }
 
+    const stored = { $ifNull: [`$${key}`, []] };
     if (keys.length > 0) {
       this._set(key, {
         $let: {
           vars: { rem: literal(input) },
           in: {
             $filter: {
-              input: { $ifNull: [`$${key}`, []] },
+              input: stored,
               as: "el",
               cond: {
                 $not: {
@@ -514,9 +512,8 @@ export class CollectionPatcher {
         },
       });
     } else {
-      // deep-equality removal for primitives / whole objects
       this._set(key, {
-        $setDifference: [{ $ifNull: [`$${key}`, []] }, literal(input)],
+        $filter: { input: stored, as: "el", cond: { $not: { $in: ["$$el", literal(input)] } } },
       });
     }
   }

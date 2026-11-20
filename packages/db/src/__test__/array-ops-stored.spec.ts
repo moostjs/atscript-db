@@ -249,6 +249,86 @@ describe("array $update follows the patch strategy", () => {
   });
 });
 
+// The same cases run against a real MongoDB in db-mongo's
+// `array-update-strategy-server.spec.ts`: the native pipeline and this
+// read-modify-write give the same arrays (since 0.1.180).
+describe("array operators: one behaviour on every adapter", () => {
+  let nextId = 1;
+  /** The arrays stored after `patch` is applied to a row seeded with `row`. */
+  async function run(row: Record<string, unknown>, patch: Record<string, unknown>) {
+    const { adapter, table, seed } = setupTable(AosKeyed);
+    const id = nextId++;
+    seed({ id, ...row });
+    await table.updateOne({ id, ...patch } as any);
+    return written(adapter) as Record<string, any>;
+  }
+
+  it("$insert on a keyed array skips an item whose key is stored; the first of two new items with one key stands", async () => {
+    const row = await run(
+      { plain: stored(), merged: stored() },
+      {
+        plain: {
+          $insert: [
+            { sku: "a", qty: 9 },
+            { sku: "n", qty: 1 },
+            { sku: "n", qty: 2 },
+          ],
+        },
+        merged: { $insert: [{ sku: "b", qty: 9 }] },
+      },
+    );
+    expect(row.plain).toEqual([...stored(), { sku: "n", qty: 1 }]);
+    expect(row.merged).toEqual(stored());
+  });
+
+  it("$upsert on a keyed array changes the element where it is, and appends a new key", async () => {
+    const items = [
+      { sku: "a", qty: 2 },
+      { sku: "n", qty: 1 },
+    ];
+    const row = await run(
+      { plain: stored(), merged: stored() },
+      { plain: { $upsert: items }, merged: { $upsert: items } },
+    );
+    expect(row.plain).toEqual([
+      { sku: "a", qty: 2 },
+      { sku: "b", qty: 5, note: "other" },
+      { sku: "n", qty: 1 },
+    ]);
+    expect(row.merged).toEqual([
+      { sku: "a", qty: 2, note: "keep" },
+      { sku: "b", qty: 5, note: "other" },
+      { sku: "n", qty: 1 },
+    ]);
+  });
+
+  it("operators on an array without keys leave the other elements alone — duplicates and order kept", async () => {
+    const tags = ["x", "y", "x", "z"];
+    expect((await run({ tags }, { tags: { $remove: ["y"] } })).tags).toEqual(["x", "x", "z"]);
+    expect((await run({ tags }, { tags: { $upsert: ["x", "w", "w"] } })).tags).toEqual([
+      ...tags,
+      "w",
+    ]);
+    expect((await run({ tags }, { tags: { $insert: ["x", "x"] } })).tags).toEqual([
+      ...tags,
+      "x",
+      "x",
+    ]);
+    const keyless = [{ label: "x", note: "n" }, { label: "y" }, { label: "y" }];
+    expect(
+      (await run({ keyless }, { keyless: { $upsert: [{ label: "y" }, { label: "z" }] } })).keyless,
+    ).toEqual([...keyless, { label: "z" }]);
+    expect((await run({ keyless }, { keyless: { $remove: [{ label: "y" }] } })).keyless).toEqual([
+      { label: "x", note: "n" },
+    ]);
+  });
+
+  it("$insert on a unique array skips a value that is stored", async () => {
+    const row = await run({ uniq: ["a", "b"] }, { uniq: { $insert: ["b", "c"] } });
+    expect(row.uniq).toEqual(["a", "b", "c"]);
+  });
+});
+
 // `updateMany` is one statement for every matched row, and `$insert` /
 // `$upsert` / `$update` / `$remove` need each row's stored array. Before
 // 0.1.180 the decomposed `field.__$op` key reached the adapter: an unknown

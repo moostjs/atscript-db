@@ -442,20 +442,28 @@ describe("[mongo] AsCollection with arrays", () => {
         {
           "$set": {
             "primitive": {
-              "$setDifference": [
-                {
+              "$filter": {
+                "as": "el",
+                "cond": {
+                  "$not": {
+                    "$in": [
+                      "$$el",
+                      {
+                        "$literal": [
+                          "a",
+                          "b",
+                        ],
+                      },
+                    ],
+                  },
+                },
+                "input": {
                   "$ifNull": [
                     "$primitive",
                     [],
                   ],
                 },
-                {
-                  "$literal": [
-                    "a",
-                    "b",
-                  ],
-                },
-              ],
+              },
             },
           },
         },
@@ -559,43 +567,41 @@ describe("[mongo] AsCollection with arrays", () => {
             "withKey": {
               "$reduce": {
                 "in": {
-                  "$let": {
-                    "in": {
-                      "$concatArrays": [
-                        {
-                          "$filter": {
-                            "as": "el",
-                            "cond": {
-                              "$not": {
-                                "$and": [
-                                  {
-                                    "$eq": [
-                                      "$$el.key1",
-                                      "$$cand.key1",
-                                    ],
-                                  },
-                                  {
-                                    "$eq": [
-                                      "$$el.key2",
-                                      "$$cand.key2",
-                                    ],
-                                  },
+                  "$cond": [
+                    {
+                      "$anyElementTrue": {
+                        "$map": {
+                          "as": "el",
+                          "in": {
+                            "$and": [
+                              {
+                                "$eq": [
+                                  "$$el.key1",
+                                  "$$this.key1",
                                 ],
                               },
-                            },
-                            "input": "$$acc",
+                              {
+                                "$eq": [
+                                  "$$el.key2",
+                                  "$$this.key2",
+                                ],
+                              },
+                            ],
                           },
+                          "input": "$$value",
                         },
+                      },
+                    },
+                    "$$value",
+                    {
+                      "$concatArrays": [
+                        "$$value",
                         [
-                          "$$cand",
+                          "$$this",
                         ],
                       ],
                     },
-                    "vars": {
-                      "acc": "$$value",
-                      "cand": "$$this",
-                    },
-                  },
+                  ],
                 },
                 "initialValue": {
                   "$ifNull": [
@@ -1121,26 +1127,34 @@ describe("[mongo] AsCollection with arrays", () => {
         {
           "$set": {
             "withoutKey": {
-              "$setDifference": [
-                {
+              "$filter": {
+                "as": "el",
+                "cond": {
+                  "$not": {
+                    "$in": [
+                      "$$el",
+                      {
+                        "$literal": [
+                          {
+                            "key": "1",
+                            "value": "555",
+                          },
+                          {
+                            "key": "2",
+                            "value": "666",
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                },
+                "input": {
                   "$ifNull": [
                     "$withoutKey",
                     [],
                   ],
                 },
-                {
-                  "$literal": [
-                    {
-                      "key": "1",
-                      "value": "555",
-                    },
-                    {
-                      "key": "2",
-                      "value": "666",
-                    },
-                  ],
-                },
-              ],
+              },
             },
           },
         },
@@ -1169,43 +1183,68 @@ describe("[mongo] CollectionPatcher — $upsert", () => {
             "withKey": {
               "$reduce": {
                 "in": {
-                  "$let": {
-                    "in": {
-                      "$concatArrays": [
-                        {
-                          "$filter": {
-                            "as": "el",
-                            "cond": {
-                              "$not": {
-                                "$and": [
-                                  {
-                                    "$eq": [
-                                      "$$el.key1",
-                                      "$$cand.key1",
-                                    ],
-                                  },
-                                  {
-                                    "$eq": [
-                                      "$$el.key2",
-                                      "$$cand.key2",
-                                    ],
-                                  },
+                  "$cond": [
+                    {
+                      "$anyElementTrue": {
+                        "$map": {
+                          "as": "el",
+                          "in": {
+                            "$and": [
+                              {
+                                "$eq": [
+                                  "$$el.key1",
+                                  "$$this.key1",
                                 ],
                               },
-                            },
-                            "input": "$$acc",
+                              {
+                                "$eq": [
+                                  "$$el.key2",
+                                  "$$this.key2",
+                                ],
+                              },
+                            ],
                           },
+                          "input": "$$value",
                         },
+                      },
+                    },
+                    {
+                      "$map": {
+                        "as": "el",
+                        "in": {
+                          "$cond": [
+                            {
+                              "$and": [
+                                {
+                                  "$eq": [
+                                    "$$el.key1",
+                                    "$$this.key1",
+                                  ],
+                                },
+                                {
+                                  "$eq": [
+                                    "$$el.key2",
+                                    "$$this.key2",
+                                  ],
+                                },
+                              ],
+                            },
+                            "$$this",
+                            "$$el",
+                          ],
+                        },
+                        "input": "$$value",
+                      },
+                    },
+                    {
+                      "$concatArrays": [
+                        "$$value",
                         [
-                          "$$cand",
+                          "$$this",
                         ],
                       ],
                     },
-                    "vars": {
-                      "acc": "$$value",
-                      "cand": "$$this",
-                    },
-                  },
+                  ],
                 },
                 "initialValue": {
                   "$ifNull": [
@@ -1231,7 +1270,7 @@ describe("[mongo] CollectionPatcher — $upsert", () => {
     `);
   });
 
-  it("[OBJECT_WITHOUT_KEY] upsert without keys uses $setUnion", async () => {
+  it("[OBJECT_WITHOUT_KEY] upsert without keys appends unless an equal element is stored", async () => {
     const { ArraysCollection } = await import("./fixtures/arrays-collection.as");
     const result = prepareUpdate(mongo, ArraysCollection, {
       _id: new ObjectId(),
@@ -1245,14 +1284,33 @@ describe("[mongo] CollectionPatcher — $upsert", () => {
         {
           "$set": {
             "withoutKey": {
-              "$setUnion": [
-                {
+              "$reduce": {
+                "in": {
+                  "$cond": [
+                    {
+                      "$in": [
+                        "$$this",
+                        "$$value",
+                      ],
+                    },
+                    "$$value",
+                    {
+                      "$concatArrays": [
+                        "$$value",
+                        [
+                          "$$this",
+                        ],
+                      ],
+                    },
+                  ],
+                },
+                "initialValue": {
                   "$ifNull": [
                     "$withoutKey",
                     [],
                   ],
                 },
-                {
+                "input": {
                   "$literal": [
                     {
                       "attribute": "c",
@@ -1261,7 +1319,7 @@ describe("[mongo] CollectionPatcher — $upsert", () => {
                     },
                   ],
                 },
-              ],
+              },
             },
           },
         },
@@ -1269,7 +1327,7 @@ describe("[mongo] CollectionPatcher — $upsert", () => {
     `);
   });
 
-  it("[PRIMITIVE] upsert without keys uses $setUnion", async () => {
+  it("[PRIMITIVE] upsert without keys appends unless an equal value is stored", async () => {
     const { ArraysCollection } = await import("./fixtures/arrays-collection.as");
     const result = prepareUpdate(mongo, ArraysCollection, {
       _id: new ObjectId(),
@@ -1283,20 +1341,39 @@ describe("[mongo] CollectionPatcher — $upsert", () => {
         {
           "$set": {
             "primitive": {
-              "$setUnion": [
-                {
+              "$reduce": {
+                "in": {
+                  "$cond": [
+                    {
+                      "$in": [
+                        "$$this",
+                        "$$value",
+                      ],
+                    },
+                    "$$value",
+                    {
+                      "$concatArrays": [
+                        "$$value",
+                        [
+                          "$$this",
+                        ],
+                      ],
+                    },
+                  ],
+                },
+                "initialValue": {
                   "$ifNull": [
                     "$primitive",
                     [],
                   ],
                 },
-                {
+                "input": {
                   "$literal": [
                     "x",
                     "y",
                   ],
                 },
-              ],
+              },
             },
           },
         },
@@ -1325,33 +1402,48 @@ describe("[mongo] CollectionPatcher — single key", () => {
             "singleKey": {
               "$reduce": {
                 "in": {
-                  "$let": {
-                    "in": {
-                      "$concatArrays": [
-                        {
-                          "$filter": {
-                            "as": "el",
-                            "cond": {
-                              "$not": {
-                                "$eq": [
-                                  "$$el.id",
-                                  "$$cand.id",
-                                ],
-                              },
-                            },
-                            "input": "$$acc",
+                  "$cond": [
+                    {
+                      "$anyElementTrue": {
+                        "$map": {
+                          "as": "el",
+                          "in": {
+                            "$eq": [
+                              "$$el.id",
+                              "$$this.id",
+                            ],
                           },
+                          "input": "$$value",
                         },
+                      },
+                    },
+                    {
+                      "$map": {
+                        "as": "el",
+                        "in": {
+                          "$cond": [
+                            {
+                              "$eq": [
+                                "$$el.id",
+                                "$$this.id",
+                              ],
+                            },
+                            "$$this",
+                            "$$el",
+                          ],
+                        },
+                        "input": "$$value",
+                      },
+                    },
+                    {
+                      "$concatArrays": [
+                        "$$value",
                         [
-                          "$$cand",
+                          "$$this",
                         ],
                       ],
                     },
-                    "vars": {
-                      "acc": "$$value",
-                      "cand": "$$this",
-                    },
-                  },
+                  ],
                 },
                 "initialValue": {
                   "$ifNull": [
@@ -1493,7 +1585,7 @@ describe("[mongo] CollectionPatcher — single key", () => {
 describe("[mongo] CollectionPatcher — uniqueItems", () => {
   beforeAll(prepareFixtures);
 
-  it("[UNIQUE_PRIMITIVE] $insert delegates to $setUnion", async () => {
+  it("[UNIQUE_PRIMITIVE] $insert appends unless an equal value is stored", async () => {
     const { ArraysCollection } = await import("./fixtures/arrays-collection.as");
     const result = prepareUpdate(mongo, ArraysCollection, {
       _id: new ObjectId(),
@@ -1502,26 +1594,45 @@ describe("[mongo] CollectionPatcher — uniqueItems", () => {
       },
     }).updateFilter;
 
-    // uniqueItems + $insert should use $setUnion (not $concatArrays)
+    // uniqueItems + $insert: a per-item check, not a plain $concatArrays
     expect(result).toMatchInlineSnapshot(`
       [
         {
           "$set": {
             "uniquePrimitive": {
-              "$setUnion": [
-                {
+              "$reduce": {
+                "in": {
+                  "$cond": [
+                    {
+                      "$in": [
+                        "$$this",
+                        "$$value",
+                      ],
+                    },
+                    "$$value",
+                    {
+                      "$concatArrays": [
+                        "$$value",
+                        [
+                          "$$this",
+                        ],
+                      ],
+                    },
+                  ],
+                },
+                "initialValue": {
                   "$ifNull": [
                     "$uniquePrimitive",
                     [],
                   ],
                 },
-                {
+                "input": {
                   "$literal": [
                     "a",
                     "b",
                   ],
                 },
-              ],
+              },
             },
           },
         },
@@ -1529,7 +1640,7 @@ describe("[mongo] CollectionPatcher — uniqueItems", () => {
     `);
   });
 
-  it("[UNIQUE_OBJECTS] $insert delegates to $setUnion", async () => {
+  it("[UNIQUE_OBJECTS] $insert appends unless an equal element is stored", async () => {
     const { ArraysCollection } = await import("./fixtures/arrays-collection.as");
     const result = prepareUpdate(mongo, ArraysCollection, {
       _id: new ObjectId(),
@@ -1543,14 +1654,33 @@ describe("[mongo] CollectionPatcher — uniqueItems", () => {
         {
           "$set": {
             "uniqueObjects": {
-              "$setUnion": [
-                {
+              "$reduce": {
+                "in": {
+                  "$cond": [
+                    {
+                      "$in": [
+                        "$$this",
+                        "$$value",
+                      ],
+                    },
+                    "$$value",
+                    {
+                      "$concatArrays": [
+                        "$$value",
+                        [
+                          "$$this",
+                        ],
+                      ],
+                    },
+                  ],
+                },
+                "initialValue": {
                   "$ifNull": [
                     "$uniqueObjects",
                     [],
                   ],
                 },
-                {
+                "input": {
                   "$literal": [
                     {
                       "name": "a",
@@ -1558,7 +1688,7 @@ describe("[mongo] CollectionPatcher — uniqueItems", () => {
                     },
                   ],
                 },
-              ],
+              },
             },
           },
         },
@@ -1584,7 +1714,7 @@ describe("[mongo] CollectionPatcher — withoutKeyMerge", () => {
     expect(result).toEqual([]);
   });
 
-  it("[WITHOUT_KEY_MERGE] $remove uses $setDifference", async () => {
+  it("[WITHOUT_KEY_MERGE] $remove filters out the elements equal to an item", async () => {
     const { ArraysCollection } = await import("./fixtures/arrays-collection.as");
     const result = prepareUpdate(mongo, ArraysCollection, {
       _id: new ObjectId(),
@@ -1598,23 +1728,31 @@ describe("[mongo] CollectionPatcher — withoutKeyMerge", () => {
         {
           "$set": {
             "withoutKeyMerge": {
-              "$setDifference": [
-                {
+              "$filter": {
+                "as": "el",
+                "cond": {
+                  "$not": {
+                    "$in": [
+                      "$$el",
+                      {
+                        "$literal": [
+                          {
+                            "attribute": "x",
+                            "key": "1",
+                            "value": "a",
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                },
+                "input": {
                   "$ifNull": [
                     "$withoutKeyMerge",
                     [],
                   ],
                 },
-                {
-                  "$literal": [
-                    {
-                      "attribute": "x",
-                      "key": "1",
-                      "value": "a",
-                    },
-                  ],
-                },
-              ],
+              },
             },
           },
         },

@@ -68,4 +68,7 @@ export interface AosKeyed {
     }[]
 
     tags?: string[]
+
+    @expect.array.uniqueItems
+    uniq?: string[]
 }

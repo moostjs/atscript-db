@@ -29,6 +29,9 @@ export interface AusItem {
 
     tags?: string[]
 
+    @expect.array.uniqueItems
+    uniq?: string[]
+
     // a replace-strategy nested object holding an array
     box?: {
         caption?: string

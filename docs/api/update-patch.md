@@ -266,6 +266,8 @@ Arrays stored directly on the record support five patch operators for fine-grain
 
 When multiple operators appear on the same field, they are always applied in order: **remove → update → upsert → insert** — regardless of the order they appear in the object (on MongoDB since 0.1.180; before, it ran the update last).
 
+Every adapter gives the same array for the same patch (since 0.1.180): `$insert` appends, `$upsert` and `$update` change an element where it is, `$remove` takes out the matching elements, and the rest of the array keeps its order and its duplicates.
+
 `$replace` stands alone: operators sent next to it on the same field are ignored (on MongoDB since 0.1.180; before, it applied them to the new array).
 
 Array operators work in `updateOne` and `bulkUpdate`. `updateMany` is one statement for every matched row, and `$insert`, `$upsert`, `$update` and `$remove` need each row's stored array, so it throws `DbError("INVALID_QUERY")` for them (since 0.1.180; before, the call failed or stored a broken value, depending on the adapter). `$replace` and a plain array value work in `updateMany`.
@@ -362,6 +364,8 @@ await table.updateOne({
   variants: $upsert([{ sku: "C3", color: "green", stock: 3 }]),
 });
 ```
+
+`$insert` skips an item whose key is already stored — it never adds a second element with the same key (since 0.1.180; before, MongoDB replaced the stored element and the other adapters appended a duplicate unless the array had `@expect.array.uniqueItems`). `$upsert` changes the stored element in place and appends an item with a new key.
 
 Under replace strategy, `$update` and `$upsert` replace the **entire** matched element — every required field must be present, and an optional field the item leaves out is removed from the element. Since 0.1.180 this holds for `$update` on every adapter; before, SQLite, MySQL, PostgreSQL and the in-memory adapter merged the item into the element under both strategies. A `$update` item whose key matches no element changes nothing, and items that name the same key apply in order.
 

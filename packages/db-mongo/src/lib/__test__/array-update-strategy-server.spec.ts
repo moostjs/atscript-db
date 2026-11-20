@@ -124,6 +124,86 @@ describe("MongoDB array operators", () => {
   });
 });
 
+// The same cases as `array operators: one behaviour on every adapter` in
+// @atscript/db's `array-ops-stored.spec.ts` (the read-modify-write of the
+// other adapters). Before 0.1.180 MongoDB replaced the stored element on a
+// keyed `$insert`, moved an upserted element to the end, and its key-less
+// operators were set operations that also dropped stored duplicates.
+describe("MongoDB array operators: one behaviour on every adapter", () => {
+  /** The row after `patch` is applied to one seeded with `row`. */
+  async function run(row: Record<string, unknown>, patch: Record<string, unknown>) {
+    const id = nextId++;
+    await table.insertOne({ id, ...row });
+    await table.updateOne({ id, ...patch });
+    return read(id);
+  }
+
+  it("$insert on a keyed array skips an item whose key is stored; the first of two new items with one key stands", async () => {
+    const row = await run(
+      { plain: stored(), merged: stored() },
+      {
+        plain: {
+          $insert: [
+            { sku: "a", qty: 9 },
+            { sku: "n", qty: 1 },
+            { sku: "n", qty: 2 },
+          ],
+        },
+        merged: { $insert: [{ sku: "b", qty: 9 }] },
+      },
+    );
+    expect(row.plain).toEqual([...stored(), { sku: "n", qty: 1 }]);
+    expect(row.merged).toEqual(stored());
+  });
+
+  it("$upsert on a keyed array changes the element where it is, and appends a new key", async () => {
+    const items = [
+      { sku: "a", qty: 2 },
+      { sku: "n", qty: 1 },
+    ];
+    const row = await run(
+      { plain: stored(), merged: stored() },
+      { plain: { $upsert: items }, merged: { $upsert: items } },
+    );
+    expect(row.plain).toEqual([
+      { sku: "a", qty: 2 },
+      { sku: "b", qty: 5, note: "other" },
+      { sku: "n", qty: 1 },
+    ]);
+    expect(row.merged).toEqual([
+      { sku: "a", qty: 2, note: "keep" },
+      { sku: "b", qty: 5, note: "other" },
+      { sku: "n", qty: 1 },
+    ]);
+  });
+
+  it("operators on an array without keys leave the other elements alone — duplicates and order kept", async () => {
+    const tags = ["x", "y", "x", "z"];
+    expect((await run({ tags }, { tags: { $remove: ["y"] } })).tags).toEqual(["x", "x", "z"]);
+    expect((await run({ tags }, { tags: { $upsert: ["x", "w", "w"] } })).tags).toEqual([
+      ...tags,
+      "w",
+    ]);
+    expect((await run({ tags }, { tags: { $insert: ["x", "x"] } })).tags).toEqual([
+      ...tags,
+      "x",
+      "x",
+    ]);
+    const keyless = [{ label: "x", note: "n" }, { label: "y" }, { label: "y" }];
+    expect(
+      (await run({ keyless }, { keyless: { $upsert: [{ label: "y" }, { label: "z" }] } })).keyless,
+    ).toEqual([...keyless, { label: "z" }]);
+    expect((await run({ keyless }, { keyless: { $remove: [{ label: "y" }] } })).keyless).toEqual([
+      { label: "x", note: "n" },
+    ]);
+  });
+
+  it("$insert on a unique array skips a value that is stored", async () => {
+    const row = await run({ uniq: ["a", "b"] }, { uniq: { $insert: ["b", "c"] } });
+    expect(row.uniq).toEqual(["a", "b", "c"]);
+  });
+});
+
 describe("MongoDB array $update follows the patch strategy", () => {
   it("replace strategy (default): the matched element becomes the item", async () => {
     const id = await seed();
