@@ -15,10 +15,11 @@ import { MockAdapter, prepareFixtures } from "./test-utils";
 // value that is still not an array throws instead of being spread item by item.
 
 let AosItem: any;
+let AosRenamed: any;
 
 beforeAll(async () => {
   await prepareFixtures();
-  ({ AosItem } = await import("./fixtures/array-ops-stored.as"));
+  ({ AosItem, AosRenamed } = await import("./fixtures/array-ops-stored.as"));
 });
 
 /** Postgres's JSON / JSONB formatter: a JSON string value read back is re-encoded as JSON text. */
@@ -141,5 +142,40 @@ describe("array patch operators read the stored value through fromStorage", () =
       );
     }
     expect(updates(adapter)).toEqual([]);
+  });
+});
+
+// The column's array settings are annotations of the logical field. Before
+// 0.1.178 they were looked up by the physical column name, so a renamed
+// (`@db.column`) or flattened array column lost `uniqueItems` (`$insert`
+// stored a duplicate) and its merge strategy (`$upsert` replaced the item).
+describe("array patch operators on a renamed or flattened column keep its array settings", () => {
+  function setupRenamed() {
+    const adapter = new MockAdapter();
+    const table = new AtscriptDbTable(AosRenamed, adapter);
+    adapter.store.set(table.tableName, []);
+    return {
+      adapter,
+      table,
+      seed: (row: object) => adapter.store.get(table.tableName)!.push({ ...row }),
+    };
+  }
+
+  it("uniqueItems: $insert of a value already stored does not add it twice", async () => {
+    const { adapter, table, seed } = setupRenamed();
+    seed({ id: 1, u_col: ["a"], box__labels: ["x"] });
+    await table.updateOne({
+      id: 1,
+      uniq: { $insert: ["a", "b"] },
+      box: { labels: { $insert: ["x", "y"] } },
+    } as any);
+    expect(written(adapter)).toMatchObject({ u_col: ["a", "b"], box__labels: ["x", "y"] });
+  });
+
+  it("merge strategy: $upsert of a matching item keeps the fields it does not name", async () => {
+    const { adapter, table, seed } = setupRenamed();
+    seed({ id: 1, m_col: [{ sku: "a", qty: 1, note: "keep" }] });
+    await table.updateOne({ id: 1, merged: { $upsert: [{ sku: "a", qty: 2 }] } } as any);
+    expect(written(adapter)).toMatchObject({ m_col: [{ sku: "a", qty: 2, note: "keep" }] });
   });
 });

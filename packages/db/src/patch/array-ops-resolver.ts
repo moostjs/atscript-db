@@ -25,7 +25,9 @@ import { getKeyProps } from "./patch-types";
  *   column keys, potentially containing `field.__$insert`, `field.__$remove`, etc.
  * @param currentRecord - The current record fetched from the database (a raw
  *   adapter row, physical column keys). Can be `null` if the record doesn't exist.
- * @param table - The AtscriptDbTable for metadata access (key props, unique items).
+ * @param table - The AtscriptDbTable for metadata access (key props, unique items,
+ *   merge strategy — found by the column's logical path since 0.1.178, so a
+ *   `@db.column`-renamed or flattened array column keeps them).
  * @returns A new update object with all `__$` keys resolved to plain values.
  * @throws Error when a field's stored value is not an array.
  */
@@ -82,7 +84,7 @@ export function resolveArrayOps(
 
   // Resolve each field's ops. `field` is the physical column: the key of the
   // raw row and of `fromStorageFormatters` (a `@db.column` rename included).
-  const fromStorage = table.getMetadata().fromStorageFormatters;
+  const { fromStorageFormatters: fromStorage, leafByPhysical } = table.getMetadata();
   for (const [field, ops] of opsMap) {
     const stored = currentRecord?.[field];
     const decoded = stored == null ? undefined : fromStorage?.get(field)?.(stored);
@@ -94,9 +96,9 @@ export function resolveArrayOps(
         `Cannot apply array patch operators to "${field}": its stored value is not an array`,
       );
     }
-    // Looked up by the PHYSICAL name too: a `@db.column`-renamed or flattened
-    // array column misses its key props, `uniqueItems` and merge strategy here.
-    const arrayType = table.flatMap.get(field) as
+    // The array's settings (key props, `uniqueItems`, merge strategy) are
+    // annotations of the logical field — `flatMap` is keyed by its path.
+    const arrayType = table.flatMap.get(leafByPhysical.get(field)?.path ?? field) as
       | TAtscriptAnnotatedType<TAtscriptTypeArray>
       | undefined;
     const keyProps = arrayType ? getKeyProps(arrayType) : new Set<string>();
