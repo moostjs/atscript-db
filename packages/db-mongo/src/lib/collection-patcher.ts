@@ -70,13 +70,16 @@ export function incExpr(field: string, by: number): Document {
  * Supported high‑level operations for *top‑level arrays* (see the attached
  * spreadsheet in the chat):
  *
- * | Payload field | MongoDB operator        | Purpose                                |
- * |-------------- |-------------------------|----------------------------------------|
- * | `$replace`    | full `$set`             | Replace the whole array.               |
- * | `$insert`     | `$push`                 | Append new items (duplicates allowed). |
- * | `$upsert`     | custom                  | Insert or update by *key* (see TODO).  |
- * | `$update`     | `$set` + `arrayFilters` | Update array elements matched by *key* |
- * | `$remove`     | `$pullAll` / `$pull`    | Remove by value or by *key*.           |
+ * | Payload field | Pipeline expression        | Purpose                                              |
+ * |---------------|----------------------------|------------------------------------------------------|
+ * | `$replace`    | `$literal`                 | Replace the whole array (stands alone).              |
+ * | `$insert`     | `$concatArrays`, `$reduce` | Append; a stored key / unique value is skipped.      |
+ * | `$upsert`     | `$reduce` + `$map`         | Change the element of a *key* in place, or append.   |
+ * | `$update`     | `$reduce` + `$map`         | Change the elements matched by *key*.                |
+ * | `$remove`     | `$filter`                  | Remove by value or by *key*.                         |
+ *
+ * The result is the array the read-modify-write of the other adapters gives
+ * (`resolveArrayOps` in `@atscript/db`).
  *
  * The class walks through the incoming payload, detects which of the above
  * operations applies to each top‑level array and builds the corresponding

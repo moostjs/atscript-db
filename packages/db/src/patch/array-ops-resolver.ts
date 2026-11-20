@@ -110,7 +110,18 @@ export function resolveArrayOps(
     // Use keys from decomposer if available, otherwise from type metadata
     const effectiveKeys = ops.keys && ops.keys.length > 0 ? new Set(ops.keys) : keyProps;
 
-    resolved[field] = applyOps(current, ops, effectiveKeys, !!uniqueItems, mergeStrategy);
+    // A null / missing array stays null when the operators have nothing to
+    // apply (empty item lists, `$update` without key props) — MongoDB sets
+    // nothing then either (since 0.1.180; before, `[]` was written)
+    const idle =
+      !ops.remove?.length &&
+      !ops.upsert?.length &&
+      !ops.insert?.length &&
+      !(ops.update?.length && effectiveKeys.size > 0);
+    resolved[field] =
+      stored == null && idle
+        ? null
+        : applyOps(current, ops, effectiveKeys, !!uniqueItems, mergeStrategy);
   }
 
   return resolved;
@@ -181,8 +192,8 @@ function applyOps(
 function applyRemove(arr: unknown[], items: unknown[], keyProps: Set<string>): unknown[] {
   if (keyProps.size === 0) {
     // Primitive: remove by value equality
-    const removeSet = new Set(items.map((i) => JSON.stringify(i)));
-    return arr.filter((el) => !removeSet.has(JSON.stringify(el)));
+    const removeSet = new Set(items.map(canonical));
+    return arr.filter((el) => !removeSet.has(canonical(el)));
   }
   // Object: remove by key match
   return arr.filter((el) => {
@@ -225,7 +236,8 @@ function applyUpsert(
   for (const item of items) {
     if (keyProps.size === 0) {
       // Primitive: replace by value or append
-      const idx = result.findIndex((el) => JSON.stringify(el) === JSON.stringify(item));
+      const wanted = canonical(item);
+      const idx = result.findIndex((el) => canonical(el) === wanted);
       if (idx >= 0) {
         result[idx] = item;
       } else {
@@ -269,7 +281,7 @@ function applyInsert(
         ? result.some((el) =>
             matchByKeys(el as Record<string, unknown>, item as Record<string, unknown>, keyProps),
           )
-        : result.some((el) => JSON.stringify(el) === JSON.stringify(item));
+        : result.some((el) => canonical(el) === canonical(item));
     if (!exists) {
       result.push(item);
     }
@@ -279,11 +291,28 @@ function applyInsert(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * `value` as JSON text with the keys of every object sorted: the form
+ * elements without key props are compared by. PostgreSQL `JSONB` and MySQL
+ * `JSON` return an object's keys in their own order, so the plain JSON text
+ * of an equal element differs there (since 0.1.180; before, `$remove` of a
+ * stored object matched nothing on those two).
+ */
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) =>
+    v !== null && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v,
+  );
+}
+
+/** Whether stored element `a` has the key values of item `b` (a stored `null` or scalar never has). */
 function matchByKeys(
   a: Record<string, unknown>,
   b: Record<string, unknown>,
   keys: Set<string>,
 ): boolean {
+  if (a === null || typeof a !== "object") return false;
   for (const key of keys) {
     if (a[key] !== b[key]) {
       return false;

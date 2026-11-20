@@ -365,7 +365,7 @@ await table.updateOne({
 });
 ```
 
-`$insert` skips an item whose key is already stored — it never adds a second element with the same key (since 0.1.180; before, MongoDB replaced the stored element and the other adapters appended a duplicate unless the array had `@expect.array.uniqueItems`). `$upsert` changes the stored element in place and appends an item with a new key.
+`$insert` skips an item whose key is already stored — it never adds a second element with the same key (since 0.1.180; before, MongoDB upserted the item and the other adapters appended a duplicate unless the array had `@expect.array.uniqueItems`). `$upsert` changes the stored element in place and appends an item with a new key.
 
 Under replace strategy, `$update` and `$upsert` replace the **entire** matched element — every required field must be present, and an optional field the item leaves out is removed from the element. Since 0.1.180 this holds for `$update` on every adapter; before, SQLite, MySQL, PostgreSQL and the in-memory adapter merged the item into the element under both strategies. A `$update` item whose key matches no element changes nothing, and items that name the same key apply in order.
 
@@ -398,7 +398,9 @@ await table.updateOne({
 
 ## Keyless Object Arrays
 
-For object arrays without `@expect.array.key`, matching falls back to **full deep value equality**. This means `$remove` works (match entire objects), but `$update` is effectively a no-op (there are no key fields to locate a target element for partial update). This is the same on every adapter since 0.1.180; before, MongoDB added the `$update` items to the array as a set union:
+For object arrays without `@expect.array.key`, matching falls back to **full deep value equality**. This means `$remove` works (match entire objects), but `$update` is effectively a no-op (there are no key fields to locate a target element for partial update). This is the same on every adapter since 0.1.180; before, MongoDB added the `$update` items to the array as a set union.
+
+The order of an element's properties does not matter on SQLite, PostgreSQL, MySQL and the in-memory adapter (on PostgreSQL and MySQL since 0.1.180; they store JSON objects with re-ordered keys, so before, a stored object was never found there). MongoDB compares embedded documents property by property in their stored order: send the item's properties in the order they were written.
 
 ```typescript
 import { $insert, $remove, $replace } from "@atscript/db/ops";

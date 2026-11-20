@@ -25,7 +25,8 @@ export type TDbPatch<T> = {
 /**
  * Extracts `@expect.array.key` properties from an array-of-objects type.
  * These keys uniquely identify an element inside the array and are used
- * for `$update`, `$remove`, and `$upsert` operations.
+ * for `$update`, `$remove`, `$upsert` and (since 0.1.180, to skip a stored
+ * key) `$insert` operations.
  *
  * @param def - Atscript array type definition.
  * @returns Set of property names marked as keys; empty set if none.

@@ -61,7 +61,7 @@ export function $replace<T>(items: T[]): { $replace: T[] } {
   return { $replace: items };
 }
 
-/** Append items to an array. */
+/** Append items to an array (an item whose `@expect.array.key` is already stored is skipped). */
 export function $insert<T>(items: T[]): { $insert: T[] } {
   return { $insert: items };
 }

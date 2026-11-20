@@ -329,6 +329,67 @@ describe("array operators: one behaviour on every adapter", () => {
   });
 });
 
+// Edge cases of the read-modify-write that used to differ from MongoDB
+// (fixed in 0.1.180).
+describe("array operators: stored forms the resolver must cope with", () => {
+  async function run(row: Record<string, unknown>, patch: Record<string, unknown>) {
+    const { adapter, table, seed } = setupTable(AosKeyed);
+    seed({ id: 1, ...row });
+    await table.updateOne({ id: 1, ...patch } as any);
+    return written(adapter) as Record<string, any>;
+  }
+
+  // PostgreSQL JSONB and MySQL JSON return an object with its keys in their
+  // own order: an element is found whatever the order of its properties
+  it("an element without keys is found whatever the order of its properties", async () => {
+    const keyless = [{ note: "n", label: "x" }, { label: "y" }];
+    const item = { label: "x", note: "n" };
+    expect((await run({ keyless }, { keyless: { $remove: [item] } })).keyless).toEqual([
+      { label: "y" },
+    ]);
+    expect((await run({ keyless }, { keyless: { $upsert: [item] } })).keyless).toHaveLength(2);
+  });
+
+  it("nested objects are compared the same way", async () => {
+    const tags = [{ a: { y: 1, x: 2 } }] as unknown as string[];
+    const table = setupTable(AosKeyed);
+    table.seed({ id: 1, tags });
+    // not a valid payload for string[] — the comparison itself is what is checked
+    const { resolveArrayOps } = await import("../patch/array-ops-resolver");
+    const resolved = resolveArrayOps(
+      { "tags.__$remove": [{ a: { x: 2, y: 1 } }] },
+      { id: 1, tags },
+      table.table as any,
+    );
+    expect(resolved.tags).toEqual([]);
+  });
+
+  it("a null array stays null when the operators have nothing to apply", async () => {
+    expect((await run({ tags: null }, { tags: { $update: ["x"] } })).tags).toBeNull();
+    expect((await run({ tags: null }, { tags: { $insert: [] } })).tags).toBeNull();
+    expect((await run({ plain: null }, { plain: { $update: [] } })).plain).toBeNull();
+    // an operator with something to apply starts from an empty array
+    expect((await run({ tags: null }, { tags: { $remove: ["x"] } })).tags).toEqual([]);
+    expect((await run({ tags: null }, { tags: { $insert: ["x"] } })).tags).toEqual(["x"]);
+    expect(
+      (await run({ plain: null }, { plain: { $update: [{ sku: "a", qty: 1 }] } })).plain,
+    ).toEqual([]);
+  });
+
+  it("a null element in a keyed array matches no key and stays where it is", async () => {
+    const plain = [null, { sku: "a", qty: 1 }];
+    const row = await run(
+      { plain, merged: plain },
+      {
+        plain: { $insert: [{ sku: "b", qty: 2 }], $update: [{ sku: "a", qty: 3 }] },
+        merged: { $upsert: [{ sku: "a", qty: 4 }], $remove: [{ sku: "zz" }] },
+      },
+    );
+    expect(row.plain).toEqual([null, { sku: "a", qty: 3 }, { sku: "b", qty: 2 }]);
+    expect(row.merged).toEqual([null, { sku: "a", qty: 4 }]);
+  });
+});
+
 // `updateMany` is one statement for every matched row, and `$insert` /
 // `$upsert` / `$update` / `$remove` need each row's stored array. Before
 // 0.1.180 the decomposed `field.__$op` key reached the adapter: an unknown

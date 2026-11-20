@@ -250,7 +250,7 @@ interface User {
 
 ## Array helpers for patches
 
-`@expect.array.key` marks the key field used to match elements during `$upsert`/`$update`/`$remove` array ops. `@expect.array.uniqueItems` enforces set-semantics on `$insert`. Both come from `@atscript/typescript` (the core skill), but the DB patch layer depends on them.
+`@expect.array.key` marks the key field used to match elements during `$upsert`/`$update`/`$remove` array ops; `$insert` skips an item whose key is already stored (0.1.180). `@expect.array.uniqueItems` makes `$insert` skip a value already stored in an array without keys. Both come from `@atscript/typescript` (the core skill), but the DB patch layer depends on them.
 
 ## Editor support (0.1.141; VSCode extension + @atscript/core 0.1.94)
 
