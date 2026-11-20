@@ -1433,8 +1433,10 @@ type TDbWritePayload<D, Closed> = TDbOpenData<D> extends true ? object : Closed;
 /**
  * The array patch operators a top-level array column takes in a patch (since
  * 0.1.168). `$update` / `$remove` match object elements by their
- * `@expect.array.key` fields and primitive elements by value. A `@db.json`
- * array is stored whole: send the new array, the operators are rejected.
+ * `@expect.array.key` fields; `$remove` matches primitive elements by value
+ * (`$update` changes nothing without key fields). A `@db.json` array is
+ * stored whole: send the new array, the operators are rejected. `updateMany`
+ * rejects the operators too (since 0.1.180).
  */
 export type TDbArrayOps<E> = TArrayPatch<E[]>;
 

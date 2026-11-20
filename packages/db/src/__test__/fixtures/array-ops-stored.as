@@ -39,3 +39,33 @@ export interface AosRenamed {
         labels?: string[]
     }
 }
+
+// `$update` follows the array's patch strategy (since 0.1.180): the default
+// replaces the matched element, `merge` merges into it.
+@db.table 'aos_keyed'
+export interface AosKeyed {
+    @meta.id
+    id: number
+
+    plain?: {
+        @expect.array.key
+        sku: string
+        qty: number
+        note?: string
+    }[]
+
+    @db.patch.strategy 'merge'
+    merged?: {
+        @expect.array.key
+        sku: string
+        qty: number
+        note?: string
+    }[]
+
+    keyless?: {
+        label: string
+        note?: string
+    }[]
+
+    tags?: string[]
+}

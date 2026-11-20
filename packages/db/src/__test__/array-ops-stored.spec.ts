@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, vi } from "vite-plus/test";
 
+import { DbError } from "../db-error";
 import { AtscriptDbTable } from "../table/db-table";
 import type { TDbFieldMeta } from "../types";
 import { MockAdapter, prepareFixtures } from "./test-utils";
@@ -16,10 +17,11 @@ import { MockAdapter, prepareFixtures } from "./test-utils";
 
 let AosItem: any;
 let AosRenamed: any;
+let AosKeyed: any;
 
 beforeAll(async () => {
   await prepareFixtures();
-  ({ AosItem, AosRenamed } = await import("./fixtures/array-ops-stored.as"));
+  ({ AosItem, AosRenamed, AosKeyed } = await import("./fixtures/array-ops-stored.as"));
 });
 
 /** Postgres's JSON / JSONB formatter: a JSON string value read back is re-encoded as JSON text. */
@@ -54,6 +56,18 @@ function setup({ pgTags = false } = {}) {
     table,
     fromStorage,
     seed: (row: object) => rows.get(table.tableName)!.push({ ...row }),
+  };
+}
+
+/** A table of `type` on a fresh `MockAdapter`, with no rows. */
+function setupTable(type: any) {
+  const adapter = new MockAdapter();
+  const table = new AtscriptDbTable(type, adapter);
+  adapter.store.set(table.tableName, []);
+  return {
+    adapter,
+    table,
+    seed: (row: object) => adapter.store.get(table.tableName)!.push({ ...row }),
   };
 }
 
@@ -150,19 +164,8 @@ describe("array patch operators read the stored value through fromStorage", () =
 // (`@db.column`) or flattened array column lost `uniqueItems` (`$insert`
 // stored a duplicate) and its merge strategy (`$upsert` replaced the item).
 describe("array patch operators on a renamed or flattened column keep its array settings", () => {
-  function setupRenamed() {
-    const adapter = new MockAdapter();
-    const table = new AtscriptDbTable(AosRenamed, adapter);
-    adapter.store.set(table.tableName, []);
-    return {
-      adapter,
-      table,
-      seed: (row: object) => adapter.store.get(table.tableName)!.push({ ...row }),
-    };
-  }
-
   it("uniqueItems: $insert of a value already stored does not add it twice", async () => {
-    const { adapter, table, seed } = setupRenamed();
+    const { adapter, table, seed } = setupTable(AosRenamed);
     seed({ id: 1, u_col: ["a"], box__labels: ["x"] });
     await table.updateOne({
       id: 1,
@@ -173,9 +176,108 @@ describe("array patch operators on a renamed or flattened column keep its array 
   });
 
   it("merge strategy: $upsert of a matching item keeps the fields it does not name", async () => {
-    const { adapter, table, seed } = setupRenamed();
+    const { adapter, table, seed } = setupTable(AosRenamed);
     seed({ id: 1, m_col: [{ sku: "a", qty: 1, note: "keep" }] });
     await table.updateOne({ id: 1, merged: { $upsert: [{ sku: "a", qty: 2 }] } } as any);
     expect(written(adapter)).toMatchObject({ m_col: [{ sku: "a", qty: 2, note: "keep" }] });
+  });
+});
+
+/** The keyed array a row is seeded with. */
+const stored = () => [
+  { sku: "a", qty: 1, note: "keep" },
+  { sku: "b", qty: 5, note: "other" },
+];
+
+// `$update` follows the array's patch strategy, as `$upsert` does and as
+// MongoDB applies it natively. Before 0.1.180 this read-modify-write path
+// merged under both strategies, so the same update kept an omitted optional
+// field here and cleared it on MongoDB.
+describe("array $update follows the patch strategy", () => {
+  it("replace strategy (default): the matched element becomes the item; the rest is untouched", async () => {
+    const { adapter, table, seed } = setupTable(AosKeyed);
+    seed({ id: 1, plain: stored() });
+    await table.updateOne({ id: 1, plain: { $update: [{ sku: "a", qty: 2 }] } } as any);
+    expect(written(adapter).plain).toEqual([
+      { sku: "a", qty: 2 },
+      { sku: "b", qty: 5, note: "other" },
+    ]);
+  });
+
+  it("merge strategy: the matched element keeps the fields the item does not name", async () => {
+    const { adapter, table, seed } = setupTable(AosKeyed);
+    seed({ id: 1, merged: stored() });
+    await table.updateOne({ id: 1, merged: { $update: [{ sku: "a", qty: 2 }] } } as any);
+    expect(written(adapter).merged).toEqual([
+      { sku: "a", qty: 2, note: "keep" },
+      { sku: "b", qty: 5, note: "other" },
+    ]);
+  });
+
+  it("an item whose key matches nothing changes nothing — $update never inserts", async () => {
+    const { adapter, table, seed } = setupTable(AosKeyed);
+    seed({ id: 1, plain: stored(), merged: stored() });
+    await table.updateOne({
+      id: 1,
+      plain: { $update: [{ sku: "zz", qty: 9 }] },
+      merged: { $update: [{ sku: "zz", qty: 9 }] },
+    } as any);
+    expect(written(adapter)).toMatchObject({ plain: stored(), merged: stored() });
+  });
+
+  it("a key given twice: items apply in order — the last one stands, merged over the first under merge", async () => {
+    const { adapter, table, seed } = setupTable(AosKeyed);
+    seed({ id: 1, plain: stored(), merged: stored() });
+    const items = [
+      { sku: "a", qty: 2, note: "first" },
+      { sku: "a", qty: 3 },
+    ];
+    await table.updateOne({ id: 1, plain: { $update: items }, merged: { $update: items } } as any);
+    expect((written(adapter).plain as unknown[])[0]).toEqual({ sku: "a", qty: 3 });
+    expect((written(adapter).merged as unknown[])[0]).toEqual({ sku: "a", qty: 3, note: "first" });
+  });
+
+  it("an array without key props: $update changes nothing", async () => {
+    const { adapter, table, seed } = setupTable(AosKeyed);
+    seed({ id: 1, keyless: [{ label: "x", note: "n" }], tags: ["a"] });
+    await table.updateOne({
+      id: 1,
+      keyless: { $update: [{ label: "x" }, { label: "new" }] },
+      tags: { $update: ["a", "b"] },
+    } as any);
+    expect(written(adapter)).toMatchObject({ keyless: [{ label: "x", note: "n" }], tags: ["a"] });
+  });
+});
+
+// `updateMany` is one statement for every matched row, and an array operator
+// needs each row's stored array. Before 0.1.180 the operator object itself
+// was written into the column of every matched row.
+describe("updateMany refuses array patch operators", () => {
+  it("throws INVALID_QUERY naming the field — renamed and nested too; nothing reaches the adapter", async () => {
+    const { adapter, table, seed } = setupTable(AosRenamed);
+    seed({ id: 1, u_col: ["a"], box__labels: ["x"] });
+    const error = await table
+      .updateMany({ id: 1 }, {
+        uniq: { $insert: ["b"] },
+        box: { labels: { $remove: ["x"] } },
+      } as any)
+      .then(
+        () => undefined,
+        (e: unknown) => e as DbError,
+      );
+    expect(error).toBeInstanceOf(DbError);
+    expect(error!.code).toBe("INVALID_QUERY");
+    expect(error!.errors.map((e) => e.path).toSorted()).toEqual(["box.labels", "uniq"]);
+    expect(error!.errors[0]!.message).toMatch(/not supported by updateMany/);
+    expect(adapter.calls.filter((c) => c.method === "updateMany")).toEqual([]);
+  });
+
+  it("a plain array value is still written", async () => {
+    const { adapter, table, seed } = setupTable(AosRenamed);
+    seed({ id: 1, u_col: ["a"] });
+    await table.updateMany({ id: 1 }, { uniq: ["b", "c"] } as any);
+    expect(adapter.calls.findLast((c) => c.method === "updateMany")!.args[1]).toMatchObject({
+      u_col: JSON.stringify(["b", "c"]),
+    });
   });
 });

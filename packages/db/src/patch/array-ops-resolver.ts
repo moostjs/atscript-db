@@ -157,9 +157,10 @@ function applyOps(
     result = applyRemove(result, ops.remove, keyProps);
   }
 
-  // 2. $update (always merges — update is inherently partial)
+  // 2. $update — replaces the matched element, or merges into it under
+  //    `@db.patch.strategy 'merge'` (since 0.1.180; it always merged before)
   if (ops.update) {
-    result = applyUpdate(result, ops.update, keyProps);
+    result = applyUpdate(result, ops.update, keyProps, mergeStrategy);
   }
 
   // 3. $upsert
@@ -190,20 +191,28 @@ function applyRemove(arr: unknown[], items: unknown[], keyProps: Set<string>): u
   });
 }
 
-function applyUpdate(arr: unknown[], items: unknown[], keyProps: Set<string>): unknown[] {
+function applyUpdate(
+  arr: unknown[],
+  items: unknown[],
+  keyProps: Set<string>,
+  mergeStrategy: boolean,
+): unknown[] {
+  // Without key props there is nothing to find an element by: no change
   if (keyProps.size === 0) {
     return arr;
   }
-  return arr.map((el) => {
-    const elObj = el as Record<string, unknown>;
-    const match = items.find((item) =>
-      matchByKeys(elObj, item as Record<string, unknown>, keyProps),
-    );
-    if (match) {
-      return { ...elObj, ...(match as Record<string, unknown>) };
-    }
-    return el;
-  });
+  // Items apply one after another, so a key given twice ends as its last item
+  // (merged over the first under merge strategy)
+  let result = arr;
+  for (const item of items) {
+    const itemObj = item as Record<string, unknown>;
+    result = result.map((el) => {
+      const elObj = el as Record<string, unknown>;
+      if (!matchByKeys(elObj, itemObj, keyProps)) return el;
+      return mergeStrategy ? { ...elObj, ...itemObj } : itemObj;
+    });
+  }
+  return result;
 }
 
 function applyUpsert(

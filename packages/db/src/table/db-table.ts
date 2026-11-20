@@ -1724,6 +1724,20 @@ export class AtscriptDbTable<
     // envelope strings; operator objects on encrypted fields are rejected.
     await this._encryptItems([dataCopy], "patch");
     const { update, ops } = this._translatePatch(dataCopy);
+    // An array operator needs each row's stored array, and `updateMany` is one
+    // statement for every matched row. Refused (since 0.1.180): before, the
+    // operator object itself was written into the column of every match.
+    const arrayOps = getArrayOpsFields(update);
+    if (arrayOps.size > 0) {
+      throw new DbError(
+        "INVALID_QUERY",
+        [...arrayOps].map((column) => ({
+          path: this._meta.leafByPhysical.get(column)?.path ?? column,
+          message:
+            "Array patch operators are not supported by updateMany — patch each row with updateOne or bulkUpdate",
+        })),
+      );
+    }
     const translatedFilter =
       bound?.query.filter ?? this._fieldMapper.translateFilter(filter as FilterExpr, this._meta);
     // Empty patch: nothing to SET (an empty SET list is a SQL syntax error) and
