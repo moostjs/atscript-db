@@ -47,6 +47,10 @@ afterEach(() => {
 /** `v` as it reads back from a Float32 BLOB. */
 const f32 = (v: number[]) => Array.from(new Float32Array(v));
 
+/** `rows` ordered by `id`. */
+const byId = <T extends { id: string }>(rows: T[]) =>
+  rows.toSorted((a, b) => a.id.localeCompare(b.id));
+
 /** Each row's storage class of `embedding` (`blob`, `text`, `null`). */
 const storage = (table = "vs_docs", column = "embedding") =>
   Object.fromEntries(
@@ -181,6 +185,32 @@ vecDescribe("[sqlite] vectors are stored as Float32 BLOBs (real sqlite-vec)", ()
       "f_exact",
       "j_late",
     ]);
+  });
+
+  // The search reads the same column a plain read does: a row of either
+  // stored form comes back with its numbers, never the BLOB or the JSON text
+  it("vectorSearch and vectorSearchWithCount return the vector as numbers for both stored forms", async () => {
+    const { docs } = await open();
+    writeOld("json", [1, 0.25, 0, 0]);
+    await docs.insertOne({ id: "blob", title: "t", embedding: [1, 0, 0, 0.5] });
+    expect(storage()).toEqual({ json: "text", blob: "blob" });
+    const expected = [
+      { id: "blob", embedding: f32([1, 0, 0, 0.5]) },
+      { id: "json", embedding: [1, 0.25, 0, 0] },
+    ];
+
+    const rows = await docs.vectorSearch([1, 0, 0, 0]);
+    // `toMatchObject` fails a Float32Array, a Buffer or JSON text against the plain arrays
+    expect(byId(rows)).toMatchObject(expected);
+
+    const selected = await docs.vectorSearch([1, 0, 0, 0], {
+      controls: { $select: ["id", "embedding"] },
+    });
+    expect(byId(selected)).toMatchObject(expected);
+
+    const counted = await docs.vectorSearchWithCount([1, 0, 0, 0]);
+    expect(counted.count).toBe(2);
+    expect(byId(counted.data)).toMatchObject(expected);
   });
 
   it("updating an old JSON-text row rewrites it as Float32; search follows", async () => {
