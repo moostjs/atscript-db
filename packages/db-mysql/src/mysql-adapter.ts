@@ -267,8 +267,11 @@ const MYSQL_CONTENTION_CODES: Record<number, DbErrorCode | undefined> = {
 
 /**
  * `error` as the retryable `DbError` of its contention errno (deadlock,
- * lock wait timeout, `NOWAIT` lock refusal), else `error` as is; the driver
- * error is kept as `cause`. Applied to every statement and to COMMIT.
+ * lock wait timeout, `NOWAIT` lock refusal), else `error` as is (a `DbError`
+ * too, so mapping twice is harmless); the driver error is kept as `cause`.
+ * Applied to every statement and to COMMIT — since 0.1.178 also to the
+ * schema steps that run on a connection of their own or unwrapped
+ * (`_withStrictSession`, `dropTableByName`).
  */
 function mapContention(error: unknown): unknown {
   if (!error || typeof error !== "object") return error;
@@ -626,6 +629,12 @@ export class MysqlAdapter extends BaseDbAdapter {
       } finally {
         await conn.exec("SET SESSION sql_mode = @atscript_sql_mode");
       }
+    } catch (error) {
+      // `conn` (a dedicated connection, or the transaction's own) is used
+      // unwrapped, without `_exec()`'s mapping: contention (a metadata lock on
+      // ALTER, a backfill UPDATE) is mapped here, at the boundary, so `fn`'s
+      // own catch blocks still see the driver error (since 0.1.178)
+      throw mapContention(error);
     } finally {
       if (!tx) {
         conn.release();
@@ -2838,13 +2847,32 @@ export class MysqlAdapter extends BaseDbAdapter {
     const ddl = `DROP TABLE IF EXISTS ${quoteTableName(tableName)}`;
     this._log(ddl);
     const conn = await this.driver.getConnection();
-    await conn.exec("SET FOREIGN_KEY_CHECKS = 0");
+    // Its own connection, not `_exec()`'s: contention (a metadata lock) is
+    // the retryable DbError here too (since 0.1.178)
+    const exec = contentionExec(conn);
+    // Every failure hands the connection back (since 0.1.178: a failing
+    // `SET … = 0` or restore leaked it); the first error wins
+    let failed = false;
+    let failure: unknown;
     try {
-      await conn.exec(ddl);
-    } finally {
-      await conn.exec("SET FOREIGN_KEY_CHECKS = 1");
-      conn.release();
+      await exec.exec("SET FOREIGN_KEY_CHECKS = 0");
+      await exec.exec(ddl);
+    } catch (error) {
+      failed = true;
+      failure = error;
     }
+    try {
+      await exec.exec("SET FOREIGN_KEY_CHECKS = 1");
+    } catch (error) {
+      // The session may still skip foreign-key checks: closed rather than
+      // handed to the pool's next borrower (a driver without `destroy()` can
+      // only release it)
+      if (conn.destroy) conn.destroy();
+      else conn.release();
+      throw failed ? failure : error;
+    }
+    conn.release();
+    if (failed) throw failure;
   }
 
   override async dropViewByName(viewName: string): Promise<void> {

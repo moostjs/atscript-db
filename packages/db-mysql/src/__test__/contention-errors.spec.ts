@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from "vite-plus/test";
 import { DbError, DbSpace } from "@atscript/db";
 
 import { MysqlAdapter } from "../mysql-adapter";
-import { createMockDriver, prepareFixtures } from "./test-utils";
+import { caught, createMockDriver, prepareFixtures } from "./test-utils";
 
 // A deadlock (1213) or lock wait timeout (1205) can fail the COMMIT itself or
 // a plain read inside the transaction; both reject with the retryable
@@ -38,6 +38,22 @@ function setup(overrides?: Parameters<typeof createMockDriver>[0] & { readError?
 
 const timeout = () =>
   Object.assign(new Error("Query inactivity timeout"), { code: "PROTOCOL_SEQUENCE_TIMEOUT" });
+
+/** A column diff adding `code` (one `ALTER TABLE … ADD COLUMN`). */
+const addColumn = (table: any) => ({
+  added: [table.fieldDescriptors.find((f: any) => f.path === "code")],
+  renamed: [],
+  typeChanged: [],
+  nullableChanged: [],
+  defaultChanged: [],
+});
+
+/** An `execError` failing exactly the statements named. */
+const failOn = (failures: Record<string, Error>) => (sql: string) => failures[sql];
+
+/** Every statement the mock driver ran, as `<pool|conn>:<sql>`. */
+const sqls = (driver: ReturnType<typeof createMockDriver>) =>
+  driver.calls.map((c) => `${c.via}:${c.sql}`);
 
 async function rejection(p: Promise<unknown>): Promise<unknown> {
   return p.then(
@@ -136,6 +152,138 @@ describe("[mysql] contention errors", () => {
       "ROLLBACK",
     ]);
     expect(driver.releaseCount()).toBe(2);
+  });
+
+  // Since 0.1.178: schema steps that take their own connection (the strict
+  // session of `syncColumns` / `recreateTable`, `dropTableByName`) map
+  // contention too — a metadata lock on ALTER / DROP used to reach the caller
+  // as the raw driver error. The session restores still run, the connection
+  // is still released.
+  describe("schema steps on their own connection", () => {
+    it("1205 inside syncColumns (strict session) is the retryable LOCK_TIMEOUT; sql_mode restored, released", async () => {
+      const raw = mysqlError(1205);
+      const { driver, table, adapter } = setup({
+        execError: (sql) => (sql.includes("ADD COLUMN") ? raw : undefined),
+      });
+      const error = await caught(adapter.syncColumns(addColumn(table) as any));
+      expect(error.code).toBe("LOCK_TIMEOUT");
+      expect(error.retryable).toBe(true);
+      expect(error.cause).toBe(raw);
+      const calls = sqls(driver);
+      expect(calls.at(-2)).toMatch(/^conn:ALTER TABLE .* ADD COLUMN/);
+      expect(calls.at(-1)).toBe("conn:SET SESSION sql_mode = @atscript_sql_mode");
+      expect(driver.releaseCount()).toBe(1);
+    });
+
+    it("1213 inside syncColumns on the transaction's connection is the retryable DEADLOCK", async () => {
+      const raw = mysqlError(1213);
+      const { driver, table, adapter } = setup({
+        execError: (sql) => (sql.includes("ADD COLUMN") ? raw : undefined),
+      });
+      const error = await caught(
+        adapter.withTransaction(() => adapter.syncColumns(addColumn(table) as any)),
+      );
+      expect(error.code).toBe("DEADLOCK");
+      expect(error.cause).toBe(raw);
+      expect(sqls(driver).slice(-2)).toEqual([
+        "conn:SET SESSION sql_mode = @atscript_sql_mode",
+        "conn:ROLLBACK",
+      ]);
+      expect(driver.releaseCount()).toBe(1);
+    });
+
+    it("1205 inside recreateTable is LOCK_TIMEOUT; FK checks and sql_mode restored, released", async () => {
+      const raw = mysqlError(1205);
+      const { driver, adapter } = setup({
+        execError: (sql) => (sql.startsWith("CREATE TABLE") ? raw : undefined),
+      });
+      const error = await caught(adapter.recreateTable());
+      expect(error.code).toBe("LOCK_TIMEOUT");
+      expect(error.cause).toBe(raw);
+      expect(sqls(driver).slice(-2)).toEqual([
+        "conn:SET FOREIGN_KEY_CHECKS = 1",
+        "conn:SET SESSION sql_mode = @atscript_sql_mode",
+      ]);
+      expect(driver.releaseCount()).toBe(1);
+    });
+
+    it("1205 inside dropTableByName is LOCK_TIMEOUT; FK checks restored, released", async () => {
+      const raw = mysqlError(1205);
+      const { driver, adapter } = setup({
+        execError: (sql) => (sql.startsWith("DROP TABLE") ? raw : undefined),
+      });
+      const error = await caught(adapter.dropTableByName("ce_items"));
+      expect(error.code).toBe("LOCK_TIMEOUT");
+      expect(error.retryable).toBe(true);
+      expect(error.cause).toBe(raw);
+      expect(sqls(driver)).toEqual([
+        "conn:SET FOREIGN_KEY_CHECKS = 0",
+        "conn:DROP TABLE IF EXISTS `ce_items`",
+        "conn:SET FOREIGN_KEY_CHECKS = 1",
+      ]);
+      expect(driver.releaseCount()).toBe(1);
+    });
+
+    it("a non-contention failure surfaces unchanged (syncColumns, dropTableByName)", async () => {
+      const boom = mysqlError(1105);
+      const { driver, table, adapter } = setup({
+        execError: (sql) =>
+          sql.includes("ADD COLUMN") || sql.startsWith("DROP TABLE") ? boom : undefined,
+      });
+      expect(await rejection(adapter.syncColumns(addColumn(table) as any))).toBe(boom);
+      expect(await rejection(adapter.dropTableByName("ce_items"))).toBe(boom);
+      expect(driver.releaseCount()).toBe(2);
+    });
+  });
+
+  // Since 0.1.178 `dropTableByName` hands its connection back on every
+  // failure: a failing `SET FOREIGN_KEY_CHECKS = 0` leaked it (it ran outside
+  // the try), and so did a failing restore (the release came after it).
+  describe("dropTableByName hands the connection back on every failure", () => {
+    const OFF = "SET FOREIGN_KEY_CHECKS = 0";
+    const ON = "SET FOREIGN_KEY_CHECKS = 1";
+    const DROP = "DROP TABLE IF EXISTS `ce_items`";
+
+    it("a failing SET … = 0: mapped, the restore still runs, released exactly once", async () => {
+      const raw = mysqlError(1205);
+      const { driver, adapter } = setup({ execError: failOn({ [OFF]: raw }) });
+      const error = await caught(adapter.dropTableByName("ce_items"));
+      expect(error.code).toBe("LOCK_TIMEOUT");
+      expect(error.cause).toBe(raw);
+      expect(sqls(driver)).toEqual([`conn:${OFF}`, `conn:${ON}`]);
+      expect(driver.releaseCount()).toBe(1);
+      expect(driver.destroyCount()).toBe(0);
+    });
+
+    it("a failing restore after the DROP: its error, the session closed — not handed to the pool", async () => {
+      const raw = mysqlError(1205);
+      const { driver, adapter } = setup({ execError: failOn({ [ON]: raw }) });
+      const error = await caught(adapter.dropTableByName("ce_items"));
+      expect(error.code).toBe("LOCK_TIMEOUT");
+      expect(error.cause).toBe(raw);
+      expect(sqls(driver)).toEqual([`conn:${OFF}`, `conn:${DROP}`, `conn:${ON}`]);
+      expect(driver.destroyCount()).toBe(1);
+      expect(driver.releaseCount()).toBe(0);
+    });
+
+    it("the DROP and the restore both failing: the DROP's error wins", async () => {
+      const drop = mysqlError(1213);
+      const { driver, adapter } = setup({
+        execError: failOn({ [DROP]: drop, [ON]: timeout() }),
+      });
+      const error = await caught(adapter.dropTableByName("ce_items"));
+      expect(error.code).toBe("DEADLOCK");
+      expect(error.cause).toBe(drop);
+      expect(driver.destroyCount()).toBe(1);
+      expect(driver.releaseCount()).toBe(0);
+    });
+
+    it("a driver without destroy(): a failing restore releases the connection once", async () => {
+      const boom = mysqlError(1105);
+      const { driver, adapter } = setup({ destroyable: false, execError: failOn({ [ON]: boom }) });
+      expect(await rejection(adapter.dropTableByName("ce_items"))).toBe(boom);
+      expect(driver.releaseCount()).toBe(1);
+    });
   });
 
   describe("a COMMIT that fails on the client (no server errno)", () => {
