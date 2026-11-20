@@ -1,3 +1,4 @@
+import { DbError } from "../db-error";
 import type { AtscriptDbReadable } from "../table/db-readable";
 import type { AtscriptDbView } from "../table/db-view";
 import type { BaseDbAdapter } from "../base-adapter";
@@ -567,6 +568,29 @@ export async function executeTableConstraints(
   return new SyncEntry(init);
 }
 
+/**
+ * The text of a failed table step: `error`'s message, then — for a `DbError`
+ * of several entries (since 0.1.178) — each entry that adds something,
+ * `; `-separated, as `<message>: <details>` when it has details: e.g. the
+ * index failures collected before contention ended the batch (their engine
+ * text is in `details`). An entry whose message is empty, the error's own or
+ * an earlier entry's is left out — details and all (a composite-key `UNIQUE`
+ * carries one entry per field, all with the same sentence); a single-entry
+ * error reads as before.
+ */
+function failureReason(error: unknown): string {
+  const message = (error as Error).message;
+  if (!(error instanceof DbError) || error.errors.length < 2) return message;
+  const seen = new Set([message]);
+  const parts = [message];
+  for (const entry of error.errors) {
+    if (!entry.message || seen.has(entry.message)) continue;
+    seen.add(entry.message);
+    parts.push(entry.details ? `${entry.message}: ${entry.details}` : entry.message);
+  }
+  return parts.join("; ");
+}
+
 /** The error entry of a table step that failed in `phase`. */
 function tableStepFailed(
   error: unknown,
@@ -580,7 +604,7 @@ function tableStepFailed(
     droppedFks.length > 0
       ? ` Dropped foreign keys before the failure: ${droppedFks.join(", ")} — the ones still in the model are re-added by the next run's syncForeignKeys.`
       : "";
-  const reason = (error as Error).message;
+  const reason = failureReason(error);
   // Engine messages (PostgreSQL, MySQL) end without a period — keep the note a separate sentence.
   const sep = dropped && !/[.!?]$/.test(reason) ? "." : "";
   const msg = `${phase} failed on ${facts.name}: ${reason}${sep}${dropped}`;

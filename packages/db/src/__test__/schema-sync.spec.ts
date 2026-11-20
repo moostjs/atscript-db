@@ -5,6 +5,8 @@ import {
   AtscriptDbTable,
   NoopLogger,
   ALL_VIEW_CAPABILITIES,
+  DbError,
+  createFailureCollector,
 } from "../index";
 import { planSchema, SchemaSync, syncSchema, SyncEntry, type TSyncResult } from "../sync";
 import type {
@@ -2693,6 +2695,70 @@ describe("sync hardening", () => {
     expect(entry?.status).toBe("error");
     expect(entry?.errors.join("\n")).toContain("E11000");
     expect(logged.join("\n")).toContain("Index/FK sync failed on users");
+  });
+
+  // Since 0.1.178 the table's error text names the other entries of a
+  // DbError that add something — not only its message — so index failures
+  // collected before contention ended the batch reach the report.
+  describe("the table's error text of a DbError with several entries", () => {
+    /** The `users` entry's errors when its index sync runs `fail`. */
+    async function errorText(fail: () => Promise<void>): Promise<string[]> {
+      class FailingIndexAdapter extends MockAdapter {
+        override async syncIndexes(): Promise<void> {
+          if (this._table.tableName === "users") await fail();
+        }
+      }
+      const tables = new Map<string, Array<Record<string, unknown>>>();
+      const space = new DbSpace(() => {
+        const adapter = new FailingIndexAdapter();
+        adapter.tables = tables;
+        return adapter;
+      });
+      const result = await syncSchema(space, [UsersTable], { logger: NoopLogger });
+      const entry = result.entries.find((e) => e.name === "users");
+      expect(entry?.status).toBe("error");
+      return entry!.errors;
+    }
+
+    it("contention after collected index failures: the text names both", async () => {
+      const errors = await errorText(async () => {
+        const { attempt } = createFailureCollector("index sync");
+        await attempt('create index "a"', async () => {
+          throw new Error("duplicate rows");
+        });
+        await attempt('create index "b"', async () => {
+          throw new DbError("LOCK_TIMEOUT", [{ path: "", message: "database is locked" }]);
+        });
+      });
+      expect(errors).toEqual([
+        'Index/FK sync failed on users: database is locked; create index "a" failed: duplicate rows',
+      ]);
+    });
+
+    it("entries repeating the message (a composite UNIQUE) leave the text as before, details unprinted", async () => {
+      const sentence = 'The combination of "email", "name" must be unique';
+      const raw = "UNIQUE constraint failed: users.email, users.name";
+      const entry = { message: sentence, code: "UNIQUE", details: raw };
+      const errors = await errorText(async () => {
+        throw new DbError("CONFLICT", [
+          { path: "email", ...entry },
+          { path: "name", ...entry },
+          { path: "", message: "", details: raw },
+        ]);
+      });
+      expect(errors).toEqual([`Index/FK sync failed on users: ${sentence}`]);
+    });
+
+    it("a single-entry DbError reads as before, its message only", async () => {
+      const errors = await errorText(async () => {
+        throw new DbError(
+          "INVALID_QUERY",
+          [{ path: "x", message: "entry text", details: "raw" }],
+          "top text",
+        );
+      });
+      expect(errors).toEqual(["Index/FK sync failed on users: top text"]);
+    });
   });
 
   it("continues index maintenance after a failing operation and throws one aggregate error", async () => {
