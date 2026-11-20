@@ -21,7 +21,7 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 
 ### Fixes
 
-- **MySQL: no "interpreted as BINARY" warnings for JSON columns.** On servers where mysql2 printed a `JSON column … is interpreted as BINARY` console warning for every JSON value read, reading JSON columns no longer prints it. The values read are unchanged. See [Driver type casting](/adapters/mysql#driver-type-casting).
+- **MySQL: no "interpreted as BINARY" warnings for JSON columns.** Reading JSON through a view column or a JSON expression (`JSON_EXTRACT(…)`, `CASE … END` over a JSON column) made mysql2 print a `JSON column … is interpreted as BINARY` console warning for every value read; it no longer does. A JSON column read straight from its table never warned. The values read are unchanged. See [Driver type casting](/adapters/mysql#driver-type-casting).
 
 ### Custom adapters
 

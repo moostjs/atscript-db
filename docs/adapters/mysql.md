@@ -406,7 +406,7 @@ Under `explicit_defaults_for_timestamp = OFF` a required `TIMESTAMP` column with
 - **`TIMESTAMP` / `DATETIME` → `number`** (epoch milliseconds). Reads parse the UTC datetime string back to a number, fractional seconds included; writes accept epoch ms and emit `'YYYY-MM-DD HH:MM:SS'`, plus `.fff` on a column with fractional seconds (see below).
 - **`DECIMAL` / `NEWDECIMAL` → `number`** instead of `string`. Be aware that values outside JS safe-number range may lose precision — keep `decimal` columns within `~15` significant digits if you rely on this.
 - **`timezone: '+00:00'`** is set on the pool so all timestamp operations are UTC.
-- **`jsonStrings: true`** (since 0.1.155, and the same in the `typeCast`) — `JSON` columns come back as text, as on MariaDB, and atscript-db parses them, so a JSON value that is a string stays a string.
+- **`jsonStrings: true`** (since 0.1.155, and the same in the `typeCast`) — `JSON` columns come back as text, as on MariaDB, and atscript-db parses them, so a JSON value that is a string stays a string. Since 0.1.177 the read no longer makes mysql2 print its `JSON column … is interpreted as BINARY` console warning for JSON read through a view column or a JSON expression.
 - **`supportBigNumbers: true`**, **`bigNumberStrings: false`** — `BIGINT` values within `Number.MAX_SAFE_INTEGER` come back as `number`; out-of-range values come back as **`string`** (preserves full precision without truncation). Coerce to `BigInt` yourself if you need arithmetic on those values.
 
 If you pre-create your own `mysql2/promise` `Pool` and pass it to `Mysql2Driver`, type casting becomes the caller's responsibility — replicate the settings above if you want the same behavior.
