@@ -6,6 +6,12 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.181 {#v0-1-181}
+
+### Fixes
+
+- **`$update` on a keyed array whose element type has a `phantom` prop is accepted.** Under the default (replace) strategy `$update` requires every non-optional field of the element, and it also asked for a display-only `phantom` prop (a paragraph or an action of a form, for example), which holds no data: every such `$update` was refused with `PATCH_FIELD_REQUIRED`, whatever the item held. `phantom` props are no longer asked for. See [Keyed Object Arrays](/api/update-patch#keyed-object-arrays).
+
 ## 0.1.180 {#v0-1-180}
 
 ### Changes

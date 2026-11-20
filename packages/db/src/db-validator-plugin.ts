@@ -1,4 +1,8 @@
-import { createAnnotatedTypeNode, formatValidatorMessage } from "@atscript/typescript/utils";
+import {
+  createAnnotatedTypeNode,
+  formatValidatorMessage,
+  isPhantomType,
+} from "@atscript/typescript/utils";
 import type {
   TAtscriptAnnotatedType,
   TAtscriptTypeArray,
@@ -617,9 +621,15 @@ function validatePartialItems(
     }
 
     // For $update with replace strategy: all non-optional fields are required
+    // (a phantom prop holds no data, so it is never asked for)
     if (op === "$update" && isMerge !== true) {
       for (const [propName, propDef] of objType.props) {
-        if (!propDef.optional && !keyProps.has(propName) && rec[propName] === undefined) {
+        if (
+          !propDef.optional &&
+          !isPhantomType(propDef) &&
+          !keyProps.has(propName) &&
+          rec[propName] === undefined
+        ) {
           return fail(ctx, "PATCH_FIELD_REQUIRED", { op, index: i, field: propName });
         }
       }

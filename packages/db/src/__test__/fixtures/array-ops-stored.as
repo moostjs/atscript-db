@@ -72,3 +72,19 @@ export interface AosKeyed {
     @expect.array.uniqueItems
     uniq?: string[]
 }
+
+// An array element type with a display-only (`phantom`) prop: it holds no
+// data, so no array patch operator may ask for it.
+@db.table 'aos_phantom'
+export interface AosPhantom {
+    @meta.id
+    id: number
+
+    lines?: {
+        @expect.array.key
+        sku: string
+        qty: number
+        hint: phantom
+        note?: string
+    }[]
+}

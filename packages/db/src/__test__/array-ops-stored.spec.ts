@@ -18,10 +18,11 @@ import { MockAdapter, prepareFixtures } from "./test-utils";
 let AosItem: any;
 let AosRenamed: any;
 let AosKeyed: any;
+let AosPhantom: any;
 
 beforeAll(async () => {
   await prepareFixtures();
-  ({ AosItem, AosRenamed, AosKeyed } = await import("./fixtures/array-ops-stored.as"));
+  ({ AosItem, AosRenamed, AosKeyed, AosPhantom } = await import("./fixtures/array-ops-stored.as"));
 });
 
 /** Postgres's JSON / JSONB formatter: a JSON string value read back is re-encoded as JSON text. */
@@ -421,6 +422,44 @@ describe("updateMany refuses array patch operators", () => {
     await table.updateMany({ id: 1 }, { uniq: ["b", "c"] } as any);
     expect(adapter.calls.findLast((c) => c.method === "updateMany")!.args[1]).toMatchObject({
       u_col: JSON.stringify(["b", "c"]),
+    });
+  });
+});
+
+// A `phantom` prop of the element type is display-only: it is never stored, so
+// the replace-strategy check of `$update` ("every required field is there")
+// must not ask for it (since 0.1.181; before, every such `$update` was refused
+// with PATCH_FIELD_REQUIRED and there was no item that passed).
+describe("array operators on an element type with a phantom prop", () => {
+  it.each(["$update", "$upsert", "$insert"])(
+    "%s of a whole element is accepted without the phantom prop",
+    async (op) => {
+      const { adapter, table, seed } = setupTable(AosPhantom);
+      seed({ id: 1, lines: JSON.stringify([{ sku: "a", qty: 1, note: "n" }]) });
+      const sku = op === "$insert" ? "b" : "a";
+
+      await table.updateOne({ id: 1, lines: { [op]: [{ sku, qty: 2 }] } } as never);
+
+      const lines = written(adapter).lines;
+      expect(typeof lines === "string" ? JSON.parse(lines) : lines).toEqual(
+        op === "$insert"
+          ? [
+              { sku: "a", qty: 1, note: "n" },
+              { sku: "b", qty: 2 },
+            ]
+          : [{ sku: "a", qty: 2 }],
+      );
+    },
+  );
+
+  it("$update that lacks a required data field is still refused", async () => {
+    const { table, seed } = setupTable(AosPhantom);
+    seed({ id: 1, lines: JSON.stringify([{ sku: "a", qty: 1 }]) });
+
+    await expect(
+      table.updateOne({ id: 1, lines: { $update: [{ sku: "a" }] } } as never),
+    ).rejects.toMatchObject({
+      errors: [{ code: "PATCH_FIELD_REQUIRED", params: { field: "qty" } }],
     });
   });
 });
