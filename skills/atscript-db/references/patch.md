@@ -38,13 +38,13 @@ await users.updateOne({
   id: 1,
   tags: $insert(["new"]), // append
   addresses: $upsert([{ id: "home", street: "..." }]), // key-match or append
-  devices: $update([{ id: "phone", lastSeen: now }]), // key-match, update only
+  devices: $update([{ id: "phone", lastSeen: now }]), // key-match, update only — replaces the element unless `@db.patch.strategy 'merge'`
   permissions: $remove([{ role: "guest" }]), // key-match, remove
   preferences: $replace([{ theme: "dark" }]), // overwrite the whole array
 });
 ```
 
-Key-based ops (`$upsert`, `$update`, `$remove`) require `@expect.array.key` on the element's key field so the patcher knows what to match on. `@expect.array.uniqueItems` → `$insert` skips items already stored; `@db.patch.strategy 'merge'` on a keyed array → `$upsert` of a matching element merges into it (else replaces).
+Key-based ops (`$upsert`, `$update`, `$remove`) require `@expect.array.key` on the element's key field so the patcher knows what to match on. `@expect.array.uniqueItems` → `$insert` skips items already stored; `@db.patch.strategy 'merge'` on a keyed array → `$upsert` / `$update` of a matching element merges into it (else replaces: omitted optional fields are removed). `$update` follows the strategy on EVERY adapter since 0.1.180 (≤ 0.1.179: SQLite / MySQL / PostgreSQL / memory always merged; MongoDB already replaced). `$update` never inserts; same-key items apply in order; no key props → no-op (MongoDB ≤ 0.1.179: set union). Ops of one field apply remove → update → upsert → insert on every adapter (MongoDB ≤ 0.1.179 ran update last). `updateMany` + array op → `DbError("INVALID_QUERY")` (0.1.180; before: the operator object was stored as the value) — use `updateOne` / `bulkUpdate`. MongoDB 0.1.180 fixes: `$`-prefixed strings in op items are stored as sent (≤ 0.1.179 read as field paths → could copy another field's value, SECURITY); ops on an array inside a replace-strategy nested object are applied (were stored as data); an op with an empty item list alone no longer throws `Update document requires atomic operators`.
 
 Read-modify-write (every adapter but MongoDB, which patches natively; one transaction: read row → apply ops → write the whole array):
 

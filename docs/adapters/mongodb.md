@@ -298,11 +298,11 @@ MongoDB uses aggregation pipelines for array patch operations instead of the rea
 
 - **`$insert`** — Append items to an array
 - **`$remove`** — Remove items matching a condition
-- **`$update`** — Update matching items in place
+- **`$update`** — Update matching items in place (arrays with `@expect.array.key`; without key props it changes nothing, since 0.1.180)
 - **`$upsert`** — Update if exists, insert if not
 - **`$replace`** — Replace the entire array
 
-This is transparent to your code — the same patch API works across all adapters, but MongoDB executes updates atomically on the server using `$concatArrays`, `$filter`, `$map`, and other aggregation operators.
+Operator items are passed to the pipeline as literals (since 0.1.180), so a string that starts with `$` is stored as it was sent, and the operators of one field apply in the same order as on the other adapters. This is transparent to your code — the same patch API works across all adapters, but MongoDB executes updates atomically on the server using `$concatArrays`, `$filter`, `$map`, and other aggregation operators.
 
 See [Patch Operations](/api/update-patch) for the full API.
 

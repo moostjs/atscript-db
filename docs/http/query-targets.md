@@ -104,7 +104,7 @@ The target is a **snapshot** of the ids matching at phase 1. Each row is checked
 | `fail(id, why)` | Report a row the handler could not process.                                                                                         |
 | `summary()`     | `{ matched, processed, skipped, failed }` (`TDbActionTargetSummary` from `@atscript/db`). Returning it is the recommended response. |
 
-A `@DbActionTarget()` handler that throws **after it received a batch** answers its partial summary instead of the bare error: `aborted: { status, message }`, the batch it was on in `failed` with the error's message (it may be half-applied), and every row not reached in `failed` as `"not run"`. Earlier batches stay counted in `processed`. An error before the first batch reached the handler — or before the handler started at all, such as an `@InputForm` 400 or a refusing interceptor — stays the request's error.
+A `@DbActionTarget()` handler that throws **after it received a batch** answers its partial summary instead of the bare error: `aborted: { status, message }` (the status the error would get as the request's answer: an `HttpError`'s own; a `DbError`'s or a validation error's — such as `409` for a conflict, `503` for contention, `400` for a validation error — since 0.1.180, `500` before; `500` for anything else), the batch it was on in `failed` with the error's message (it may be half-applied), and every row not reached in `failed` as `"not run"`. Earlier batches stay counted in `processed`. An error before the first batch reached the handler — or before the handler started at all, such as an `@InputForm` 400 or a refusing interceptor — stays the request's error.
 
 ### Reading the summary in a materialized handler {#summary}
 

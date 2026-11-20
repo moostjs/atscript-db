@@ -264,7 +264,9 @@ Arrays stored directly on the record support five patch operators for fine-grain
 | `$update`  | Update existing items by key  |
 | `$remove`  | Remove items by key or value  |
 
-When multiple operators appear on the same field, they are always applied in order: **remove → update → upsert → insert** — regardless of the order they appear in the object.
+When multiple operators appear on the same field, they are always applied in order: **remove → update → upsert → insert** — regardless of the order they appear in the object (on MongoDB since 0.1.180; before, it ran the update last).
+
+Array operators work in `updateOne` and `bulkUpdate`. `updateMany` throws `DbError("INVALID_QUERY")` for them (since 0.1.180; before, the operator object was stored as the field's value) — it is one statement for every matched row, and an operator needs each row's stored array.
 
 Items are validated like the items of a plain array set (since 0.1.153): an optional item field accepts `null` in `$update` too, and an error names the item property (`items.$update[0].qty`). Primitive `$remove` / `$update` values are checked one by one against the element type. Items are [normalized](/api/crud#normalization) first (since 0.1.170), keys included: `$remove: [" RED "]` removes the stored `"red"` when the element type lowercases and trims.
 
@@ -292,6 +294,8 @@ await table.updateOne({ id: 1, tags: $remove(["draft"]) });
 // Full replacement
 await table.updateOne({ id: 1, tags: $replace(["final", "approved"]) });
 ```
+
+`$update` has no key to find a value by, so it changes nothing on a primitive array (on MongoDB since 0.1.180; before, it added the values as a set union).
 
 ### Unique Primitive Arrays
 
@@ -357,7 +361,7 @@ await table.updateOne({
 });
 ```
 
-Under replace strategy, `$update` and `$upsert` replace the **entire** matched element — every required field must be present.
+Under replace strategy, `$update` and `$upsert` replace the **entire** matched element — every required field must be present, and an optional field the item leaves out is removed from the element. Since 0.1.180 this holds for `$update` on every adapter; before, SQLite, MySQL, PostgreSQL and the in-memory adapter merged the item into the element under both strategies. A `$update` item whose key matches no element changes nothing, and items that name the same key apply in order.
 
 ### Operations with Merge Strategy
 
@@ -388,7 +392,7 @@ await table.updateOne({
 
 ## Keyless Object Arrays
 
-For object arrays without `@expect.array.key`, matching falls back to **full deep value equality**. This means `$remove` works (match entire objects), but `$update` is effectively a no-op (there are no key fields to locate a target element for partial update):
+For object arrays without `@expect.array.key`, matching falls back to **full deep value equality**. This means `$remove` works (match entire objects), but `$update` is effectively a no-op (there are no key fields to locate a target element for partial update). This is the same on every adapter since 0.1.180; before, MongoDB added the `$update` items to the array as a set union:
 
 ```typescript
 import { $insert, $remove, $replace } from "@atscript/db/ops";
