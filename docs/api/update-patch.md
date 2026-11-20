@@ -266,7 +266,9 @@ Arrays stored directly on the record support five patch operators for fine-grain
 
 When multiple operators appear on the same field, they are always applied in order: **remove → update → upsert → insert** — regardless of the order they appear in the object (on MongoDB since 0.1.180; before, it ran the update last).
 
-Array operators work in `updateOne` and `bulkUpdate`. `updateMany` throws `DbError("INVALID_QUERY")` for them (since 0.1.180; before, the operator object was stored as the field's value) — it is one statement for every matched row, and an operator needs each row's stored array.
+`$replace` stands alone: operators sent next to it on the same field are ignored (on MongoDB since 0.1.180; before, it applied them to the new array).
+
+Array operators work in `updateOne` and `bulkUpdate`. `updateMany` is one statement for every matched row, and `$insert`, `$upsert`, `$update` and `$remove` need each row's stored array, so it throws `DbError("INVALID_QUERY")` for them (since 0.1.180; before, the call failed or stored a broken value, depending on the adapter). `$replace` and a plain array value work in `updateMany`.
 
 Items are validated like the items of a plain array set (since 0.1.153): an optional item field accepts `null` in `$update` too, and an error names the item property (`items.$update[0].qty`). Primitive `$remove` / `$update` values are checked one by one against the element type. Items are [normalized](/api/crud#normalization) first (since 0.1.170), keys included: `$remove: [" RED "]` removes the stored `"red"` when the element type lowercases and trims.
 

@@ -104,6 +104,13 @@ describe("MongoDB array operators", () => {
     ]);
   });
 
+  // Before, the other operators were applied to the new array
+  it("$replace stands alone: operators sent with it are ignored", async () => {
+    const id = await seed({ tags: ["a"] });
+    await table.updateOne({ id, tags: { $replace: ["x"], $insert: ["y"], $remove: ["x"] } });
+    expect((await read(id)).tags).toEqual(["x"]);
+  });
+
   // The driver rejects an empty pipeline; the row is looked up instead
   it("an operator with an empty item list changes nothing and does not throw", async () => {
     const id = await seed({ tags: ["a"] });

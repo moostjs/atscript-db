@@ -13,11 +13,6 @@ import { type Document, type Filter, type UpdateFilter, type UpdateOptions } fro
 import { joinPath } from "./path-utils";
 
 /**
- * True when a user value contains a `$`-prefixed string or object key — the
- * shapes aggregation `$set` would evaluate as field paths / operators instead
- * of treating as literal data. Caller must wrap such values in `{ $literal }`.
- */
-/**
  * `items` of an array operator as an aggregation operand. Always a
  * `$literal`: the items are data, and an aggregation expression would read a
  * `$`-prefixed string in them as a field path — storing another field's
@@ -25,6 +20,11 @@ import { joinPath } from "./path-utils";
  */
 const literal = (items: unknown[]): Document => ({ $literal: items });
 
+/**
+ * True when a user value contains a `$`-prefixed string or object key — the
+ * shapes aggregation `$set` would evaluate as field paths / operators instead
+ * of treating as literal data. Caller must wrap such values in `{ $literal }`.
+ */
 function containsAggregationExpr(v: unknown): boolean {
   if (typeof v === "string") return v.startsWith("$");
   if (Array.isArray(v)) return v.some(containsAggregationExpr);
@@ -280,11 +280,16 @@ export class CollectionPatcher {
         : new Set<string>();
     const keys = keyProps.size > 0 ? [...keyProps] : [];
 
+    // `$replace` stands alone, as on the other adapters (since 0.1.180; before,
+    // the other operators were applied to the new array)
+    if (toReplace !== undefined) {
+      this._replace(key, toReplace);
+      return;
+    }
     // The documented order, as the read-modify-write of the other adapters
     // applies them: remove → update → upsert → insert (since 0.1.180; before,
     // insert → upsert → update)
     this._remove(key, toRemove, keys, flatType);
-    this._replace(key, toReplace);
     this._update(key, toUpdate, keys, flatType);
     this._upsert(key, toUpsert, keys, flatType);
     this._insert(key, toInsert, keys, flatType);

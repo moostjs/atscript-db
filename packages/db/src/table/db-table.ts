@@ -1724,9 +1724,11 @@ export class AtscriptDbTable<
     // envelope strings; operator objects on encrypted fields are rejected.
     await this._encryptItems([dataCopy], "patch");
     const { update, ops } = this._translatePatch(dataCopy);
-    // An array operator needs each row's stored array, and `updateMany` is one
-    // statement for every matched row. Refused (since 0.1.180): before, the
-    // operator object itself was written into the column of every match.
+    // `$insert` / `$upsert` / `$update` / `$remove` need each row's stored
+    // array, and `updateMany` is one statement for every matched row (`$replace`
+    // is a plain set by now). Refused (since 0.1.180): before, the decomposed
+    // `field.__$op` key reached the adapter — an unknown column on SQL, an
+    // object stored in place of the array on the memory adapter and MongoDB.
     const arrayOps = getArrayOpsFields(update);
     if (arrayOps.size > 0) {
       throw new DbError(

@@ -249,9 +249,11 @@ describe("array $update follows the patch strategy", () => {
   });
 });
 
-// `updateMany` is one statement for every matched row, and an array operator
-// needs each row's stored array. Before 0.1.180 the operator object itself
-// was written into the column of every matched row.
+// `updateMany` is one statement for every matched row, and `$insert` /
+// `$upsert` / `$update` / `$remove` need each row's stored array. Before
+// 0.1.180 the decomposed `field.__$op` key reached the adapter: an unknown
+// column on SQL, an object stored in place of the array on the memory adapter
+// and MongoDB. `$replace` is a plain set and still works.
 describe("updateMany refuses array patch operators", () => {
   it("throws INVALID_QUERY naming the field — renamed and nested too; nothing reaches the adapter", async () => {
     const { adapter, table, seed } = setupTable(AosRenamed);
