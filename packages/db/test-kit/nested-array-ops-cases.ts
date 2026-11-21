@@ -44,11 +44,11 @@ const cases: Array<
     { title: null, inner: { note: null, labels: [] }, minner: null },
   ],
   [
-    "a merge-strategy object inside a replaced one: its omitted optional leaves are cleared too",
+    "a merge-strategy object inside a replaced one keeps its omitted children (since 0.1.183)",
     true,
     { outer: { title: "t2", minner: { labels: { $insert: ["y"] } } } },
     "outer",
-    { title: "t2", inner: null, minner: { note: null, labels: ["x", "y"] } },
+    { title: "t2", inner: null, minner: { note: "n", labels: ["x", "y"] } },
   ],
   [
     "a replace-strategy object inside a merge one: keyed $upsert",
@@ -123,12 +123,13 @@ const cases: Array<
     true,
     { outer: { title: "t2", minner: { labels: { $replace: ["z"] } } } },
     "outer",
-    { title: "t2", inner: null, minner: { note: null, labels: ["z"] } },
+    { title: "t2", inner: null, minner: { note: "n", labels: ["z"] } },
   ],
 ];
 
 type TWrite = (table: any, id: number, patch: Record<string, unknown>) => Promise<unknown>;
-const writes: Array<[string, TWrite]> = [
+/** The three patch paths: `updateOne`, `bulkUpdate`, `updateMany`. */
+export const writes: Array<[string, TWrite]> = [
   ["updateOne", (table, id, patch) => table.updateOne({ id, ...patch })],
   ["bulkUpdate", (table, id, patch) => table.bulkUpdate([{ id, ...patch }])],
   ["updateMany", (table, id, patch) => table.updateMany({ id }, patch)],

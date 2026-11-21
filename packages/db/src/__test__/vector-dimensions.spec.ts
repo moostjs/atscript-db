@@ -58,3 +58,14 @@ describe("@db.search.vector dimensions", () => {
     );
   });
 });
+
+// since 0.1.183 — the threshold is a `$score`; `1e999` reads as `Infinity`,
+// which no query could reach, so it is a compile error.
+describe("@db.search.vector.threshold", () => {
+  it("accepts a finite number and refuses one that reads as Infinity", async () => {
+    expect(await errorsFor(`1536\n    @db.search.vector.threshold 0.7`)).toEqual([]);
+    expect(await errorsFor(`1536\n    @db.search.vector.threshold 1e999`)).toEqual([
+      "@db.search.vector.threshold must be a finite number, got '1e999'",
+    ]);
+  });
+});

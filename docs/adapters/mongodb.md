@@ -304,7 +304,7 @@ MongoDB uses aggregation pipelines for array patch operations instead of the rea
 
 Operator items are passed to the pipeline as literals (since 0.1.180), so a string that starts with `$` is stored as it was sent, and the operators of one field apply in the [documented order](/api/update-patch#embedded-array-patches). In an array without `@expect.array.key`, an element equals an item whatever the order of its objects' properties, at any depth, as on the other adapters (since 0.1.182; before, the pipeline compared embedded documents in their stored property order). See [Keyless Object Arrays](/api/update-patch#keyless-object-arrays). This is transparent to your code — the same patch API works across all adapters, but MongoDB executes updates atomically on the server using `$concatArrays`, `$filter`, `$map`, and other aggregation operators.
 
-[`updateMany` with array operators](/api/update-patch#array-ops-update-many) (since 0.1.182) sends that pipeline in one `updateMany` statement, so every matching document is patched from its own array — per batch of matching `_id`s when the filter holds [relational predicates](#relational-predicates). A patch that sets nothing (an operator with an empty item list on a collection without a version column) returns the match count with `modifiedCount: 0`.
+[`updateMany` with `$insert`, `$upsert`, `$update` or `$remove`](/api/update-patch#array-ops-update-many) (since 0.1.182), or one that writes a field inside an embedded object — a `$replace` inside a nested object, a [merge-strategy object](/api/update-patch#merge-strategy) or a field operator in one (since 0.1.183; before, a plain `$set` threw `Cannot create field … in element {…: null}` on an object stored as `null`, and replaced the outer object of a [merge-strategy object inside a replaced one](/api/update-patch#merge-inside-a-replaced-object) whole), sends that pipeline in one `updateMany` statement, so every matching document is patched from its own stored values — per batch of matching `_id`s when the filter holds [relational predicates](#relational-predicates). A patch that sets nothing (an operator with an empty item list on a collection without a version column) returns the match count with `modifiedCount: 0`. Any other `updateMany` — a top-level `$replace` included, a plain set of the array — runs as a plain `updateMany` with `$set` / `$inc` / `$mul`.
 
 See [Patch Operations](/api/update-patch) for the full API.
 
@@ -631,7 +631,7 @@ category: string
 
 The adapter builds `$vectorSearch` aggregation pipelines from your schema. No subclassing or callbacks needed — pass a pre-computed embedding vector directly to `vectorSearch()`.
 
-When a threshold applies (`@db.search.vector.threshold` or `$threshold`), each row carries `_score`, the Atlas `vectorSearchScore` from `0` to `1` (higher = closer); without one, rows carry no score. The SQL adapters return a `_distance` instead. See [Result fields](/search/vector-search#result-fields).
+Each row carries `$score`, the Atlas `vectorSearchScore` from `0` to `1` (higher = closer), with or without a threshold and whatever the `$select` (since 0.1.183; the SQL adapters return the same scale). When a threshold applies (`@db.search.vector.threshold` or `$threshold`), rows also carry the same value as `_score`, as before; an inclusion `$select` drops `_score`. See [Result fields](/search/vector-search#result-fields).
 
 See [Vector Search](/search/vector-search) for the full annotation reference, programmatic API, and HTTP access.
 

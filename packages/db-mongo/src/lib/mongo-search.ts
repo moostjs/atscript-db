@@ -213,6 +213,12 @@ function textRunOptions(plan: { classicText: boolean }, query: DbQuery): TSearch
   return plan.classicText ? { classicText: true, defaultSort: RELEVANCE_SORT } : {};
 }
 
+/**
+ * Field the `vectorSearchScore` rides in through the pipeline. Renamed to the
+ * public `$score` after fetch — a field name cannot start with `$`.
+ */
+const SCORE_FIELD = "__atscript_score";
+
 /** Vector search via $vectorSearch aggregation stage. */
 export async function vectorSearchImpl(
   host: TMongoSearchHost,
@@ -223,10 +229,11 @@ export async function vectorSearchImpl(
   const controls = query.controls || {};
   const plan = buildVectorSearchPlan(host, vector, query, indexName);
   const threshold = resolveThreshold(host, controls, indexName);
-  return runSearchPipeline(host, plan.stage, query, "vectorSearch", {
-    threshold,
+  const rows = await runSearchPipeline(host, plan.stage, query, "vectorSearch", {
+    vector: { threshold },
     filterStages: plan.filterStages,
   });
+  return rows.map((row) => renameComputed(row, SCORE_FIELD, "$score"));
 }
 
 /** Vector search with faceted count. */
@@ -239,10 +246,33 @@ export async function vectorSearchWithCountImpl(
   const controls = query.controls || {};
   const plan = buildVectorSearchPlan(host, vector, query, indexName);
   const threshold = resolveThreshold(host, controls, indexName);
-  return runSearchWithCountPipeline(host, plan.stage, query, "vectorSearchWithCount", {
-    threshold,
-    filterStages: plan.filterStages,
-  });
+  const result = await runSearchWithCountPipeline(
+    host,
+    plan.stage,
+    query,
+    "vectorSearchWithCount",
+    { vector: { threshold }, filterStages: plan.filterStages },
+  );
+  return {
+    data: result.data.map((row) => renameComputed(row, SCORE_FIELD, "$score")),
+    count: result.count,
+  };
+}
+
+/**
+ * The stages right after `$vectorSearch`: its score into {@link SCORE_FIELD}
+ * (the `$meta` is read here, ahead of any `$facet`) and, with a threshold,
+ * into `_score` — kept for compatibility — with the `$match` on it.
+ */
+function vectorScoreStages(threshold: number | undefined): Document[] {
+  const score = { $meta: "vectorSearchScore" };
+  if (threshold === undefined) {
+    return [{ $addFields: { [SCORE_FIELD]: score } }];
+  }
+  return [
+    { $addFields: { _score: score, [SCORE_FIELD]: score } },
+    { $match: { _score: { $gte: threshold } } },
+  ];
 }
 
 // ── Geo search ($geoNear) ────────────────────────────────────────────────────
@@ -269,13 +299,13 @@ export async function geoSearchImpl(
     pipeline.push({ $skip: controls.$skip });
   }
   pipeline.push({ $limit: (controls.$limit as number) || 1000 });
-  pushGeoProjection(pipeline, query.controls);
+  pushProjection(pipeline, query.controls, DISTANCE_FIELD);
 
   host._log("aggregate (geoSearch)", pipeline);
   const rows = await wrapInvalidQuery(() =>
     host.collection.aggregate(pipeline, host._getSessionOpts()).toArray(),
   );
-  return rows.map((row) => renameDistance(row));
+  return rows.map((row) => renameComputed(row, DISTANCE_FIELD, "$distance"));
 }
 
 /** Geo search with faceted count (rows within the distance window). */
@@ -293,7 +323,7 @@ export async function geoSearchWithCountImpl(
   if (controls.$limit) {
     dataStages.push({ $limit: controls.$limit });
   }
-  pushGeoProjection(dataStages, query.controls);
+  pushProjection(dataStages, query.controls, DISTANCE_FIELD);
 
   const pipeline: Document[] = [
     ...buildGeoNearStages(host, point, query, indexName),
@@ -306,7 +336,7 @@ export async function geoSearchWithCountImpl(
   );
   return {
     data: ((result[0]?.data as Array<Record<string, unknown>>) || []).map((row) =>
-      renameDistance(row),
+      renameComputed(row, DISTANCE_FIELD, "$distance"),
     ),
     count: (result[0]?.meta?.[0]?.count as number) || 0,
   };
@@ -367,27 +397,36 @@ function resolveGeoKeyPath(host: TMongoGeoHost, indexName?: string): string {
 }
 
 /**
- * Appends a `$project` stage, keeping the computed distance in inclusion mode.
- * The distance key goes on a COPY: `asProjection` (and `dedupeProjection`)
- * hand back the caller's own `$select` map when nothing needs rewriting — an
- * object the caller may share across queries (moost-db memoizes, and in dev /
- * test deep-freezes, the projection of a read without `$select`).
+ * Appends the `$select` `$project` stage, keeping the computed field `keep`
+ * (the geo distance, the vector score) in inclusion mode. That key goes on a
+ * COPY: `asProjection` (and `dedupeProjection`) hand back the caller's own
+ * `$select` map when nothing needs rewriting — an object the caller may share
+ * across queries (moost-db memoizes, and in dev / test deep-freezes, the
+ * projection of a read without `$select`).
  */
-function pushGeoProjection(stages: Document[], controls: DbControls | undefined): void {
+function pushProjection(
+  stages: Document[],
+  controls: DbControls | undefined,
+  keep: string | undefined,
+): void {
   const projection = controls?.$select?.asProjection;
   if (!projection) {
     return;
   }
   const deduped = dedupeProjection(projection) as Record<string, 0 | 1>;
-  const isInclusion = Object.values(deduped).some((v) => v === 1);
-  stages.push({ $project: isInclusion ? { ...deduped, [DISTANCE_FIELD]: 1 } : deduped });
+  const isInclusion = keep !== undefined && Object.values(deduped).some((v) => v === 1);
+  stages.push({ $project: isInclusion ? { ...deduped, [keep]: 1 } : deduped });
 }
 
-/** Renames the internal distance field to the public `$distance` pseudo-field. */
-function renameDistance(row: Record<string, unknown>): Record<string, unknown> {
-  if (DISTANCE_FIELD in row) {
-    row.$distance = row[DISTANCE_FIELD];
-    delete row[DISTANCE_FIELD];
+/** Renames an internal computed field to its public `$`-prefixed name (in place). */
+function renameComputed(
+  row: Record<string, unknown>,
+  field: string,
+  name: "$distance" | "$score",
+): Record<string, unknown> {
+  if (field in row) {
+    row[name] = row[field];
+    delete row[field];
   }
   return row;
 }
@@ -822,8 +861,11 @@ function buildVectorSearchStage(
 
 /** How a search runner treats the leading stage's results. */
 interface TSearchRunOptions {
-  /** Vector similarity threshold (`_score` from `vectorSearchScore`). */
-  threshold?: number;
+  /**
+   * A `$vectorSearch`: its score rides in {@link SCORE_FIELD} (the caller
+   * renames it to `$score`); `threshold` keeps the rows whose `_score` reaches it.
+   */
+  vector?: { threshold?: number };
   /** A classic `$text` match (relevance from `textScore`). */
   classicText?: boolean;
   /**
@@ -841,13 +883,12 @@ async function runSearchPipeline(
   stage: Document,
   query: DbQuery,
   label: string,
-  { threshold, classicText = false, defaultSort, filterStages }: TSearchRunOptions = {},
+  { vector, classicText = false, defaultSort, filterStages }: TSearchRunOptions = {},
 ): Promise<Array<Record<string, unknown>>> {
   const controls = query.controls || {};
   const pipeline: Document[] = [stage];
-  if (threshold !== undefined) {
-    pipeline.push({ $addFields: { _score: { $meta: "vectorSearchScore" } } });
-    pipeline.push({ $match: { _score: { $gte: threshold } } });
+  if (vector) {
+    pipeline.push(...vectorScoreStages(vector.threshold));
   } else if (classicText) {
     pipeline.push({ $addFields: { _score: { $meta: "textScore" } } });
   }
@@ -870,10 +911,7 @@ async function runSearchPipeline(
     pipeline.push({ $limit: 1000 });
   }
   if (cleanup) pipeline.push(cleanup);
-  if (controls.$select) {
-    const projection = controls.$select.asProjection;
-    if (projection) pipeline.push({ $project: dedupeProjection(projection) });
-  }
+  pushProjection(pipeline, controls, vector ? SCORE_FIELD : undefined);
 
   host._log(`aggregate (${label})`, pipeline);
   return wrapInvalidQuery(() =>
@@ -896,14 +934,13 @@ async function runSearchWithCountPipeline(
   stage: Document,
   query: DbQuery,
   label: string,
-  { threshold, classicText = false, defaultSort, filterStages }: TSearchRunOptions = {},
+  { vector, classicText = false, defaultSort, filterStages }: TSearchRunOptions = {},
 ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
   const controls = query.controls || {};
 
   const preStages: Document[] = [];
-  if (threshold !== undefined) {
-    preStages.push({ $addFields: { _score: { $meta: "vectorSearchScore" } } });
-    preStages.push({ $match: { _score: { $gte: threshold } } });
+  if (vector) {
+    preStages.push(...vectorScoreStages(vector.threshold));
   } else if (classicText) {
     // textScore meta is NOT accessible inside $facet sub-pipelines, so project
     // it into a field BEFORE the $facet stage.
@@ -921,10 +958,7 @@ async function runSearchWithCountPipeline(
     dataStages.push({ $limit: controls.$limit });
   }
   if (cleanup) dataStages.push(cleanup);
-  if (controls.$select) {
-    const projection = controls.$select.asProjection;
-    if (projection) dataStages.push({ $project: dedupeProjection(projection) });
-  }
+  pushProjection(dataStages, controls, vector ? SCORE_FIELD : undefined);
 
   const stages = filterStages ?? mongoFilterStages(query.filter, filterOptionsOf(host));
   if ("$search" in stage && preStages.length === 0 && stages.every(isNoopMatch)) {

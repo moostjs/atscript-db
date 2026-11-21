@@ -96,15 +96,17 @@ interface Document {
 ```
 
 - HNSW index: `CREATE INDEX atscript__doc_vec ON documents USING hnsw (embedding vector_cosine_ops)`.
-- Distance ops (`postgres-adapter.ts:thresholdToDistance` / `similarityToPgOp`):
+- Distance ops + threshold (a minimum `$score`, 0.1.183) → max distance:
 
-  | `similarity` | Operator | Threshold conversion          |
-  | ------------ | -------- | ----------------------------- |
-  | `cosine`     | `<=>`    | `distance = 2 * (1 - score)`  |
-  | `euclidean`  | `<->`    | `distance = score` (raw max)  |
-  | `dotProduct` | `<#>`    | `distance = -score` (negated) |
+  | `similarity` | Operator | Kept when                             | `$score`      |
+  | ------------ | -------- | ------------------------------------- | ------------- |
+  | `cosine`     | `<=>`    | `distance <= 2 (1 − s)`               | `1 − d / 2`   |
+  | `euclidean`  | `<->`    | `distance <= 1/s − 1` (`s <= 0`: all) | `1 / (1 + d)` |
+  | `dotProduct` | `<#>`    | `<#> <= 1 − 2s` (`dot >= 2s − 1`)     | `(1 − d) / 2` |
 
-- Rows carry `_distance` = the operator's result (lower = closer; kept under any `$select`) → [crud.md § Search](crud.md#search).
+  ≤ 0.1.182: euclidean `distance <= s`, dotProduct `<#> <= −s` (`dot >= s`). A row whose vector column is NULL is never returned or counted (≤ 0.1.182 it came last with `_distance: null`).
+
+- Rows carry `$score` + `_distance` = the operator's result (lower = closer); both kept under any `$select` → [crud.md § Search](crud.md#search).
 - Pre-filter fields (`@db.search.filter 'doc_vec'`) are added to the SQL `WHERE` before the vector op.
 - Requires `CREATE EXTENSION IF NOT EXISTS vector;`.
 

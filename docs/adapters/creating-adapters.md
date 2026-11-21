@@ -160,7 +160,7 @@ In that cycle the table reads the row with your `findOne` — with `lock: { mode
 
 #### `nativePatchMany()` — since 0.1.182 {#native-patch-many}
 
-For an adapter whose `supportsNativePatch()` is `true`, an `updateMany` whose patch carries `$insert`, `$upsert`, `$update` or `$remove` calls the optional `nativePatchMany(filter, patch, ops?, opts?)`. `patch` and `ops` are what `nativePatch` receives, `filter` uses physical names, and every matching record must end as `nativePatch` would leave it — in one statement where your engine allows (MongoDB: `updateMany` with the update pipeline of `nativePatch`). There is no CAS: bump the version of every written record unless `opts.keepVersion` is set. `opts.limit` never arrives: a bounded `updateMany` reads the keys of its rows first and calls you once per batch with a filter holding them. Return the summed `{ matchedCount, modifiedCount }`; when the patch sets nothing (an operator with an empty item list on a table without a version column), count the matching records instead of writing.
+For an adapter whose `supportsNativePatch()` is `true`, an `updateMany` whose patch carries `$insert`, `$upsert`, `$update` or `$remove`, or writes a field inside an embedded object (a merge-strategy object, a `$replace` inside a nested object, a field operator in a merge-strategy object; since 0.1.183), calls the optional `nativePatchMany(filter, patch, ops?, opts?)`. Every other `updateMany` reaches your `updateMany` with the decomposed patch. `patch` and `ops` are what `nativePatch` receives, `filter` uses physical names, and every matching record must end as `nativePatch` would leave it — in one statement where your engine allows (MongoDB: `updateMany` with the update pipeline of `nativePatch`). There is no CAS: bump the version of every written record unless `opts.keepVersion` is set. `opts.limit` never arrives: a bounded `updateMany` reads the keys of its rows first and calls you once per batch with a filter holding them. Return the summed `{ matchedCount, modifiedCount }`; when the patch sets nothing (an operator with an empty item list on a table without a version column), count the matching records instead of writing.
 
 Without `nativePatchMany`, the table reads the primary keys of the matched rows and calls your `nativePatch` once per row, by primary key, inside one `withTransaction` — correct, but one statement per row.
 
@@ -859,9 +859,11 @@ Same as `search()` but also returns the total count (for paginated search result
 
 Vector similarity search. Receives a pre-computed embedding vector (`number[]`), a standard `DbQuery`, and an optional index name for multi-vector documents. Build a similarity query using your database's vector capabilities (e.g., pgvector `<->` operator, MongoDB `$vectorSearch`).
 
+Since 0.1.183 each returned row carries a `$score` field (as each geo search row carries `$distance`): higher = closer, on the MongoDB Atlas `vectorSearchScore` scale — `cosine` `(1 + cosine similarity) / 2`, `euclidean` `1 / (1 + distance)`, `dotProduct` `(1 + dot product) / 2`. The threshold (`controls.$threshold`, else `@db.search.vector.threshold`) is a minimum `$score`: return a row only when its `$score` reaches it. Never return a row that has no stored vector, and keep `$score` under any `controls.$select`. A SQL adapter gets this from `@atscript/db-sql-tools`: `vectorDistanceSource()` leaves out rows without a distance, `vectorMaxDistance(metric, threshold)` gives the distance cap for `buildVectorSearchSelect` (`undefined` = no cap), and `addVectorScore(row, metric)` adds `$score` from the row's `_distance`. Their distances are `1 − cosine similarity`, the straight-line distance, and the negative dot product; convert an engine's raw value to these first.
+
 #### `vectorSearchWithCount(vector, query, indexName?)`
 
-Same as `vectorSearch()` but also returns the total count. Returns `{ data, count }`.
+Same as `vectorSearch()` but also returns the total count. Returns `{ data, count }`; the `data` rows carry `$score` as above.
 
 ### Geo Search
 

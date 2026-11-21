@@ -123,9 +123,9 @@ const hits = await docs.vectorSearch(queryVec, {
 - `vectorSearch(vec, query?, indexName?)` and `vectorSearchWithCount(...)` implement KNN against the vec0 shadow, joined back to the main table on `rowid`.
 - vec0 KNN always needs a `k`. The adapter computes `k = (limit + skip) × overfetch` where `overfetch = 4` when residual filters or a threshold are present (otherwise `1`). The trailing `LIMIT $limit OFFSET $skip` is applied after post-filtering.
 - **Partition push-down**: top-level equality filters on fields declared `@db.search.filter '<indexName>'` are emitted inside the vec0 `WHERE` (`partition key` columns in the vec0 DDL). Non-partition filters and operator nodes (`$or`, `$gt`, …) become outer residual filters on the joined main row.
-- **Threshold**: `controls.$threshold` overrides `@db.search.vector.threshold`. Score-to-distance follows postgres semantics: cosine `distance = 2*(1 − score)`; l2 passes through as a raw distance ceiling.
+- **Threshold**: `controls.$threshold` overrides `@db.search.vector.threshold`; it is a minimum `$score`: cosine (and dotProduct, which runs as cosine) `distance <= 2*(1 − s)`; l2 `distance <= 1/s − 1`, `s <= 0` = no cap (0.1.183; ≤ 0.1.182 l2 took `s` as the raw max distance).
 - Without `{ vector: true }`: `typeMapper` falls back to JSON `TEXT`, no vec0 table is created, and `vectorSearch` throws `Vector search requires the sqlite-vec extension`.
-- Result rows carry `_distance` (sqlite-vec distance, ascending = more similar; kept under any `$select`) → scale per metric + name-collision rule: [crud.md § Search](crud.md#search). `count` returned by `vectorSearchWithCount` is approximate when residual filters or threshold trim heavily — same caveat as pgvector.
+- Result rows carry `$score` (0.1.183, `1 − d/2` cosine / `1/(1+d)` l2) and `_distance` (sqlite-vec distance, ascending = more similar); both kept under any `$select` → rules + name-collision: [crud.md § Search](crud.md#search). `count` returned by `vectorSearchWithCount` is approximate when residual filters or threshold trim heavily — same caveat as pgvector.
 - `getSearchIndexes()` returns one entry per fulltext **and** per vector index (`type: 'text' | 'vector'`).
 
 ### Identifier safety

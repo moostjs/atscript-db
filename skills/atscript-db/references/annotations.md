@@ -196,7 +196,7 @@ interface Order {
 | Annotation                    | Args                                                          | Effect                                                                                                                                                                                |
 | ----------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `@db.search.vector`           | `dimensions: number, similarity?: string, indexName?: string` | Vector-indexed field. `dimensions`: any positive integer = the embedding size (≤ 0.1.167: only 256…16384 presets). `similarity`: `'cosine'` (default), `'euclidean'`, `'dotProduct'`. |
-| `@db.search.vector.threshold` | `value: number`                                               | Default min similarity (0–1).                                                                                                                                                         |
+| `@db.search.vector.threshold` | `value: number`                                               | Default min `$score` (0–1), every adapter + metric (euclidean `1/(1+d)`, dot `(1+dot)/2`) → [crud.md § Search](crud.md#search).                                                       |
 | `@db.search.filter`           | `indexName: string`                                           | Pre-filter field for a specific vector index.                                                                                                                                         |
 
 ## Encryption & geo

@@ -664,17 +664,17 @@ dscribe("SqliteAdapter vector search (real sqlite-vec)", () => {
       expect(distances[1]).toBeLessThan(distances[2]);
     });
 
-    it("treats threshold as raw distance ceiling for non-cosine", async () => {
+    it("treats the threshold as a score, 1 / (1 + distance), not a distance (since 0.1.183)", async () => {
       await table.insertMany([
         { id: "origin", embedding: sparseVec(DIMS_512, {}) },
         { id: "near", embedding: point(0, 0.5) },
         { id: "far", embedding: point(0, 10) },
       ] as any);
 
-      // threshold 1.0 → euclidean distance ≤ 1.0
+      // score 0.5 → euclidean distance ≤ 1 / 0.5 − 1 = 1
       const results = await adapter.vectorSearch(sparseVec(DIMS_512, {}), {
         filter: {},
-        controls: { $limit: 10, $threshold: 1.0 },
+        controls: { $limit: 10, $threshold: 0.5 },
       } as any);
       const ids = results.map((r) => (r as any).id);
       expect(ids).toContain("origin");
@@ -683,6 +683,7 @@ dscribe("SqliteAdapter vector search (real sqlite-vec)", () => {
 
       for (const r of results) {
         expect((r as any)._distance as number).toBeLessThanOrEqual(1.0 + 1e-6);
+        expect(r.$score).toBeGreaterThanOrEqual(0.5 - 1e-6);
       }
     });
 

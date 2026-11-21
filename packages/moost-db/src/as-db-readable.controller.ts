@@ -2964,7 +2964,9 @@ export class AsDbReadableController<
     select: unknown,
     paging: { $skip?: number; $limit: number },
   ): Record<string, unknown> {
-    const threshold = controls.$threshold ? Number(controls.$threshold) : undefined;
+    // `0` is a threshold of its own (no cap), not "use the schema threshold".
+    const raw = controls.$threshold;
+    const threshold = raw === undefined || raw === "" ? undefined : Number(raw);
     return { ...sealed, $select: select, ...paging, $threshold: threshold };
   }
 
@@ -2999,15 +3001,15 @@ export class AsDbReadableController<
    * (reach them through the parent row), a `/one` 404, or value-help
    * controllers.
    *
-   * Two kinds of keys. **Undeclared** keys: name them with a `$` prefix, like
-   * `$actions` and `$distance`, so they can never collide with a field; they
-   * are always kept and a client cannot select them. **Declared** keys
+   * Two kinds of keys. **Undeclared** keys: name them with a `$` prefix, so
+   * they can never collide with a field; they are always kept and a client
+   * cannot select them. **Declared** keys
    * ({@link DbDecorations}, since 0.1.148): list them with `@DbDecorations`,
    * and a client may name them in `$select`; compute only `ctx.decorations`,
    * read your inputs from the columns `requires` names, and any declared key
    * not in `ctx.decorations` — and every column added only for the hook — is
-   * removed from the rows afterwards. Do not overwrite `$actions` or
-   * `$disabledReasons`. Without `@DbDecorations`, columns the hook needs but
+   * removed from the rows afterwards. Do not overwrite or reuse the built-in
+   * row keys `$actions`, `$disabledReasons`, `$distance` and `$score`. Without `@DbDecorations`, columns the hook needs but
    * the client did not select must be added in {@link transformProjection} —
    * they are then part of the response.
    *

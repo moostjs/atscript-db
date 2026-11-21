@@ -166,6 +166,20 @@ describe("Client<T> — generic typing (compile-only assertions)", () => {
     }
   });
 
+  it("a vector read ($search + $vector) types $score on every row (since 0.1.183)", () => {
+    if (!shouldRun()) {
+      const c = new Client<typeof Post>("/api/posts");
+      const rows = c.query({ controls: { $search: "cats", $vector: "embedding" } });
+      expectTypeOf<Awaited<typeof rows>[number]["$score"]>().toEqualTypeOf<number>();
+      const page = c.pages({ controls: { $search: "cats", $vector: "embedding" } }, 1, 5);
+      expectTypeOf<Awaited<typeof page>["data"][number]["$score"]>().toEqualTypeOf<number>();
+
+      // A plain or text-only read has no score
+      const text = c.query({ controls: { $search: "cats" } });
+      expectTypeOf<Awaited<typeof text>[number]>().not.toHaveProperty("$score");
+    }
+  });
+
   it("rows carry optional $actions / $disabledReasons", () => {
     if (!shouldRun()) {
       const c = new Client<typeof Post>("/api/posts");

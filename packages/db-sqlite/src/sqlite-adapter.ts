@@ -66,6 +66,7 @@ import {
   buildGeoSearchSelect,
   buildJsonColumnCopy,
   buildJsonifyText,
+  addVectorScore,
   buildVectorSearchCount,
   buildVectorSearchSelect,
   fillReplacePayload,
@@ -75,8 +76,10 @@ import {
   replaceColumnsFor,
   SEARCH_SOURCE_ALIAS,
   fromSourceSql,
+  vectorMaxDistance,
   viewReadSource,
   type TSqlFromSource,
+  type TVectorMetric,
   buildKeyViolationCount,
   unquoteSqlStringLiteral,
 } from "@atscript/db-sql-tools";
@@ -99,7 +102,6 @@ import {
   sqliteDerivedClause,
   sqliteDialect,
   sqliteTypeFromDesignType,
-  thresholdToVecDistance,
 } from "./sql-builder";
 import {
   getSqliteTxGate,
@@ -2060,7 +2062,7 @@ export class SqliteAdapter extends BaseDbAdapter {
   ): Array<Record<string, unknown>> {
     const { sql, params } = buildVectorSearchSelect(sqliteDialect, base.source, base);
     this._log(sql, params);
-    return this.driver.all(sql, params);
+    return this.driver.all(sql, params).map((row) => addVectorScore(row, base.metric));
   }
 
   /** Resolves a vector index (by name or first available) and its partition fields. */
@@ -2155,6 +2157,7 @@ export class SqliteAdapter extends BaseDbAdapter {
     maxDistance?: number;
     residual: TSqlFragment;
     select?: UniquSelect;
+    metric: TVectorMetric;
   } {
     const { vec, partitionPhysicalNames } = this._resolveVectorIndex(indexName);
     if (vector.length !== vec.dimensions) {
@@ -2186,6 +2189,9 @@ export class SqliteAdapter extends BaseDbAdapter {
       innerWhereParts.push(`v."${esc(p.name)}" = ?`);
       params.push(p.value);
     }
+    // vec0 runs dotProduct as cosine (`similarityToVecMetric`), so it is scored as cosine
+    const metric: TVectorMetric =
+      similarityToVecMetric(vec.similarity) === "l2" ? "euclidean" : "cosine";
 
     return {
       source: {
@@ -2194,9 +2200,10 @@ export class SqliteAdapter extends BaseDbAdapter {
       },
       limit,
       skip,
-      maxDistance: hasThreshold ? thresholdToVecDistance(threshold, vec.similarity) : undefined,
+      maxDistance: hasThreshold ? vectorMaxDistance(metric, threshold) : undefined,
       residual,
       select: query.controls?.$select,
+      metric,
     };
   }
 

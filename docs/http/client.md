@@ -148,11 +148,14 @@ const unranked = await users.query({
   controls: { $search: "alice", $rank: false },
 });
 
-// Vector search
+// Vector search — each row is typed with `$score` (since 0.1.183)
 const similar = await posts.query({
   controls: { $vector: "embedding", $search: "machine learning" },
 });
+similar[0].$score; // number, higher = closer
 ```
+
+A query whose controls hold both `$search` and `$vector` types `$score` on its rows, in `query()` and `pages()`. See [Result fields](/search/vector-search#result-fields).
 
 Filters may select rows by their related rows with [`$some` / `$none`](/api/queries#relational-filters) (since 0.1.147). The client sends them as [URL predicates](./query-syntax#relational-predicates); the relation must be [`@db.rel.filterable`](/relations/navigation#db-rel-filterable) on the server:
 

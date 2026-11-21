@@ -64,7 +64,8 @@ describe("[mongo] geoSearch / vectorSearch $select", () => {
       filter: {},
       controls: { $select: new UniquSelect(["title"], all) },
     });
-    expect(projections()).toEqual([{ title: 1 }]);
+    // the inclusion form keeps the score (renamed to `$score` after fetch, since 0.1.183)
+    expect(projections()).toEqual([{ title: 1, __atscript_score: 1 }]);
 
     aggregate.mockImplementation(() => ({ toArray: async () => [{ data: [], meta: [] }] }));
     await adapter.vectorSearchWithCount(vec, {

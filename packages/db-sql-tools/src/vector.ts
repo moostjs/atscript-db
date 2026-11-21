@@ -8,18 +8,84 @@ import { buildProjection } from "./sql-builder";
 /** Column every vector search row carries: the engine's distance to the query vector. */
 export const VECTOR_DISTANCE_ALIAS = "_distance";
 
+/**
+ * A similarity metric with a `$score` scale, by its distance (lower = closer):
+ * `cosine` `1 − cos` (0 to 2), `euclidean` the straight-line distance,
+ * `dotProduct` the NEGATIVE inner product (pgvector's `<#>`).
+ * @since 0.1.183
+ */
+export type TVectorMetric = "cosine" | "euclidean" | "dotProduct";
+
+/**
+ * The `$score` of a row at `distance` on `metric`: higher = closer, on the
+ * MongoDB Atlas `vectorSearchScore` scale (`dotProduct` leaves 0–1 for
+ * vectors that are not normalized).
+ * @since 0.1.183
+ */
+export function vectorScoreFromDistance(metric: TVectorMetric, distance: number): number {
+  switch (metric) {
+    case "euclidean": {
+      return 1 / (1 + distance);
+    }
+    case "dotProduct": {
+      return (1 - distance) / 2;
+    }
+    default: {
+      return 1 - distance / 2;
+    }
+  }
+}
+
+/**
+ * The largest distance whose {@link vectorScoreFromDistance} reaches
+ * `threshold` — a row is kept iff its distance is at most this. `undefined`
+ * = no cap (a `euclidean` threshold at or below `0`).
+ * @since 0.1.183
+ */
+export function vectorMaxDistance(metric: TVectorMetric, threshold: number): number | undefined {
+  switch (metric) {
+    case "euclidean": {
+      return threshold > 0 ? 1 / threshold - 1 : undefined;
+    }
+    case "dotProduct": {
+      return 1 - 2 * threshold;
+    }
+    default: {
+      return 2 * (1 - threshold);
+    }
+  }
+}
+
+/**
+ * Adds `$score` to a vector search row (in place) from its `_distance`, which
+ * stays. Every row has a distance: a row source never yields one without
+ * ({@link vectorDistanceSource}).
+ * @since 0.1.183
+ */
+export function addVectorScore(
+  row: Record<string, unknown>,
+  metric: TVectorMetric,
+): Record<string, unknown> {
+  row.$score = vectorScoreFromDistance(metric, Number(row[VECTOR_DISTANCE_ALIAS]));
+  return row;
+}
+
 /** Alias of the row source inside the vector search queries. */
 const SOURCE_ALIAS = "_v";
 
 /**
- * The row source of a vector search over a plain table:
+ * The row source of a vector search over a plain table — the rows that have
+ * a distance (a row without a stored vector has none; since 0.1.183 it is
+ * never returned nor counted):
  *
  * ```sql
- * SELECT t.*, <distExpr> AS _distance FROM <table> t WHERE <where>
+ * SELECT * FROM (SELECT t.*, <distExpr> AS _distance FROM <table> t WHERE <where>) _d
+ * WHERE _distance IS NOT NULL
  * ```
  *
  * `withRows: false` selects the distance only (the count companion).
- * Placeholders stay `?`-style.
+ * Placeholders stay `?`-style. An engine's own vector-index source (SQLite
+ * `vec0`) holds only rows with a vector.
  * @since 0.1.143
  */
 export function vectorDistanceSource(
@@ -31,8 +97,10 @@ export function vectorDistanceSource(
 ): TSqlFragment {
   const t = dialect.quoteTable(SEARCH_SOURCE_ALIAS);
   const rows = withRows ? `${t}.*, ` : "";
+  const distance = dialect.quoteIdentifier(VECTOR_DISTANCE_ALIAS);
+  const inner = `SELECT ${rows}${distExpr.sql} AS ${distance} FROM ${dialect.quoteTable(table)} AS ${t} WHERE ${where.sql}`;
   return {
-    sql: `SELECT ${rows}${distExpr.sql} AS ${dialect.quoteIdentifier(VECTOR_DISTANCE_ALIAS)} FROM ${dialect.quoteTable(table)} AS ${t} WHERE ${where.sql}`,
+    sql: `SELECT * FROM (${inner}) AS ${dialect.quoteTable("_d")} WHERE ${distance} IS NOT NULL`,
     params: [...distExpr.params, ...where.params],
   };
 }

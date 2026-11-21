@@ -71,11 +71,14 @@ import {
   buildPartitionedSelect,
   stripPartitionRowNumber,
   buildGeoSearchSelect,
+  addVectorScore,
   buildVectorSearchCount,
   buildVectorSearchSelect,
   vectorDistanceSource,
+  vectorMaxDistance,
   type TGeoSearchControls,
   type TSqlFragment,
+  type TVectorMetric,
   fillReplacePayload,
   geoWindowFromControls,
   chunkInsertRows,
@@ -3388,11 +3391,10 @@ export class MysqlAdapter extends BaseDbAdapter {
     if (!this._supportsVector) {
       throw new Error("Vector search requires MySQL 9.0+");
     }
-    const { sql, params } = this._buildVectorSearchQuery(
-      this._prepareVectorSearch(vector, query, indexName),
-    );
+    const ctx = this._prepareVectorSearch(vector, query, indexName);
+    const { sql, params } = this._buildVectorSearchQuery(ctx);
     this._log(sql, params);
-    return this._exec().all(sql, params);
+    return (await this._exec().all(sql, params)).map((row) => addVectorScore(row, ctx.metric));
   }
 
   override async vectorSearchWithCount(
@@ -3414,7 +3416,10 @@ export class MysqlAdapter extends BaseDbAdapter {
       this._exec().all(sql, params),
       this._exec().get<{ cnt: number }>(countSql, countParams),
     ]);
-    return { data, count: countRow?.cnt ?? 0 };
+    return {
+      data: data.map((row) => addVectorScore(row, ctx.metric)),
+      count: countRow?.cnt ?? 0,
+    };
   }
 
   /** Resolves vector field and computes shared context for vector search SQL builders. */
@@ -3443,7 +3448,16 @@ export class MysqlAdapter extends BaseDbAdapter {
       field = first.value[0];
       vec = first.value[1];
     }
-    const distanceFn = similarityToMysqlFn(vec!.similarity);
+    if (vec!.similarity === "dotProduct") {
+      throw new DbError("INVALID_QUERY", [
+        {
+          path: vec!.indexName,
+          message: `Vector index "${vec!.indexName}" uses "dotProduct", which the MySQL adapter cannot search — use "cosine" (the same order for normalized vectors) or "euclidean"`,
+        },
+      ]);
+    }
+    // VEC_DISTANCE_COSINE is 1 − cos, VEC_DISTANCE_EUCLIDEAN the straight-line distance
+    const metric: TVectorMetric = vec!.similarity === "euclidean" ? "euclidean" : "cosine";
     const where = buildWhere(query.filter, {
       // vectorDistanceSource aliases the table `t` — relational predicates correlate to it.
       qualifier: mysqlDialect.quoteTable(SEARCH_SOURCE_ALIAS),
@@ -3456,7 +3470,8 @@ export class MysqlAdapter extends BaseDbAdapter {
     return {
       field: field!,
       vec: vec!,
-      distanceFn,
+      distanceFn: metric === "euclidean" ? "VEC_DISTANCE_EUCLIDEAN" : "VEC_DISTANCE_COSINE",
+      metric,
       where,
       controls,
       threshold,
@@ -3466,10 +3481,8 @@ export class MysqlAdapter extends BaseDbAdapter {
   }
 
   /**
-   * The row source + distance cap of a vector search. The threshold is a
-   * normalized score matching MongoDB Atlas semantics: cosine score =
-   * (1 + cos_sim) / 2, VEC_DISTANCE_COSINE = 1 - cos_sim, so the distance cap
-   * is 2 * (1 - score).
+   * The row source + distance cap of a vector search: the threshold is a
+   * `$score` (MongoDB Atlas scale), converted to the distance function's scale.
    */
   private _vectorSearchSource(
     ctx: ReturnType<MysqlAdapter["_prepareVectorSearch"]>,
@@ -3481,7 +3494,8 @@ export class MysqlAdapter extends BaseDbAdapter {
     };
     return {
       source: vectorDistanceSource(mysqlDialect, ctx.tableName, ctx.where, distExpr, withRows),
-      maxDistance: ctx.threshold === undefined ? undefined : 2 * (1 - ctx.threshold),
+      maxDistance:
+        ctx.threshold === undefined ? undefined : vectorMaxDistance(ctx.metric, ctx.threshold),
     };
   }
 
@@ -3739,21 +3753,6 @@ function unescapeMysqlString(body: string): string {
   return body.replace(/\\([\s\S])|''/g, (match, ch: string | undefined) =>
     ch === undefined ? "'" : (MYSQL_ESCAPES[ch] ?? ch),
   );
-}
-
-/** Maps generic similarity metric to MySQL 9+ distance function name. */
-function similarityToMysqlFn(similarity: string): string {
-  switch (similarity) {
-    case "euclidean": {
-      return "VEC_DISTANCE_EUCLIDEAN";
-    }
-    case "dotProduct": {
-      return "VEC_DISTANCE_DOT";
-    }
-    default: {
-      return "VEC_DISTANCE_COSINE";
-    }
-  }
 }
 
 /** Formats a number[] vector as MySQL's STRING_TO_VECTOR input: '[1.0, 2.0, ...]'. */

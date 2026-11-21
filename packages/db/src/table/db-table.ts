@@ -23,7 +23,7 @@ import { resolveArrayOps, getArrayOpsFields } from "../patch/array-ops-resolver"
 import {
   assertNoVersionWrites,
   decomposePatch,
-  hasArrayOperators,
+  writesInsideObjects,
 } from "../patch/patch-decomposer";
 import { isVersionExemptPatch } from "../patch/version-exempt";
 import { AtscriptDbReadable } from "./db-readable";
@@ -1740,13 +1740,14 @@ export class AtscriptDbTable<
     // array (`$replace` is a plain set by now): applied to each row's own
     // (since 0.1.182; 0.1.180 – 0.1.181 refused them, and before that the
     // decomposed `field.__$op` key reached the adapter). A native-patch
-    // adapter takes every array operator there — `$replace` inside a nested
-    // object too, whose plain decomposed keys a classic update applies
-    // differently from `nativePatch` (a `null` parent, a merge child).
+    // adapter also takes there every write of a field inside an embedded
+    // object, which a classic update cannot create under an object stored as
+    // `null` (since 0.1.183) — a nested `$replace` included; a top-level one
+    // is a plain set of the array.
     const arrayOps = getArrayOpsFields(update);
     if (
       arrayOps.size > 0 ||
-      (this.adapter.supportsNativePatch() && hasArrayOperators(dataCopy, this as AtscriptDbTable))
+      (this.adapter.supportsNativePatch() && writesInsideObjects(update, ops))
     ) {
       return this._normalizeWrite(() =>
         this._updateManyArrayOps(filter as FilterExpr, bound, dataCopy, {

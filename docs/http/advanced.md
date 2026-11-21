@@ -240,7 +240,7 @@ Vector search via URL requires three components:
 
 1. **`$vector`** — the name of the vector field to search on
 2. **`$search`** — the text query (converted to an embedding by the controller)
-3. **`$threshold`** (optional) — minimum similarity threshold
+3. **`$threshold`** (optional) — minimum `$score`, from `0` to `1`
 
 The controller calls the `computeEmbedding()` hook to convert the search text into a vector, then passes it to the adapter's vector search.
 
@@ -254,12 +254,12 @@ curl "http://localhost:3000/articles/query?\$vector=embedding&\$search=machine+l
 
 ```json
 [
-  { "id": 12, "title": "Introduction to ML", "_distance": 0.1 },
-  { "id": 8, "title": "Deep Learning Guide", "_distance": 0.26 }
+  { "id": 12, "title": "Introduction to ML", "_distance": 0.1, "$score": 0.95 },
+  { "id": 8, "title": "Deep Learning Guide", "_distance": 0.26, "$score": 0.87 }
 ]
 ```
 
-Rows come closest first. Each one carries the adapter's own measure: `_distance` on the SQL adapters (lower = closer, returned whatever the `$select`), and `_score` on MongoDB (higher = closer, only when a threshold applies). The scales differ by adapter and metric. See [Result fields](/search/vector-search#result-fields).
+Rows come closest first. Since 0.1.183 each one carries `$score`: higher = closer, on the scale of `$threshold`, the same on every adapter and returned whatever the `$select`. The adapter's own field stays next to it: `_distance` on the SQL adapters, `_score` on MongoDB when a threshold applies. See [Result fields](/search/vector-search#result-fields).
 
 ### With Threshold
 
@@ -269,7 +269,7 @@ Set a minimum similarity score:
 curl "http://localhost:3000/articles/query?\$vector=embedding&\$search=machine+learning&\$threshold=0.8"
 ```
 
-Only results with similarity >= 0.8 are returned.
+Only rows whose `$score` reaches `0.8` are returned (up to floating-point rounding), whatever the adapter and metric. A `$threshold` that is not a number answers `400`.
 
 ### Combining with Filters
 

@@ -31,10 +31,13 @@ export {
 export type { TGeoSearchControls } from "./geo";
 export {
   VECTOR_DISTANCE_ALIAS,
+  addVectorScore,
   buildVectorSearchSelect,
   buildVectorSearchCount,
   vectorDistanceSource,
+  vectorMaxDistance,
 } from "./vector";
+export type { TVectorMetric } from "./vector";
 export type { TReplaceColumn } from "./sql-builder";
 export {
   SQL_DEFAULT,

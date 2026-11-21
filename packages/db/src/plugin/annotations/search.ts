@@ -30,6 +30,16 @@ function dimensionsProblem(arg: Token | undefined): TMessages[number] | undefine
   };
 }
 
+/** A threshold like `1e999` reads as `Infinity` (since 0.1.183). */
+function thresholdProblem(arg: Token | undefined): TMessages[number] | undefined {
+  if (!arg || Number.isFinite(Number(arg.text))) return undefined;
+  return {
+    message: `@db.search.vector.threshold must be a finite number, got '${arg.text}'`,
+    severity: 1,
+    range: arg.range,
+  };
+}
+
 export const dbSearchAnnotations: TAnnotationsTree = {
   search: {
     vector: {
@@ -40,7 +50,8 @@ export const dbSearchAnnotations: TAnnotationsTree = {
             "  - **MongoDB** → Atlas `$vectorSearch` index\n" +
             "  - **MySQL 9+** → `VECTOR(N)` column + `VEC_DISTANCE_*` functions\n" +
             "  - **PostgreSQL** → pgvector `vector(N)` column + distance operators\n" +
-            "  - **SQLite** → `BLOB` column + `vec0` virtual index (requires the `sqlite-vec` extension; falls back to JSON `TEXT` when unavailable)",
+            "  - **SQLite** → `BLOB` column + `vec0` virtual index (requires the `sqlite-vec` extension; falls back to JSON `TEXT` when unavailable)\n" +
+            "- Each search result carries `$score`: higher = closer, on the MongoDB Atlas `vectorSearchScore` scale on every database.",
           '@db.search.vector 1536, "cosine"',
           "embedding: db.vector",
         ),
@@ -68,7 +79,9 @@ export const dbSearchAnnotations: TAnnotationsTree = {
             type: "string",
             description:
               'The **similarity metric** for vector search. Defaults to `"cosine"`.\n\n' +
-              '**Available options:** `"cosine"`, `"euclidean"`, `"dotProduct"`.',
+              '**Available options:** `"cosine"`, `"euclidean"`, `"dotProduct"`.\n\n' +
+              "**Result `$score`:** cosine `(1 + cosine similarity) / 2`; euclidean `1 / (1 + distance)`; " +
+              "dotProduct `(1 + dot product) / 2` (use normalized vectors — otherwise it can leave `0`–`1`).",
             values: ["cosine", "euclidean", "dotProduct"],
           },
           {
@@ -83,8 +96,9 @@ export const dbSearchAnnotations: TAnnotationsTree = {
 
       threshold: new AnnotationSpec({
         description: annotationExample(
-          "Sets a **default minimum similarity threshold** for vector search queries on this field.\n\n" +
-            "- Results with a similarity score below this threshold are excluded.\n" +
+          "Sets a **default minimum similarity score** for vector search queries on this field.\n\n" +
+            "- A result is returned only when its `$score` reaches this value (up to floating-point rounding), on every database.\n" +
+            "- `$score` (MongoDB Atlas scale): cosine `(1 + cosine similarity) / 2`; euclidean `1 / (1 + distance)`; dotProduct `(1 + dot product) / 2`.\n" +
             "- Query-time `$threshold` control overrides this default.\n" +
             "- Value range: `0` to `1` (where `1` means exact match).",
           '@db.search.vector 1536, "cosine"',
@@ -92,6 +106,7 @@ export const dbSearchAnnotations: TAnnotationsTree = {
           "embedding: db.vector",
         ),
         nodeType: ["prop"],
+        validate: (_token, args) => [thresholdProblem(args[0])].filter((m) => m !== undefined),
         passedWhenReferred: false,
         multiple: false,
         argument: {
@@ -99,7 +114,7 @@ export const dbSearchAnnotations: TAnnotationsTree = {
           name: "value",
           type: "number",
           description:
-            "Minimum similarity score (`0`–`1`). Results below this threshold are excluded.",
+            "Minimum `$score` (`0`–`1`). Results whose `$score` is below it are excluded.",
         },
       }),
     },

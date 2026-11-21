@@ -46,7 +46,7 @@ curl "http://localhost:3000/todos/query?completed=false&\$sort=-createdAt&\$limi
 | `$search`    | `string`  | —       | Fulltext search term                                |
 | `$index`     | `string`  | —       | Named search index                                  |
 | `$vector`    | `string`  | —       | Vector field name for similarity search             |
-| `$threshold` | `string`  | —       | Similarity threshold for vector search              |
+| `$threshold` | `string`  | —       | Minimum `$score` for vector search (0–1)            |
 | `$rank`      | `boolean` | `true`  | `false` — unranked search (`$sort` or primary key)  |
 | `$with`      | `string`  | —       | Load relations (e.g., `$with=author,comments`)      |
 | `$groupBy`   | `string`  | —       | Group by fields for aggregation                     |

@@ -222,13 +222,15 @@ const results = await table.vectorSearch(queryEmbedding, {
 });
 ```
 
-The `$threshold` parameter is a normalized similarity score (0--1) matching MongoDB Atlas semantics. The adapter converts it to the appropriate pgvector distance value internally:
+The `$threshold` parameter is a minimum `$score` (0--1) matching MongoDB Atlas semantics. The adapter converts it to the pgvector distance it allows:
 
-- **Cosine**: `distance = 2 * (1 - score)` (score range [0, 1] maps to distance range [2, 0])
-- **Euclidean**: threshold is used as max distance directly
-- **Dot product**: threshold is negated
+- **Cosine**: `distance <= 2 × (1 − threshold)` (score range [0, 1] maps to distance range [2, 0])
+- **Euclidean**: `distance <= 1 / threshold − 1`; a threshold of `0` or below caps nothing
+- **Dot product**: `<#> <= 1 − 2 × threshold`, i.e. `dot product >= 2 × threshold − 1`
 
-Each row carries `_distance`, the operator's result for that row (lower = closer). See [Result fields](/search/vector-search#result-fields).
+Before 0.1.183 a euclidean threshold was the maximum distance itself and a dot product one required `dot product >= threshold`; see [Upgrading](/guide/upgrading#v0-1-183).
+
+Each row carries `$score` (since 0.1.183, higher = closer) and `_distance`, the operator's result for that row (lower = closer). See [Result fields](/search/vector-search#result-fields).
 
 ### Graceful Fallback
 

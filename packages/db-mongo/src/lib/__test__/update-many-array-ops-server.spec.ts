@@ -245,7 +245,9 @@ describe("MongoDB updateMany with array operators", () => {
   // `$replace` decomposes to plain keys; a classic `$set` of them failed on a
   // parent stored as `null` ("Cannot create field … in element") after other
   // documents were written, and cleared a merge child's omitted children.
-  // Every array operator takes the update pipeline now (since 0.1.182).
+  // Inside an object it takes the update pipeline (since 0.1.182); on a
+  // top-level array it is a plain set, which stores the same array (since
+  // 0.1.183; it took the pipeline).
   describe("every write path gives the updateOne result", () => {
     const docs = [
       { id: 1, status: "s", box: null, outer: null },
@@ -266,6 +268,10 @@ describe("MongoDB updateMany with array operators", () => {
       [
         "$insert inside a merge child of a replaced object",
         { outer: { title: "t2", minner: { labels: { $insert: ["y"] } } } },
+      ],
+      [
+        "$replace alone on a top-level array",
+        { tags: { $replace: ["$secret", "$$ROOT", "$tags"] } },
       ],
     ];
     type TWrite = (table: AtscriptDbTable, data: Record<string, unknown>) => Promise<unknown>;
@@ -314,6 +320,26 @@ describe("MongoDB updateMany with array operators", () => {
         undefined,
       ]);
     });
+  });
+
+  it("a top-level $replace: one plain updateMany, `$` strings stored as sent, version bumped", async () => {
+    const updateMany = vi.spyOn(collection, "updateMany");
+    const before = await all(items);
+    await items.updateMany({ status: "open" }, {
+      tags: { $replace: ["$secret", "$$ROOT"] },
+    } as any);
+    expect(updateMany).toHaveBeenCalledTimes(1);
+    expect(Array.isArray(updateMany.mock.calls[0]![1])).toBe(false);
+    const rows = await all(items);
+    expect(rows.map((row) => row.tags)).toEqual([
+      ["$secret", "$$ROOT"],
+      ["$secret", "$$ROOT"],
+      ["$secret", "$$ROOT"],
+      ["old"],
+    ]);
+    expect(rows.map((row) => row.version - before.find((b) => b.id === row.id)!.version)).toEqual([
+      1, 1, 1, 0,
+    ]);
   });
 
   it("zero matches: { 0, 0 } and nothing changes", async () => {

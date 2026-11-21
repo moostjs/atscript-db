@@ -380,12 +380,12 @@ Checked once per class, with a `[moost-db]` error: the type is an object interfa
 
 **DO**
 
-- Name the keys you add with a `$` prefix, like `$actions` and `$distance`. Such a key can never collide with a field. The prefix is a convention; nothing enforces it.
+- Name the keys you add with a `$` prefix. Such a key can never collide with a field. The prefix is a convention; nothing enforces it.
 - Add any column the hook reads but the client might not select in [`transformProjection`](#transformprojection). That column is then part of the response. (With [`@DbDecorations`](#declared-decorations) list it in `requires` instead — it is stripped again.)
 
 **DON'T**
 
-- Overwrite or remove `$actions` or `$disabledReasons`.
+- Overwrite, remove or reuse the built-in row keys: `$actions`, `$disabledReasons`, `$distance` (geo search) and `$score` (vector search).
 - Rely on columns that only an action's `requiredFields` pulled in — they are stripped again before the hook runs.
 
 ::: warning Don't "correct" stored columns in `decorateRows`

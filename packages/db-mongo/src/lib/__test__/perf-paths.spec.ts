@@ -295,6 +295,7 @@ describe("vector search pre-filters", () => {
       numCandidates: 150,
     });
     expect(pipeline.slice(1)).toEqual([
+      { $addFields: { __atscript_score: { $meta: "vectorSearchScore" } } },
       { $match: { status: "live" } },
       { $skip: 10 },
       { $limit: 5 },
@@ -316,8 +317,11 @@ describe("vector search pre-filters", () => {
     });
     const pipeline = aggregate.mock.calls[0]![0] as Array<Record<string, any>>;
     expect(pipeline[0]!.$vectorSearch.filter).toEqual({ category: { $in: ["a", "b"] } });
-    expect(pipeline[1]).toEqual({ $match: {} });
-    expect(pipeline[2]!.$facet).toBeDefined();
+    expect(pipeline[1]).toEqual({
+      $addFields: { __atscript_score: { $meta: "vectorSearchScore" } },
+    });
+    expect(pipeline[2]).toEqual({ $match: {} });
+    expect(pipeline[3]!.$facet).toBeDefined();
   });
 
   describe("splitVectorPreFilter", () => {

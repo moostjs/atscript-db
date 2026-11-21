@@ -22,6 +22,8 @@ await users.pages({ controls: { $sort: { name: 1 } } }, 1, 20);
 // Geo (tables with @db.index.geo; all adapters → geo-search.md):
 await listings.geoSearch([-122.42, 37.77], { controls: { $maxDistance: 50_000 } }); // rows + $distance
 await listings.geoPages([-122.42, 37.77], {}, 1, 20);
+// Vector (server `computeEmbedding`): controls with $search + $vector → rows typed `$score: number` (0.1.183, query + pages)
+await docs.query({ controls: { $search: "ml", $vector: "embedding", $threshold: 0.8 } }); // every row $score >= 0.8
 await users.one(42); // GET /api/users/one/42 — server calls `resolveIdFilter(id)` which matches the PK or any primary identification (configurable via `@db.table.preferredId.uniqueIndex`)
 await users.one({ username: "admin" }); // single-field unique idx → GET /api/users/one?username=admin (deterministic field-shape, no ambiguity)
 await users.one({ orderId: 1, productId: 2 }); // composite key → GET /api/users/one?orderId=1&productId=2

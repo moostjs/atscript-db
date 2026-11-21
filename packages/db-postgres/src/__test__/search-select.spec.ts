@@ -60,7 +60,7 @@ describe("[postgres] vectorSearch $select", () => {
     await table.vectorSearch(VEC, { filter: {}, controls: { $select: ["id"] } });
     // The projection applies to the outer query; the ranked source reads the rows.
     expect(searchSql(driver, "::vector")).toContain(
-      `SELECT "_v"."id", "_v"."_distance" FROM (SELECT "t".*, ("embedding" <=> $1::vector) AS "_distance"`,
+      `SELECT "_v"."id", "_v"."_distance" FROM (SELECT * FROM (SELECT "t".*, ("embedding" <=> $1::vector) AS "_distance"`,
     );
 
     driver.calls.length = 0;

@@ -257,9 +257,12 @@ const results = await documents.vectorSearch(queryEmbedding, {
 });
 ```
 
-`$threshold` is a normalized similarity score (`0`–`1`) matching MongoDB Atlas semantics; the adapter converts it to the appropriate distance for the chosen metric.
+`$threshold` is a minimum `$score` (`0`–`1`, MongoDB Atlas semantics); the adapter converts it to the matching `sqlite-vec` distance for the index's metric:
 
-Each row carries `_distance`, the `sqlite-vec` distance of that row (lower = closer). See [Result fields](/search/vector-search#result-fields).
+- **Cosine** (and `dotProduct`, which runs as cosine on SQLite): `distance <= 2 × (1 − threshold)`.
+- **Euclidean**: `distance <= 1 / threshold − 1` (since 0.1.183; before, the threshold itself was the maximum distance). A threshold of `0` or below caps nothing.
+
+Each row carries `$score` (since 0.1.183, higher = closer) and `_distance`, the `sqlite-vec` distance of that row (lower = closer). See [Result fields](/search/vector-search#result-fields).
 
 ::: tip
 `sqlite-vec` is a native module — make sure your build target matches the platform you deploy to.

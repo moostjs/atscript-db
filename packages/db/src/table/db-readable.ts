@@ -1936,6 +1936,10 @@ export class AtscriptDbReadable<
 
   /**
    * Vector similarity search with query translation and result reconstruction.
+   * Rows come closest first; each carries a computed `$score` (since
+   * 0.1.183): higher = closer, on the threshold's scale (`$threshold` /
+   * `@db.search.vector.threshold`), so every returned row has
+   * `$score >= threshold`. Returned under any `$select`.
    *
    * Overloads:
    * - `vectorSearch(vector, query?)` — uses default vector index
@@ -1945,7 +1949,7 @@ export class AtscriptDbReadable<
     vectorOrIndex: number[] | string,
     maybeVectorOrQuery?: number[] | Q,
     maybeQuery?: Q,
-  ): Promise<Array<DbResponse<DataType, NavType, Q>>> {
+  ): Promise<Array<DbResponse<DataType, NavType, Q> & { $score: number }>> {
     const { vector, query, indexName } = this._resolveVectorSearchArgs<Q>(
       vectorOrIndex,
       maybeVectorOrQuery,
@@ -1956,11 +1960,12 @@ export class AtscriptDbReadable<
     const read = this._translateRead(query as Uniquery | undefined);
     const results = await this.adapter.vectorSearch(vector, read.translated, indexName);
     const rows = await this._finishRead(results, read);
-    return rows as Array<DbResponse<DataType, NavType, Q>>;
+    return rows as Array<DbResponse<DataType, NavType, Q> & { $score: number }>;
   }
 
   /**
-   * Vector similarity search with count for paginated results.
+   * Vector similarity search with count for paginated results. Rows carry
+   * `$score` as in {@link vectorSearch}.
    *
    * Overloads:
    * - `vectorSearchWithCount(vector, query?)` — uses default vector index
@@ -1970,7 +1975,10 @@ export class AtscriptDbReadable<
     vectorOrIndex: number[] | string,
     maybeVectorOrQuery?: number[] | Q,
     maybeQuery?: Q,
-  ): Promise<{ data: Array<DbResponse<DataType, NavType, Q>>; count: number }> {
+  ): Promise<{
+    data: Array<DbResponse<DataType, NavType, Q> & { $score: number }>;
+    count: number;
+  }> {
     const { vector, query, indexName } = this._resolveVectorSearchArgs<Q>(
       vectorOrIndex,
       maybeVectorOrQuery,
@@ -1982,7 +1990,7 @@ export class AtscriptDbReadable<
     const result = await this.adapter.vectorSearchWithCount(vector, read.translated, indexName);
     const rows = await this._finishRead(result.data, read);
     return {
-      data: rows as Array<DbResponse<DataType, NavType, Q>>,
+      data: rows as Array<DbResponse<DataType, NavType, Q> & { $score: number }>,
       count: result.count,
     };
   }
@@ -1990,10 +1998,15 @@ export class AtscriptDbReadable<
   /**
    * {@link _guardQuery} for a vector search, which also refuses `$rank: false`
    * (since 0.1.175): the nearest rows ARE the result, so there is no unranked
-   * vector search.
+   * vector search; and a `$threshold` that is not a finite number (since
+   * 0.1.183 — HTTP `$threshold=abc` arrives as `NaN`).
    */
   private _guardVectorQuery(query: Uniquery | undefined): void {
     refuseUnranked(query?.controls, "vectorSearch results are similarity-ordered");
+    const threshold = (query?.controls as { $threshold?: unknown } | undefined)?.$threshold;
+    if (threshold !== undefined && !Number.isFinite(threshold)) {
+      throw invalidQuery("$threshold", "$threshold must be a finite number");
+    }
     this._guardQuery(query);
   }
 

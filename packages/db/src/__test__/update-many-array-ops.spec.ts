@@ -472,18 +472,26 @@ describe("updateMany with array operators — native-patch adapters", () => {
     expect(callsOf(adapter, "updateMany")).toEqual([]);
   });
 
-  // `$replace` decomposes to plain keys, which a classic update applies
-  // differently from `nativePatch` (a `null` parent, a merge child): every
-  // array operator takes the native path (since 0.1.182)
-  it.each([
-    ["inside a nested object", { box: { labels: { $replace: ["z"] } } }],
-    ["on a top-level array", { tags: { $replace: ["z"] } }],
-  ])("$replace alone %s takes nativePatchMany too", async (_where, data) => {
+  // `$replace` decomposes to plain keys: inside a nested object they write
+  // fields inside it, which a classic update cannot create under an object
+  // stored as `null` — the native path (since 0.1.182)
+  it("$replace alone inside a nested object takes nativePatchMany too", async () => {
     const { adapter, table, seed } = setup(fx.UmaItem, new NativeManyAdapter());
     seed(...items());
+    const data = { box: { labels: { $replace: ["z"] } } };
     await table.updateMany({ status: "open" }, data as any);
     expect(callsOf(adapter, "nativePatchMany").map((c) => c.args[1])).toEqual([data]);
     expect(callsOf(adapter, "updateMany")).toEqual([]);
+  });
+
+  // A top-level `$replace` is a plain set of the array, which a classic
+  // update stores as the pipeline does (since 0.1.183; it took the pipeline)
+  it("$replace alone on a top-level array takes the plain updateMany", async () => {
+    const { adapter, table, seed } = setup(fx.UmaItem, new NativeManyAdapter());
+    seed(...items());
+    await table.updateMany({ status: "open" }, { tags: { $replace: ["z"] } } as any);
+    expect(callsOf(adapter, "nativePatchMany")).toEqual([]);
+    expect(callsOf(adapter, "updateMany").map((c) => c.args[1])).toEqual([{ tags: ["z"] }]);
   });
 
   it("a patch without array operators still takes the plain updateMany", async () => {

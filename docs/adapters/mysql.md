@@ -343,7 +343,7 @@ export interface Document {
 | ------------------ | ------------------------ | ----------------------- |
 | `cosine` (default) | `VEC_DISTANCE_COSINE`    | Cosine distance         |
 | `euclidean`        | `VEC_DISTANCE_EUCLIDEAN` | L2 / Euclidean distance |
-| `dotProduct`       | `VEC_DISTANCE_DOT`       | Dot product distance    |
+| `dotProduct`       | —                        | Not supported (refused) |
 
 ### Runtime Search
 
@@ -354,9 +354,11 @@ const results = await table.vectorSearch(queryEmbedding, {
 });
 ```
 
-The `$threshold` parameter is a normalized similarity score (0--1) matching MongoDB Atlas semantics. The adapter converts it to the appropriate MySQL distance value internally (for cosine: `distance = 2 * (1 - score)`).
+The `$threshold` parameter is a minimum `$score` (0--1) matching MongoDB Atlas semantics. The adapter converts it to the distance it allows: for cosine `distance <= 2 × (1 − threshold)`, for euclidean `distance <= 1 / threshold − 1` (since 0.1.183; before, the cosine conversion was used; a threshold of `0` or below caps nothing).
 
-Each row carries `_distance`, the distance function's result for that row (lower = closer). See [Result fields](/search/vector-search#result-fields).
+Each row carries `$score` (since 0.1.183, higher = closer) and `_distance`, the distance function's result for that row (lower = closer). See [Result fields](/search/vector-search#result-fields).
+
+`dotProduct` vector search is not supported on MySQL: the call is refused with `DbError("INVALID_QUERY")` (HTTP 400) before any query runs (since 0.1.183; before, it failed in the database). For normalized vectors, `cosine` gives the same order.
 
 ### Graceful Fallback
 

@@ -53,7 +53,7 @@ Use `@db.search.vector.threshold` to set a minimum similarity score. Results bel
 embedding: db.vector
 ```
 
-The threshold range is `0` to `1`, where `1` means exact match. This default can be overridden at query time via the `$threshold` control.
+The threshold is a minimum [`$score`](#result-fields), from `0` to `1`, where `1` means exact match. It means the same on every adapter and for every metric: a row is returned only when its `$score` reaches the threshold (up to floating-point rounding). For `euclidean` that is `distance <= 1 / threshold − 1` (`0.5` keeps rows within distance `1`), and for `dotProduct` it is `dot product >= 2 × threshold − 1`. Before 0.1.183 SQLite, PostgreSQL and MySQL read a `euclidean` threshold differently, and PostgreSQL a `dotProduct` one (see [Upgrading](/guide/upgrading#v0-1-183)). This default can be overridden at query time via the `$threshold` control, which must be a finite number (`INVALID_QUERY` otherwise).
 
 ## Pre-Filtering
 
@@ -109,7 +109,7 @@ const results = await docs.vectorSearch(queryVector, {
 });
 ```
 
-Results are ordered by similarity (most similar first): the nearest rows are the result, so there is no unranked vector search, and `controls.$rank: false` — the [unranked text search](/search/#unranked) control — is rejected with `INVALID_QUERY` (since 0.1.175). `controls.$select` projects the rows exactly like `findMany()` — inclusion and exclusion forms, on every adapter (the SQL adapters returned every column before 0.1.143, so `@db.writeOnly` fields leaked through `$vector` queries over HTTP).
+Each row carries `$score`, higher = closer (see [Result Fields](#result-fields)). A row whose vector field holds no vector is never returned. Results are ordered by similarity (most similar first): the nearest rows are the result, so there is no unranked vector search, and `controls.$rank: false` — the [unranked text search](/search/#unranked) control — is rejected with `INVALID_QUERY` (since 0.1.175). A `controls.$sort` reorders the rows on MongoDB; SQLite, PostgreSQL and MySQL ignore it and keep the similarity order. `controls.$select` projects the rows exactly like `findMany()` — inclusion and exclusion forms, on every adapter (the SQL adapters returned every column before 0.1.143, so `@db.writeOnly` fields leaked through `$vector` queries over HTTP).
 
 ### Vector Search with Count
 
@@ -127,28 +127,48 @@ console.log(result.count); // total matches above threshold
 
 ### Result Fields {#result-fields}
 
-Each row comes back with one extra field: the database's own measure of how close the row is to the query vector. Its name and scale depend on the adapter:
+Every row comes back with `$score` (since 0.1.183): how close the row is to the query vector, higher = closer. It is MongoDB Atlas's `vectorSearchScore` scale, the scale of the threshold, on every adapter that has vector search:
 
-| Adapter    | Field       | Value                                                                                                                                                                                                                                   | Present                                                                       |
-| ---------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| SQLite     | `_distance` | The `sqlite-vec` distance, lower = closer. `cosine`: `1 − cosine similarity`, from `0` (same direction) to `2` (opposite). `euclidean`: the straight-line distance. `dotProduct` runs as cosine on SQLite, so it gets the cosine value. | On every row                                                                  |
-| PostgreSQL | `_distance` | The pgvector operator's result, lower = closer. `cosine` (`<=>`): `1 − cosine similarity`, `0` to `2`. `euclidean` (`<->`): the straight-line distance. `dotProduct` (`<#>`): the negative inner product.                               | On every row                                                                  |
-| MySQL      | `_distance` | The `VEC_DISTANCE_*` result of the index's metric, lower = closer. `cosine`: `1 − cosine similarity`, `0` to `2`.                                                                                                                       | On every row                                                                  |
-| MongoDB    | `_score`    | Atlas `vectorSearchScore`, from `0` to `1`, higher = closer. `cosine` and `dotProduct`: `(1 + similarity) / 2`. `euclidean`: `1 / (1 + distance)`.                                                                                      | Only when a threshold applies (`@db.search.vector.threshold` or `$threshold`) |
+| Metric       | `$score`                                             | Range                                                      |
+| ------------ | ---------------------------------------------------- | ---------------------------------------------------------- |
+| `cosine`     | `(1 + cosine similarity) / 2`                        | `1` (same direction) to `0` (opposite)                     |
+| `euclidean`  | `1 / (1 + distance)`, for the straight-line distance | `1` (same point), falling toward `0` as the distance grows |
+| `dotProduct` | `(1 + dot product) / 2`                              | `0` to `1` for normalized vectors                          |
+
+Use normalized (unit-length) vectors with `dotProduct`; with other vectors the score can leave `0`–`1`. SQLite runs `dotProduct` as cosine, so a `dotProduct` index there gets the cosine `$score` (the same value for normalized vectors).
+
+```typescript
+const rows = await docs.vectorSearch(queryVector, {
+  filter: {},
+  controls: { $threshold: 0.8, $select: ["title"] },
+});
+// [{ title: "Intro to ML", $score: 0.93, ... }, { title: "Deep Learning", $score: 0.85, ... }]
+```
+
+- **Threshold:** a row is returned only when its `$score` reaches the threshold (`$threshold`, else `@db.search.vector.threshold`), up to floating-point rounding. Without a `$sort`, rows come closest first, so `$score` falls along the result.
+- **`$select`:** `$score` is returned whatever the `$select`, in its inclusion and exclusion forms. It is not a field you can name: `$select: ["title", "$score"]` fails with `Unknown field "$score"`.
+- **Everywhere:** the rows of `vectorSearchWithCount()` carry it, and so do the rows of `$vector` requests over HTTP (`/query` and `/pages`). `vectorSearch()` and `vectorSearchWithCount()` type their rows `& { $score: number }`, and the [browser client](/http/client) types it on `query()` / `pages()` rows of a query with `$search` and `$vector`.
+- **MySQL `dotProduct`:** not supported — the search is refused with `INVALID_QUERY`; see [MySQL vector support](/adapters/mysql#vector-support-mysql-9-0).
 
 The in-memory adapter has no vector search.
 
-The rows of `vectorSearchWithCount()` carry the same field, and so do the rows of `$vector` requests over HTTP (`/query` and `/pages`). The field is not part of the row's TypeScript type. Read it with a cast, for example `(row as { _distance?: number })._distance`.
+#### Engine-specific fields {#engine-specific-fields}
 
-`$select` behaves differently per adapter:
+Rows also keep the field each adapter returned before 0.1.183, unchanged, for code that already reads it. Read `$score` in new code.
 
-- **SQLite, PostgreSQL, MySQL:** `_distance` is returned whatever the `$select`. It is not a field you can name: `$select: ["title", "_distance"]` fails with `Unknown field "_distance"`.
-- **MongoDB:** an inclusion `$select` (`["title"]`) drops `_score`. An exclusion `$select` (`{ embedding: 0 }`) keeps it.
+| Adapter    | Field       | Value                                                                                                                                                                                                     | Present                                                                                                        |
+| ---------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| SQLite     | `_distance` | The `sqlite-vec` distance, lower = closer. `cosine`: `1 − cosine similarity`, `0` to `2`. `euclidean`: the straight-line distance. `dotProduct` gets the cosine value.                                    | On every row, whatever the `$select`                                                                           |
+| PostgreSQL | `_distance` | The pgvector operator's result, lower = closer. `cosine` (`<=>`): `1 − cosine similarity`, `0` to `2`. `euclidean` (`<->`): the straight-line distance. `dotProduct` (`<#>`): the negative inner product. | On every row, whatever the `$select`                                                                           |
+| MySQL      | `_distance` | The `VEC_DISTANCE_*` result of the index's metric, lower = closer. `cosine`: `1 − cosine similarity`, `0` to `2`. `euclidean`: the straight-line distance.                                                | On every row, whatever the `$select`                                                                           |
+| MongoDB    | `_score`    | Atlas `vectorSearchScore` — the value of `$score`.                                                                                                                                                        | Only when a threshold applies (`@db.search.vector.threshold` or `$threshold`); an inclusion `$select` drops it |
 
 DOs and DON'Ts:
 
-- **Don't compare the value across adapters or metrics.** A distance is not a score, and each engine has its own scale. Rows already come ordered closest first. To leave out far rows, pass `$threshold` instead of filtering on the field.
-- **Don't declare a field named `_distance` (SQLite, PostgreSQL, MySQL) or `_score` (MongoDB) on a table you vector-search.** The name collides with the result field. On SQLite, the search then orders the rows by your stored field instead of the distance, and the distance comes back as `_distance:1`. On MongoDB, the score replaces your stored value in the results whenever a threshold applies.
+- **Do cut far rows with `$threshold`**, not by filtering rows on `$score` yourself: the threshold applies before the page is cut, so pages and counts stay right.
+- **Do use normalized vectors with `dotProduct`.** With other vectors the score can leave `0`–`1`, and one threshold means a different closeness for vectors of different lengths.
+- **Don't compare `_distance` across adapters or metrics.** Each engine has its own distance scale; `$score` is the portable value.
+- **Don't declare a field named `_distance` (SQLite, PostgreSQL, MySQL) or `_score` (MongoDB) on a table you vector-search.** The name collides with the result field. On SQLite, the search then orders the rows by your stored field instead of the distance, computes `$score` from that field, and returns the distance as `_distance:1`. On MongoDB, the score replaces your stored value in the results whenever a threshold applies.
 
 ### Overriding Threshold at Query Time
 
@@ -249,13 +269,13 @@ GET /documents/query?$search=cooking&$vector=embedding&category=food&$limit=10
 GET /documents/pages?$search=optimization&$vector=embedding&$page=1&$size=20
 ```
 
-| Parameter    | Description                                                               |
-| ------------ | ------------------------------------------------------------------------- |
-| `$search`    | Text query (required — the controller converts it to an embedding)        |
-| `$vector`    | Vector field name to search on (e.g., `embedding`)                        |
-| `$threshold` | Minimum similarity score override (0–1); `0` disables threshold filtering |
+| Parameter    | Description                                                        |
+| ------------ | ------------------------------------------------------------------ |
+| `$search`    | Text query (required — the controller converts it to an embedding) |
+| `$vector`    | Vector field name to search on (e.g., `embedding`)                 |
+| `$threshold` | Minimum [`$score`](#result-fields) override (0–1)                  |
 
-When a table has only one vector field, `$vector=embedding` (the field name) is the minimal form. For multiple vector fields, `$vector` selects which one to search.
+When a table has only one vector field, `$vector=embedding` (the field name) is the minimal form. For multiple vector fields, `$vector` selects which one to search. Each row of the response carries [`$score`](#result-fields).
 
 ::: warning
 Your controller must override `computeEmbedding()` to convert the `$search` text into a vector. Without this override, vector search via HTTP returns `501 Not Implemented`. See [HTTP — Advanced](/http/advanced) for setup details.

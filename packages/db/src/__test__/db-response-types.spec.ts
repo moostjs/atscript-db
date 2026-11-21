@@ -88,12 +88,15 @@ describe("Reading methods — nav-prop-free table returns full data", () => {
     type R = Returns<typeof usersTable.vectorSearch<Q>>[number];
     expectTypeOf<R>().toHaveProperty("id").toEqualTypeOf<number>();
     expectTypeOf<R>().toHaveProperty("email").toEqualTypeOf<string>();
+    // since 0.1.183 — every vector row carries the portable score
+    expectTypeOf<R>().toHaveProperty("$score").toEqualTypeOf<number>();
   });
 
   it("vectorSearchWithCount", () => {
     type R = Returns<typeof usersTable.vectorSearchWithCount<Q>>;
     expectTypeOf<R>().toHaveProperty("count").toEqualTypeOf<number>();
     expectTypeOf<R["data"][number]>().toHaveProperty("email").toEqualTypeOf<string>();
+    expectTypeOf<R["data"][number]>().toHaveProperty("$score").toEqualTypeOf<number>();
   });
 });
 
@@ -179,5 +182,6 @@ describe("Reading methods — include requested nav props via $with", () => {
   it("vectorSearch includes the requested nav prop", () => {
     type R = Returns<typeof authorTable.vectorSearch<Q>>[number];
     expectTypeOf<R>().toHaveProperty("posts");
+    expectTypeOf<R>().toHaveProperty("$score").toEqualTypeOf<number>();
   });
 });

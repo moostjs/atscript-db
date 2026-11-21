@@ -65,7 +65,7 @@ describe("[mysql] vectorSearch $select", () => {
     await table.vectorSearch(VEC, { filter: {}, controls: { $select: ["id"] } });
     // The projection applies to the outer query; the ranked source reads the rows.
     expect(searchSql(driver, "STRING_TO_VECTOR")).toMatch(
-      /^SELECT `_v`\.`id`, `_v`\.`_distance` FROM \(SELECT `t`\.\*, VEC_DISTANCE/,
+      /^SELECT `_v`\.`id`, `_v`\.`_distance` FROM \(SELECT \* FROM \(SELECT `t`\.\*, VEC_DISTANCE/,
     );
 
     driver.calls.length = 0;

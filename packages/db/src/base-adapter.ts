@@ -1496,6 +1496,13 @@ export abstract class BaseDbAdapter {
 
   /**
    * Vector similarity search. Override in adapters that support vector search.
+   * Rows come closest first; each row carries a `$score` field (since
+   * 0.1.183): higher = closer, on the scale of the threshold — MongoDB Atlas
+   * `vectorSearchScore` (`cosine` `(1 + cos) / 2`, `euclidean`
+   * `1 / (1 + distance)`, `dotProduct` `(1 + dot) / 2`). Return a row only
+   * when its `$score` reaches the threshold (`$threshold`, else
+   * `@db.search.vector.threshold`), never a row without a stored vector, and
+   * keep `$score` under any `$select`.
    *
    * @param vector - Pre-computed embedding vector.
    * @param query - Filter, sort, limit, etc.
@@ -1510,7 +1517,8 @@ export abstract class BaseDbAdapter {
   }
 
   /**
-   * Vector similarity search with count (for paginated results).
+   * Vector similarity search with count (for paginated results). Rows carry
+   * `$score` as in {@link vectorSearch}.
    *
    * @param vector - Pre-computed embedding vector.
    * @param query - Filter, sort, limit, etc.

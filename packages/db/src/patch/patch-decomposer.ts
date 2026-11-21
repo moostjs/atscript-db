@@ -6,6 +6,7 @@ import {
 } from "@atscript/typescript/utils";
 
 import { DbError } from "../db-error";
+import type { TFieldOps } from "../ops";
 import type { AtscriptDbTable } from "../table/db-table";
 import type { TableMetadata } from "../table/table-metadata";
 import { getKeyProps } from "./patch-types";
@@ -78,19 +79,19 @@ function flattenPatchPayload(
       flattenPatchPayload(value, key, update, meta);
     } else if (meta.flattenedParents.has(key)) {
       // Replace: required-missing leaves are caught earlier by the strict validator;
-      // null-fill the optional ones so the omission isn't silently lost.
+      // null-fill the optional ones so the omission isn't silently lost — except
+      // inside a merge-strategy object the patch gives (since 0.1.183).
       flattenPatchPayload(value, key, update, meta);
       const optLeaves = meta.optionalLeavesByLogicalParent.get(key);
       if (optLeaves) {
         for (const lp of optLeaves) {
-          if (!(lp in update)) update[lp] = null;
+          if (!(lp in update) && !inGivenMergeObject(lp, key, value, meta)) update[lp] = null;
         }
       }
-    } else if (isStoredObject(flatType) && carriesArrayOps(value, key, meta)) {
-      // An object a nested-object adapter stores whole, with array operators
-      // inside: they need the stored arrays, so it is set leaf by leaf as the
-      // flattening adapters set it (since 0.1.182; before, the operator object
-      // itself was stored as the array's value)
+    } else if (isStoredObject(flatType) && carriesLeafWrites(value, key, meta)) {
+      // An object a nested-object adapter stores whole, with array operators or
+      // a merge-strategy object inside: they need the stored values, so it is
+      // set leaf by leaf as the flattening adapters set it (since 0.1.182 / 0.1.183).
       decomposeReplaceObject(value, key, update, meta);
     } else {
       // Simple field set
@@ -114,43 +115,69 @@ function isPatchableArray(type: TAtscriptAnnotatedType | undefined): boolean {
   return !!type?.metadata?.get(TOP_LEVEL_ARRAY_TAG) && !type.metadata.has("db.json");
 }
 
-/**
- * Whether a patch payload holds an array operator — `$replace` included — on
- * an array field at any depth, top-level or inside nested objects (since
- * 0.1.182). Decomposed, `$replace` is a plain set that no longer shows: a
- * native-patch adapter's `updateMany` asks this to take such a patch to
- * `nativePatchMany`, where it ends as `updateOne` leaves it.
- */
-export function hasArrayOperators(
-  payload: Record<string, unknown>,
-  table: AtscriptDbTable,
-): boolean {
-  return carriesArrayOps(payload, "", table.getMetadata());
+/** Whether `type` is a stored object with `@db.patch.strategy 'merge'`. */
+function isMergeObject(type: TAtscriptAnnotatedType | undefined): boolean {
+  return isStoredObject(type) && type?.metadata?.get("db.patch.strategy") === "merge";
 }
 
-/** Whether `value` (the object at `prefix`, `""` for the payload) holds array operators, at any depth. */
-function carriesArrayOps(
+/** Whether `leaf`, under the replaced object `value` at `parent`, is inside a merge-strategy object the patch gives. */
+function inGivenMergeObject(
+  leaf: string,
+  parent: string,
+  value: Record<string, unknown>,
+  meta: TableMetadata,
+): boolean {
+  let node: unknown = value;
+  let path = parent;
+  for (const prop of leaf
+    .slice(parent.length + 1)
+    .split(".")
+    .slice(0, -1)) {
+    node = (node as Record<string, unknown>)[prop];
+    if (!isObjectValue(node)) return false;
+    path += `.${prop}`;
+    if (meta.flatMap.get(path)?.metadata?.get("db.patch.strategy") === "merge") return true;
+  }
+  return false;
+}
+
+/**
+ * Whether `value`, the replaced object at `prefix`, holds an array operator or
+ * a merge-strategy object, at any depth through stored objects.
+ */
+function carriesLeafWrites(
   value: Record<string, unknown>,
   prefix: string,
   meta: TableMetadata,
 ): boolean {
   for (const [prop, child] of Object.entries(value)) {
     if (!isObjectValue(child)) continue;
-    const key = prefix ? `${prefix}.${prop}` : prop;
+    const key = `${prefix}.${prop}`;
     const childType = meta.flatMap.get(key);
-    if (isPatchableArray(childType)) return true;
-    if (isStoredObject(childType) && carriesArrayOps(child, key, meta)) return true;
+    if (isPatchableArray(childType) || isMergeObject(childType)) return true;
+    if (isStoredObject(childType) && carriesLeafWrites(child, key, meta)) return true;
   }
   return false;
 }
 
 /**
+ * Whether a decomposed patch writes a field inside an embedded object (a
+ * dot-path key, `$inc` / `$mul` included): a classic update cannot create one
+ * under an object stored as `null`, `nativePatch` can (since 0.1.183). Every
+ * array operator inside an object decomposes to such a key, `$replace` too.
+ */
+export function writesInsideObjects(update: Record<string, unknown>, ops?: TFieldOps): boolean {
+  return [update, ops?.inc, ops?.mul].some(
+    (fields) => fields !== undefined && Object.keys(fields).some((field) => field.includes(".")),
+  );
+}
+
+/**
  * Sets a replaced object of a nested-object adapter leaf by leaf, as the
  * flattening adapters store it: a given leaf is set, an omitted optional
- * child cleared (`null`), an array operator decomposed, and a nested object
- * replaced the same way — also one with `@db.patch.strategy 'merge'`, whose
- * omitted optional leaves the flattening adapters clear under a replaced
- * parent. Required children are present (the strict validator ran).
+ * child cleared (`null`), an array operator decomposed, a nested object
+ * replaced the same way, and a merge-strategy one merged (since 0.1.183).
+ * Required children are present (the strict validator ran).
  */
 function decomposeReplaceObject(
   value: Record<string, unknown>,
@@ -170,6 +197,8 @@ function decomposeReplaceObject(
     const childType = meta.flatMap.get(key);
     if (isObjectValue(child) && isPatchableArray(childType)) {
       decomposeArrayPatch(key, child, childType!, update);
+    } else if (isObjectValue(child) && isMergeObject(childType)) {
+      flattenPatchPayload(child, key, update, meta);
     } else if (isObjectValue(child) && isStoredObject(childType)) {
       decomposeReplaceObject(child, key, update, meta);
     } else {

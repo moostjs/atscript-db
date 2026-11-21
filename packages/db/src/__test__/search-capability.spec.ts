@@ -45,7 +45,7 @@ class VectorOnlyAdapter extends IndexedMockAdapter {
   }
   override async vectorSearch(): Promise<Array<Record<string, unknown>>> {
     this.record("vectorSearch");
-    return [{ id: 1 }];
+    return [{ id: 1, $score: 1 }];
   }
 }
 
@@ -126,7 +126,7 @@ describe("a vector-only table and $search", () => {
 
   it("still runs vectorSearch() — that path never took the text gate", async () => {
     const rows = await table.vectorSearch([0.1, 0.2, 0.3]);
-    expect(rows).toEqual([{ id: 1 }]);
+    expect(rows).toEqual([{ id: 1, $score: 1 }]);
     expect(adapter.calls.some((c) => c.method === "vectorSearch")).toBe(true);
   });
 });
@@ -152,7 +152,32 @@ describe("vectorSearch and $rank: false", () => {
   it("$rank: true is the default and runs", async () => {
     const table: any = new AtscriptDbTable(AggOrders, new VectorOnlyAdapter());
     expect(await table.vectorSearch([0.1], { filter: {}, controls: { $rank: true } })).toEqual([
-      { id: 1 },
+      { id: 1, $score: 1 },
     ]);
+  });
+});
+
+// since 0.1.183 — `$threshold` is a `$score`; one that is not a finite number
+// (HTTP `$threshold=abc` arrives as NaN) is refused before the adapter runs.
+describe("vectorSearch and a non-finite $threshold", () => {
+  it.each([Number.NaN, Infinity, "0.5"])("refuses $threshold %s", async (threshold) => {
+    const adapter = new VectorOnlyAdapter();
+    const table: any = new AtscriptDbTable(AggOrders, adapter);
+    const query = { filter: {}, controls: { $threshold: threshold } };
+    for (const run of [
+      () => table.vectorSearch([0.1], query),
+      () => table.vectorSearchWithCount([0.1], query),
+    ]) {
+      const err = (await run().catch((e: unknown) => e)) as DbError;
+      expect(err).toBeInstanceOf(DbError);
+      expect([err.code, err.errors[0]?.path]).toEqual(["INVALID_QUERY", "$threshold"]);
+    }
+    expect(adapter.calls.some((c) => c.method === "vectorSearch")).toBe(false);
+  });
+
+  it("runs a finite one", async () => {
+    const table: any = new AtscriptDbTable(AggOrders, new VectorOnlyAdapter());
+    const query = { filter: {}, controls: { $threshold: 0.5 } };
+    expect(await table.vectorSearch([0.1], query)).toEqual([{ id: 1, $score: 1 }]);
   });
 });

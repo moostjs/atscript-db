@@ -260,11 +260,11 @@ interface Article {
 
 ## Search
 
-| Annotation                    | Applies To | Arguments                                                            | Description                                 |
-| ----------------------------- | ---------- | -------------------------------------------------------------------- | ------------------------------------------- |
-| `@db.search.vector`           | Field      | `dimensions` (number), `similarity?` (string), `indexName?` (string) | Vector search field                         |
-| `@db.search.vector.threshold` | Field      | `value` (number)                                                     | Default minimum similarity threshold (0--1) |
-| `@db.search.filter`           | Field      | `indexName` (string)                                                 | Pre-filter field for vector search          |
+| Annotation                    | Applies To | Arguments                                                            | Description                        |
+| ----------------------------- | ---------- | -------------------------------------------------------------------- | ---------------------------------- |
+| `@db.search.vector`           | Field      | `dimensions` (number), `similarity?` (string), `indexName?` (string) | Vector search field                |
+| `@db.search.vector.threshold` | Field      | `value` (number)                                                     | Default minimum `$score` (0--1)    |
+| `@db.search.filter`           | Field      | `indexName` (string)                                                 | Pre-filter field for vector search |
 
 Similarity options: `'cosine'` (default), `'euclidean'`, `'dotProduct'`. Each adapter maps to its native vector type — see [Text Search](../search/) and [Vector Search](../search/vector-search).
 

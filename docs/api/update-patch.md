@@ -177,6 +177,7 @@ Nested objects stored on a record (not navigation properties) use a strategy-bas
 - **Default = replace = strict.** Every branch is treated as replace unless explicitly annotated otherwise. The validator requires every **required** child to be present on a replace branch — partial sub-shapes that omit required fields are rejected with a 400 to keep the database constraint and the API contract aligned.
 - **`@db.patch.strategy 'merge'` is a one-level opt-in.** It applies only to the level it's annotated on; descendants revert to default replace unless they too carry the annotation. Merge does not propagate.
 - **Optional children of a replace branch are null-filled when omitted.** That's what distinguishes replace from merge — replace clears unspecified optional sub-fields, merge preserves them.
+- **Merge stays merge.** A merge-strategy object inside a replaced one still keeps the children the patch leaves out — see [Merge Inside a Replaced Object](#merge-inside-a-replaced-object).
 - **`@db.json` is always strict** — the column is an opaque blob; partial sub-shapes can't be decomposed.
 
 ### Replace Strategy (Default)
@@ -240,6 +241,8 @@ await table.updateOne({ id: 1, address: { city: "Seattle" } });
 // ✅ line1 and line2 preserved
 ```
 
+A merge-strategy object stored as `null`, or never stored, takes the patch too: it becomes the object the patch sends (`{ city: 'Seattle' }` above). This holds at any depth and in `updateOne`, `bulkUpdate`, `updateMany` and HTTP `PATCH` on every adapter — since 0.1.183 for MongoDB's `updateMany`, which threw `Cannot create field 'city' in element {address: null}` before.
+
 Merge-strategy fields also support [field operations](#field-ops) on their nested numeric sub-fields:
 
 ```typescript
@@ -251,6 +254,36 @@ await products.updateOne({
 });
 // views is atomically incremented, rating is set to 4.5, other stats fields preserved
 ```
+
+### Merge Inside a Replaced Object
+
+A merge-strategy object keeps the children the patch leaves out even when its parent is replaced. The parent's own omitted children are still cleared, as with any replaced object:
+
+```atscript
+profile?: {                 // default strategy: replace
+    bio?: string
+    @db.patch.strategy 'merge'
+    settings?: {
+        theme?: string
+        lang?: string
+    }
+}
+```
+
+```typescript
+// Current: { profile: { bio: 'Hi', settings: { theme: 'dark', lang: 'en' } } }
+
+await table.updateOne({ id: 1, profile: { settings: { theme: "light" } } });
+// Result: { profile: { bio: null, settings: { theme: 'light', lang: 'en' } } }
+// bio is cleared (profile is replaced), lang is kept (settings merges)
+```
+
+- **Leave the merge object out, or send `null`, to clear it** — it is an omitted child of the replaced parent like any other.
+- **Send it empty (`settings: {}`) to keep it as stored.**
+- **A required merge object must still be sent** — the replaced parent is strict — but its own required children may be left out and keep their stored values.
+- The rule holds at any depth (a replace-strategy object inside the merge object is replaced again), with [array operators](#embedded-array-patches) inside the merge object, and in `updateOne`, `bulkUpdate`, `updateMany` and the HTTP `PATCH` endpoints.
+
+Every adapter gives this result since 0.1.183. Before, SQLite, PostgreSQL and MySQL cleared the merge object's omitted columns too (a required child included), the in-memory adapter stored the replaced parent as sent (so the merge object lost every child the patch left out), and MongoDB's `updateMany` did the same; MongoDB's `updateOne` and `bulkUpdate` already kept them.
 
 ## Embedded Array Patches
 
@@ -272,7 +305,7 @@ Every adapter gives the same array for the same patch (since 0.1.180): `$insert`
 
 Array operators work in `updateOne`, `bulkUpdate` and `updateMany` (since 0.1.182). In `updateMany` they apply to each matched row's own stored array, so every row ends with the array `updateOne` gives it — see [Array operators in `updateMany`](#array-ops-update-many).
 
-An array inside a nested object takes the operators too, at any depth (on the in-memory adapter since 0.1.182, see [Field Operations](/adapters/memory#field-operations-defaults)): `{ box: { labels: { $insert: ["y"] } } }`. The rest of the object follows the parent's [patch strategy](#embedded-object-patches): under the default (replace), the optional children the patch leaves out are cleared, as with any replaced object; under `@db.patch.strategy 'merge'` they stay. A merge-strategy object inside a replaced one is cleared the same way on every adapter but MongoDB, which keeps its omitted children.
+An array inside a nested object takes the operators too, at any depth (on the in-memory adapter since 0.1.182, see [Field Operations](/adapters/memory#field-operations-defaults)): `{ box: { labels: { $insert: ["y"] } } }`. The rest of the object follows the parent's [patch strategy](#embedded-object-patches): under the default (replace), the optional children the patch leaves out are cleared, as with any replaced object; under `@db.patch.strategy 'merge'` they stay. A merge-strategy object inside a replaced one keeps its omitted children (see [Merge Inside a Replaced Object](#merge-inside-a-replaced-object); since 0.1.183 — before, SQL and in-memory adapters cleared them).
 
 Items are validated like the items of a plain array set (since 0.1.153): an optional item field accepts `null` in `$update` too, and an error names the item property (`items.$update[0].qty`). Primitive `$remove` / `$update` values are checked one by one against the element type. Items are [normalized](/api/crud#normalization) first (since 0.1.170), keys included: `$remove: [" RED "]` removes the stored `"red"` when the element type lowercases and trims.
 
@@ -296,7 +329,7 @@ await tickets.updateMany(
 );
 ```
 
-- **MongoDB** runs one `updateMany` statement with the update pipeline `updateOne` uses — for every patch with an array operator, `$replace` inside a nested object included.
+- **MongoDB** runs one `updateMany` statement with the update pipeline `updateOne` uses — for every patch with `$insert`, `$upsert`, `$update` or `$remove`, and for every patch that writes a field inside an embedded object, a `$replace` inside a nested object included. A top-level `$replace` is a plain set of the array and runs as a plain `updateMany` (since 0.1.183), which stores the same array.
 - **SQLite, PostgreSQL, MySQL and the in-memory adapter** read the patched arrays of the matched rows and write each row by its primary key: one `UPDATE` per row, all in one transaction — the caller's when [`withTransaction`](/api/transactions) is open, so a failing row rolls the whole call back (the in-memory adapter has no rollback). The rows are picked once, before any write, as a single statement picks them; on PostgreSQL and MySQL they stay locked (`FOR UPDATE`) until the transaction ends, and their arrays are read with the same lock, so they are the latest committed ones even when the caller's transaction read the rows earlier (MySQL's REPEATABLE READ would otherwise return that older snapshot). On the in-memory adapter, concurrent calls in one process run one after the other. For large match sets, loop a [bounded write](/api/crud#bounded-writes) to keep each transaction short.
 - **A table without a primary key** cannot be written row by row: on those adapters the call throws `DbError("INVALID_QUERY")` naming the field. Patch such rows with `updateOne` or `bulkUpdate`.
 - **Counts:** `matchedCount` and `modifiedCount` add up the row writes, counted as a plain `updateMany` counts them on the same adapter. A row deleted between the pick and its write is not counted.

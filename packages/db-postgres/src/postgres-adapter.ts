@@ -68,11 +68,14 @@ import {
   buildPartitionedSelect,
   stripPartitionRowNumber,
   buildGeoSearchSelect,
+  addVectorScore,
   buildVectorSearchCount,
   buildVectorSearchSelect,
   vectorDistanceSource,
+  vectorMaxDistance,
   type TGeoSearchControls,
   type TSqlFragment,
+  type TVectorMetric,
   fillReplacePayload,
   geoWindowFromControls,
   chunkInsertRows,
@@ -2631,11 +2634,10 @@ export class PostgresAdapter extends BaseDbAdapter {
     if (!this._supportsVector) {
       throw new Error("Vector search requires the pgvector extension");
     }
-    const { sql, params } = this._buildVectorSearchQuery(
-      this._prepareVectorSearch(vector, query, indexName),
-    );
+    const ctx = this._prepareVectorSearch(vector, query, indexName);
+    const { sql, params } = this._buildVectorSearchQuery(ctx);
     this._log(sql, params);
-    return this._exec().all(sql, params);
+    return (await this._exec().all(sql, params)).map((row) => addVectorScore(row, ctx.metric));
   }
 
   override async vectorSearchWithCount(
@@ -2658,7 +2660,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       this._exec().get<{ cnt: number | string }>(countSql, countParams),
     ]);
     const count = parseCount(countRow?.cnt);
-    return { data, count };
+    return { data: data.map((row) => addVectorScore(row, ctx.metric)), count };
   }
 
   /** Resolves vector field and computes shared context for vector search SQL builders. */
@@ -2700,6 +2702,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       field,
       vec,
       distanceOp,
+      metric: similarityToMetric(vec.similarity),
       where,
       controls,
       threshold,
@@ -2720,9 +2723,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     return {
       source: vectorDistanceSource(pgDialect, ctx.tableName, ctx.where, distExpr, withRows),
       maxDistance:
-        ctx.threshold === undefined
-          ? undefined
-          : thresholdToDistance(ctx.threshold, ctx.vec.similarity),
+        ctx.threshold === undefined ? undefined : vectorMaxDistance(ctx.metric, ctx.threshold),
     };
   }
 
@@ -3124,23 +3125,11 @@ function normalizePgDefault(value: string | null, isIdentity: string): string | 
 }
 
 /**
- * Converts a normalized similarity threshold (0-1) to a pgvector max distance.
- *
- * The threshold is a normalized score matching MongoDB Atlas semantics:
- *   cosine score = (1 + cosine_similarity) / 2, range [0, 1]
- * pgvector cosine distance = 1 - cosine_similarity, range [0, 2]
- *
- * Conversion: distance = 2 * (1 - score)
+ * The `$score` scale of a pgvector operator's result: `<=>` is `1 − cos`,
+ * `<->` the straight-line distance, `<#>` the negative inner product.
  */
-function thresholdToDistance(threshold: number, similarity: string): number {
-  switch (similarity) {
-    case "euclidean":
-      return threshold; // user provides max distance directly
-    case "dotProduct":
-      return -threshold; // pgvector uses negative inner product
-    default:
-      return 2 * (1 - threshold); // cosine: score → pgvector distance
-  }
+function similarityToMetric(similarity: string): TVectorMetric {
+  return similarity === "euclidean" || similarity === "dotProduct" ? similarity : "cosine";
 }
 
 /** Maps generic similarity metric to PostgreSQL distance operator. */

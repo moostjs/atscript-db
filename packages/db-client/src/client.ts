@@ -61,6 +61,12 @@ type Id<T> = IdOf<T>;
 type Response<T, Q> = ClientResponse<T, Q>;
 /** A read row: the response over the own fields plus the declared decorations `D`, each optional. */
 type DecoratedRow<T, Q, D> = Response<T, Q> & Partial<D>;
+/**
+ * A `query()` / `pages()` row: {@link DecoratedRow}, plus `$score` on a vector read
+ * (`$search` with `$vector`, since 0.1.183): higher = closer, on the scale of `$threshold`.
+ */
+type ReadRow<T, Q, D> = DecoratedRow<T, Q, D> &
+  (Q extends { controls: { $search: string; $vector: string } } ? { $score: number } : unknown);
 type THttpMethod = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
 /** Per-request transport options of the private request helpers. */
 type TRequestOptions = {
@@ -167,13 +173,14 @@ export class Client<
    * `GET /query` — query records with typed filter, sort, select, and relations.
    *
    * The response type narrows by the literal `$with` array in `query` —
-   * relations not listed in `$with` are stripped from the row type.
+   * relations not listed in `$with` are stripped from the row type. A vector
+   * read (`controls: { $search, $vector }`) types `$score` on every row.
    */
   async query<const Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
     query?: Q,
     opts?: TClientCallOptions,
-  ): Promise<DecoratedRow<T, Q, D>[]> {
-    return this._get("query", query as Uniquery, opts?.signal) as Promise<DecoratedRow<T, Q, D>[]>;
+  ): Promise<ReadRow<T, Q, D>[]> {
+    return this._get("query", query as Uniquery, opts?.signal) as Promise<ReadRow<T, Q, D>[]>;
   }
 
   // ── GET /query ($count) ────────────────────────────────────────────────────
@@ -234,19 +241,19 @@ export class Client<
    * `GET /pages` — paginated query with typed filter and relations.
    *
    * Response rows narrow by the literal `$with` array — same algebra as
-   * {@link query}.
+   * {@link query}, `$score` on a vector read included.
    */
   async pages<const Q extends DecoratedQuery<T, D> = DecoratedQuery<T, D>>(
     query?: Q,
     page = 1,
     size = 10,
     opts?: TClientCallOptions,
-  ): Promise<PageResult<DecoratedRow<T, Q, D>>> {
+  ): Promise<PageResult<ReadRow<T, Q, D>>> {
     return this._get(
       "pages",
       { ...query, controls: { ...query?.controls, $page: page, $size: size } } as Uniquery,
       opts?.signal,
-    ) as Promise<PageResult<DecoratedRow<T, Q, D>>>;
+    ) as Promise<PageResult<ReadRow<T, Q, D>>>;
   }
 
   // ── GET /geo ───────────────────────────────────────────────────────────────
