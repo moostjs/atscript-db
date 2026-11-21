@@ -177,13 +177,13 @@ Rules:
 - **Locks last until the outermost transaction ends.** A nested `withTransaction` joins it and adds no savepoint.
 - **It is a server-side option only.** It is the second argument, never a query control, so it cannot arrive over HTTP. In a `moost-db` controller, call it inside `this.withTransaction(fn)` in a custom action.
 
-| Adapter    | Locking read                                                                                                                                                                                          |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| PostgreSQL | Native `FOR UPDATE` / `FOR SHARE` [`NOWAIT` / `SKIP LOCKED`]. Under `repeatable read` or `serializable`, locking a row that changed since the snapshot throws `SERIALIZATION_FAILURE` (retryable).    |
-| MySQL 8    | Native, same syntax. A locking read is a _current_ read: it sees the latest committed row even under the default REPEATABLE READ, where a plain read in the same transaction still sees the snapshot. |
-| SQLite     | Accepted as a no-op. Every transaction starts with `BEGIN IMMEDIATE`, which holds the database write lock, so no other writer can change the row.                                                     |
-| MongoDB    | Throws `LOCK_NOT_SUPPORTED` (`moost-db`: 501). Use [`$cas` / `withOptimisticRetry`](/api/versioning) instead.                                                                                         |
-| Memory     | Accepted and ignored inside a `withTransaction` scope.                                                                                                                                                |
+| Adapter    | Locking read                                                                                                                                                                                                                                                        |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PostgreSQL | Native `FOR UPDATE` / `FOR SHARE` [`NOWAIT` / `SKIP LOCKED`]. Under `repeatable read` or `serializable`, locking a row that changed since the snapshot throws `SERIALIZATION_FAILURE` (retryable).                                                                  |
+| MySQL 8    | Native, same syntax. A locking read is a _current_ read: it sees the latest committed row even under the default REPEATABLE READ, where a plain read in the same transaction still sees the snapshot.                                                               |
+| SQLite     | Accepted as a no-op. Every transaction starts with `BEGIN IMMEDIATE`, which holds the database write lock, so no other writer can change the row.                                                                                                                   |
+| MongoDB    | Throws `LOCK_NOT_SUPPORTED` (`moost-db`: 501). Use [`$cas` / `withOptimisticRetry`](/api/versioning) instead.                                                                                                                                                       |
+| Memory     | `lock: 'update'` (with `wait: 'block'`) takes one exclusive lock for the whole process, held until the outermost `withTransaction` ends; another scope's locking read waits for it (since 0.1.182; ignored before). `share`, `nowait` and `skipLocked` are ignored. |
 
 **DOs and DON'Ts**
 

@@ -1,5 +1,6 @@
 import type { TAtscriptAnnotatedType, TAtscriptTypeArray } from "@atscript/typescript/utils";
 
+import { getPath, stableJson } from "../shared/object";
 import type { AtscriptDbTable } from "../table/db-table";
 import { getKeyProps } from "./patch-types";
 
@@ -24,7 +25,9 @@ import { getKeyProps } from "./patch-types";
  * @param update - The decomposed update (from `decomposePatch`) with physical
  *   column keys, potentially containing `field.__$insert`, `field.__$remove`, etc.
  * @param currentRecord - The current record fetched from the database (a raw
- *   adapter row, physical column keys). Can be `null` if the record doesn't exist.
+ *   adapter row, physical column keys — or, on an adapter that stores nested
+ *   objects, the document a dotted column path leads into, since 0.1.182).
+ *   Can be `null` if the record doesn't exist.
  * @param table - The AtscriptDbTable for metadata access (key props, unique items,
  *   merge strategy — found by the column's logical path since 0.1.178, so a
  *   `@db.column`-renamed or flattened array column keeps them).
@@ -86,7 +89,7 @@ export function resolveArrayOps(
   // raw row and of `fromStorageFormatters` (a `@db.column` rename included).
   const { fromStorageFormatters: fromStorage, leafByPhysical } = table.getMetadata();
   for (const [field, ops] of opsMap) {
-    const stored = currentRecord?.[field];
+    const stored = storedValue(currentRecord, field);
     const decoded = stored == null ? undefined : fromStorage?.get(field)?.(stored);
     let current: unknown = Array.isArray(decoded) ? decoded : (stored ?? []);
     // SQL adapters store an array column as JSON text — parse it
@@ -125,6 +128,18 @@ export function resolveArrayOps(
   }
 
   return resolved;
+}
+
+/**
+ * The stored value of `field` in a raw row: its own key — a column, a
+ * flattened `a__b` one included — or, on an adapter that stores nested
+ * objects (in-memory), the value the dotted path leads to in the document
+ * (since 0.1.182; before, such an array read as missing and its stored items
+ * were dropped).
+ */
+function storedValue(row: Record<string, unknown> | null, field: string): unknown {
+  if (!row) return undefined;
+  return field in row ? row[field] : getPath(row, field);
 }
 
 /**
@@ -232,30 +247,25 @@ function applyUpsert(
   keyProps: Set<string>,
   mergeStrategy: boolean,
 ): unknown[] {
+  // Without key props: append unless an equal element is stored. The stored
+  // element stays as it is, as on MongoDB (since 0.1.182; before, it was
+  // replaced by the item — an equal object then took the item's property order)
+  if (keyProps.size === 0) {
+    return appendAbsent(arr, items);
+  }
   const result = [...arr];
   for (const item of items) {
-    if (keyProps.size === 0) {
-      // Primitive: replace by value or append
-      const wanted = canonical(item);
-      const idx = result.findIndex((el) => canonical(el) === wanted);
-      if (idx >= 0) {
-        result[idx] = item;
-      } else {
-        result.push(item);
-      }
-    } else {
-      // Object: merge into / replace every element of that key, in place —
-      // or append when none has it
-      const itemObj = item as Record<string, unknown>;
-      let found = false;
-      for (let i = 0; i < result.length; i++) {
-        const elObj = result[i] as Record<string, unknown>;
-        if (!matchByKeys(elObj, itemObj, keyProps)) continue;
-        found = true;
-        result[i] = mergeStrategy ? { ...elObj, ...itemObj } : itemObj;
-      }
-      if (!found) result.push(item);
+    // Merge into / replace every element of that key, in place — or append
+    // when none has it
+    const itemObj = item as Record<string, unknown>;
+    let found = false;
+    for (let i = 0; i < result.length; i++) {
+      const elObj = result[i] as Record<string, unknown>;
+      if (!matchByKeys(elObj, itemObj, keyProps)) continue;
+      found = true;
+      result[i] = mergeStrategy ? { ...elObj, ...itemObj } : itemObj;
     }
+    if (!found) result.push(item);
   }
   return result;
 }
@@ -266,22 +276,19 @@ function applyInsert(
   keyProps: Set<string>,
   uniqueItems: boolean,
 ): unknown[] {
-  // A plain array without `uniqueItems` takes every item
-  if (!uniqueItems && keyProps.size === 0) {
-    return [...arr, ...items];
+  // Without key props a plain array takes every item; under `uniqueItems` an
+  // item equal to a stored one is skipped
+  if (keyProps.size === 0) {
+    return uniqueItems ? appendAbsent(arr, items) : [...arr, ...items];
   }
 
   // An item whose key is already there is skipped — two elements with one key
-  // are never meant (since 0.1.180; before, only under `uniqueItems`). Under
-  // `uniqueItems` without key props an item equal to a stored one is skipped.
+  // are never meant (since 0.1.180; before, only under `uniqueItems`)
   const result = [...arr];
   for (const item of items) {
-    const exists =
-      keyProps.size > 0
-        ? result.some((el) =>
-            matchByKeys(el as Record<string, unknown>, item as Record<string, unknown>, keyProps),
-          )
-        : result.some((el) => canonical(el) === canonical(item));
+    const exists = result.some((el) =>
+      matchByKeys(el as Record<string, unknown>, item as Record<string, unknown>, keyProps),
+    );
     if (!exists) {
       result.push(item);
     }
@@ -292,18 +299,25 @@ function applyInsert(
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * `value` as JSON text with the keys of every object sorted: the form
- * elements without key props are compared by. PostgreSQL `JSONB` and MySQL
- * `JSON` return an object's keys in their own order, so the plain JSON text
- * of an equal element differs there (since 0.1.180; before, `$remove` of a
- * stored object matched nothing on those two).
+ * The form elements without key props are compared by: JSON text with the
+ * keys of every object sorted. PostgreSQL `JSONB` and MySQL `JSON` return an
+ * object's keys in their own order, so the plain JSON text of an equal
+ * element differs there (since 0.1.180; before, `$remove` of a stored object
+ * matched nothing on those two).
  */
-function canonical(value: unknown): string {
-  return JSON.stringify(value, (_key, v: unknown) =>
-    v !== null && typeof v === "object" && !Array.isArray(v)
-      ? Object.fromEntries(Object.entries(v).toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
-      : v,
-  );
+const canonical = stableJson;
+
+/** `arr` with each item appended unless an equal element — stored or appended before it — is there. */
+function appendAbsent(arr: unknown[], items: unknown[]): unknown[] {
+  const result = [...arr];
+  const seen = new Set(result.map(canonical));
+  for (const item of items) {
+    const form = canonical(item);
+    if (seen.has(form)) continue;
+    seen.add(form);
+    result.push(item);
+  }
+  return result;
 }
 
 /** Whether stored element `a` has the key values of item `b` (a stored `null` or scalar never has). */

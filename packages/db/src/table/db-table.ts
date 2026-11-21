@@ -20,7 +20,11 @@ import { CasMismatchError, DbError, invalidQuery, type TDbErrorEntry } from "../
 import type { TGenericLogger } from "../logger";
 import { separateCas, separateFieldOps, type TFieldOps } from "../ops";
 import { resolveArrayOps, getArrayOpsFields } from "../patch/array-ops-resolver";
-import { assertNoVersionWrites, decomposePatch } from "../patch/patch-decomposer";
+import {
+  assertNoVersionWrites,
+  decomposePatch,
+  hasArrayOperators,
+} from "../patch/patch-decomposer";
 import { isVersionExemptPatch } from "../patch/version-exempt";
 import { AtscriptDbReadable } from "./db-readable";
 import { fkMissingEntries, normalizeWriteErrors, remapDeleteFkViolation } from "./error-utils";
@@ -75,6 +79,7 @@ import type {
   TDbInsertResult,
   TDbRemoveGuardContext,
   TBulkWriteOptions,
+  TDbReadLock,
   TDbUpdateOptions,
   TDbUpdateResult,
   TDbWriteLimit,
@@ -373,6 +378,15 @@ function concurrentChange(): DbError {
 
 /** Hand-off for a version-exempt patch (since 0.1.150) — shared, never mutated. */
 const KEEP_VERSION: TDbUpdateOptions = Object.freeze({ keepVersion: true });
+
+/** The row lock of an array-operator read-modify-write (`_arrayOpsRead`) — shared, never mutated. */
+const ARRAY_OPS_LOCK: TDbReadLock = Object.freeze({ mode: "update", wait: "block" });
+
+/** A patch as the adapter's update methods take it: physical keys, field ops apart. */
+interface TPhysicalPatch {
+  update: Record<string, unknown>;
+  ops: TFieldOps | undefined;
+}
 
 /**
  * The trailing `TDbUpdateOptions` rest-arg of an adapter update: `[]` when
@@ -1392,39 +1406,30 @@ export class AtscriptDbTable<
           let result: TDbUpdateResult;
           if (this.adapter.supportsNativePatch()) {
             // Native patch path: separate top-level ops; patcher handles nested ops internally
-            const ops = separateFieldOps(data);
-            const translatedOps = ops
-              ? this._fieldMapper.translateOpsKeys(ops, this._meta)
-              : undefined;
-            const translatedData = this._fieldMapper.translatePatchKeys(data, this._meta);
+            const native = this._physicalPatch(data);
             result = await this.adapter.nativePatch(
               translatedFilter,
-              translatedData,
-              translatedOps,
+              native.update,
+              native.ops,
               expectedVersion,
               ...updateOpts,
             );
           } else {
             // Decompose flattens nested objects into dot-paths, preserving field ops verbatim.
             // A single separateFieldOps pass after flattening catches both top-level and nested ops.
-            const update = decomposePatch(data, this as AtscriptDbTable);
-            const ops = separateFieldOps(update);
-            const translatedOps = ops
-              ? this._fieldMapper.translateOpsKeys(ops, this._meta)
-              : undefined;
-            const translatedUpdate = this._fieldMapper.translatePatchKeys(update, this._meta);
+            const { update: translatedUpdate, ops: translatedOps } = this._translatePatch(data);
 
             // Resolve array ops via read-modify-write if any __$ keys present
             const arrayOpsFields = getArrayOpsFields(translatedUpdate);
             if (arrayOpsFields.size > 0) {
               // Read-modify-write: two statements — always transactional (this
               // joins the write's own transaction; a single-statement write
-              // opened none, so the pair gets one of its own).
+              // opened none, so the pair gets one of its own). The read locks
+              // the row where the adapter can (since 0.1.182).
               result = await this.adapter.withTransaction(async () => {
-                const current = (await this.adapter.findOne({
-                  filter: translatedFilter,
-                  controls: {},
-                })) as Record<string, unknown> | null;
+                const current = (await this.adapter.findOne(
+                  this._arrayOpsRead({ filter: translatedFilter, controls: {} }),
+                )) as Record<string, unknown> | null;
                 const resolved = resolveArrayOps(
                   translatedUpdate,
                   current,
@@ -1671,6 +1676,13 @@ export class AtscriptDbTable<
    * rows in `opts.sort` order (default: primary key ascending; the primary key
    * always breaks ties). Loop until `matchedCount === 0` to process every
    * match in batches. Not exposed over HTTP.
+   *
+   * The array operators `$insert`, `$upsert`, `$update` and `$remove` (since
+   * 0.1.182) apply to each matched row's own stored array: every row ends
+   * with the array `updateOne` gives it. MongoDB applies them in its update
+   * statement; the other adapters read the matched rows and write them one
+   * by one, by primary key, in one transaction (a table without a primary
+   * key throws `INVALID_QUERY` there).
    */
   public async updateMany(
     filter: MutationFilter<FlatType, NavType>,
@@ -1725,19 +1737,24 @@ export class AtscriptDbTable<
     await this._encryptItems([dataCopy], "patch");
     const { update, ops } = this._translatePatch(dataCopy);
     // `$insert` / `$upsert` / `$update` / `$remove` need each row's stored
-    // array, and `updateMany` is one statement for every matched row (`$replace`
-    // is a plain set by now). Refused (since 0.1.180): before, the decomposed
-    // `field.__$op` key reached the adapter — an unknown column on SQL, an
-    // object stored in place of the array on the memory adapter and MongoDB.
+    // array (`$replace` is a plain set by now): applied to each row's own
+    // (since 0.1.182; 0.1.180 – 0.1.181 refused them, and before that the
+    // decomposed `field.__$op` key reached the adapter). A native-patch
+    // adapter takes every array operator there — `$replace` inside a nested
+    // object too, whose plain decomposed keys a classic update applies
+    // differently from `nativePatch` (a `null` parent, a merge child).
     const arrayOps = getArrayOpsFields(update);
-    if (arrayOps.size > 0) {
-      throw new DbError(
-        "INVALID_QUERY",
-        [...arrayOps].map((column) => ({
-          path: this._meta.leafByPhysical.get(column)?.path ?? column,
-          message:
-            "Array patch operators are not supported by updateMany — patch each row with updateOne or bulkUpdate",
-        })),
+    if (
+      arrayOps.size > 0 ||
+      (this.adapter.supportsNativePatch() && hasArrayOperators(dataCopy, this as AtscriptDbTable))
+    ) {
+      return this._normalizeWrite(() =>
+        this._updateManyArrayOps(filter as FilterExpr, bound, dataCopy, {
+          update,
+          ops,
+          arrayOps,
+          keepVersion,
+        }),
       );
     }
     const translatedFilter =
@@ -1764,6 +1781,130 @@ export class AtscriptDbTable<
         this.adapter.updateMany(f, update, ops, ...updateOptsArg(keepVersion, limit)),
       );
     });
+  }
+
+  /**
+   * `updateMany` whose patch carries `$insert` / `$upsert` / `$update` /
+   * `$remove` (since 0.1.182): every matched row gets the array `updateOne`
+   * gives it.
+   *
+   * An adapter with `nativePatchMany` gets the patch as `nativePatch` does,
+   * once — per batch of picked keys for a bounded write. Otherwise the keys
+   * of the matched rows are read first (in primary-key order, a bounded
+   * write's in its sort order), locked where the adapter takes row locks, so
+   * the set is judged once, before any write, as one statement judges it.
+   * Per batch of keys the rows' operator
+   * columns are read, and each row is written by its primary key: the
+   * operators resolved against its own arrays — or, on a native-patch adapter
+   * without `nativePatchMany`, the patch through `nativePatch`. All in one
+   * transaction (the caller's when one is open).
+   */
+  private async _updateManyArrayOps(
+    filter: FilterExpr,
+    bound: TWriteBound | undefined,
+    data: Record<string, unknown>,
+    patch: TPhysicalPatch & { arrayOps: Set<string>; keepVersion: boolean },
+  ): Promise<TDbUpdateResult> {
+    const adapter = this.adapter;
+    const opts = updateOptsArg(patch.keepVersion);
+    const native = adapter.supportsNativePatch() ? this._nativePatchArgs(data) : undefined;
+    const many = adapter.nativePatchMany?.bind(adapter);
+    if (native && many) {
+      const write = (f: FilterExpr) => many(f, native.update, native.ops, ...opts);
+      return bound
+        ? this._runBounded(bound, UPDATE_RESULT, write, false)
+        : write(this._fieldMapper.translateFilter(filter, this._meta));
+    }
+
+    const pk = this._meta.primaryKeys;
+    // The logical paths of the operator columns
+    const arrayPaths = [...patch.arrayOps].map(
+      (column) => this._meta.leafByPhysical.get(column)?.path ?? column,
+    );
+    if (pk.length === 0) {
+      // Every operator field — or the patch, when only `$replace` shows it
+      const paths = arrayPaths.length > 0 ? arrayPaths : [""];
+      throw new DbError(
+        "INVALID_QUERY",
+        paths.map((path) => ({
+          path,
+          message:
+            "updateMany applies array patch operators row by row, by primary key — this table has none; patch each row with updateOne or bulkUpdate",
+        })),
+      );
+    }
+    const pkColumns = pk.map((field) => this._meta.physicalPath(field));
+    const rowControls = this._fieldMapper.translateQuery(
+      { filter: {}, controls: { $select: native ? [...pk] : [...pk, ...arrayPaths] } } as Uniquery,
+      this._meta,
+    ).controls;
+    const writeRow: (key: FilterExpr, row: Record<string, unknown>) => Promise<TDbUpdateResult> =
+      native
+        ? (key) => adapter.nativePatch(key, native.update, native.ops, undefined, ...opts)
+        : (key, row) =>
+            adapter.updateMany(
+              key,
+              resolveArrayOps(patch.update, row, this as AtscriptDbTable),
+              patch.ops,
+              ...opts,
+            );
+    // The rows of one batch of picked keys, each written by its primary key
+    const writeBatch = async (keys: FilterExpr): Promise<TDbUpdateResult> => {
+      let out = UPDATE_RESULT.none();
+      // A locking read too: under REPEATABLE READ (MySQL) a plain read
+      // returns the caller's snapshot — arrays older than the picked rows'
+      // and no row that started to match after it — while a locking read
+      // returns what was locked
+      const read = this._arrayOpsRead({ filter: keys, controls: rowControls });
+      for (const row of await adapter.findMany(read)) {
+        const key = Object.fromEntries(pkColumns.map((column) => [column, row[column]]));
+        out = UPDATE_RESULT.add(out, await writeRow(key as FilterExpr, row));
+      }
+      return out;
+    };
+    return adapter.withTransaction(async () => {
+      if (bound) {
+        const picked = { ...bound, query: this._arrayOpsRead(bound.query) };
+        return this._runBounded(picked, UPDATE_RESULT, writeBatch, false);
+      }
+      const pick = this._fieldMapper.translateQuery(
+        {
+          filter,
+          controls: { $sort: Object.fromEntries(pk.map((field) => [field, 1])), $select: [...pk] },
+        } as Uniquery,
+        this._meta,
+      );
+      const rows = await adapter.findMany(this._arrayOpsRead(pick));
+      let out = UPDATE_RESULT.none();
+      for (const keys of pinByPrimaryKey(rows, pkColumns)) {
+        out = UPDATE_RESULT.add(out, await writeBatch(keys));
+      }
+      return out;
+    });
+  }
+
+  /**
+   * `query` as a read of an array-operator read-modify-write (`updateOne` /
+   * `bulkUpdate` reading the row, `updateMany` picking its rows and reading
+   * their arrays; since 0.1.182): row-locked (`FOR UPDATE`) where the adapter
+   * takes row locks, so a concurrent patch of the same row waits instead of
+   * being overwritten, and the read sees the latest committed row, not an
+   * older snapshot of the caller's transaction. Always called inside the
+   * write's transaction.
+   */
+  private _arrayOpsRead(query: DbQuery): DbQuery {
+    return this.adapter.supportsReadLocks() ? { ...query, lock: ARRAY_OPS_LOCK } : query;
+  }
+
+  /**
+   * A logical patch as `nativePatch` gets it ({@link _physicalPatch}), with
+   * the primary-key fields left out (as the decomposition leaves them out of
+   * a non-native patch).
+   */
+  private _nativePatchArgs(data: Record<string, unknown>): TPhysicalPatch {
+    const patch = { ...data };
+    for (const field of this._meta.primaryKeys) delete patch[field];
+    return this._physicalPatch(patch);
   }
 
   /**
@@ -1999,14 +2140,19 @@ export class AtscriptDbTable<
    * merge-strategy objects decomposed into dot-paths (so nested field ops are
    * caught), field ops separated, keys translated.
    */
-  private _translatePatch(data: Record<string, unknown>): {
-    update: Record<string, unknown>;
-    ops: TFieldOps | undefined;
-  } {
-    const decomposed = decomposePatch(data, this as AtscriptDbTable);
-    const ops = separateFieldOps(decomposed);
+  private _translatePatch(data: Record<string, unknown>): TPhysicalPatch {
+    return this._physicalPatch(decomposePatch(data, this as AtscriptDbTable));
+  }
+
+  /**
+   * `patch` → the adapter's physical `{ update, ops }`: its top-level field
+   * ops separated (taken out of `patch`), keys translated — what
+   * `nativePatch` gets as is.
+   */
+  private _physicalPatch(patch: Record<string, unknown>): TPhysicalPatch {
+    const ops = separateFieldOps(patch);
     return {
-      update: this._fieldMapper.translatePatchKeys(decomposed, this._meta),
+      update: this._fieldMapper.translatePatchKeys(patch, this._meta),
       ops: ops ? this._fieldMapper.translateOpsKeys(ops, this._meta) : undefined,
     };
   }

@@ -51,6 +51,7 @@ import type {
   ClientSession,
   CollationOptions,
   Collection,
+  CountDocumentsOptions,
   Db,
   Document,
   Filter,
@@ -769,23 +770,15 @@ export class MongoAdapter extends BaseDbAdapter {
     if (!mongoFilter) {
       return { matchedCount: 0, modifiedCount: 0 };
     }
-    const versionColumn = this._versionColumnFor(opts, expectedVersion);
-    // Inject auto-bump into ops.inc so the patcher emits it as a `version = version + 1`
-    // aggregation expression alongside any user-supplied $inc / $mul ops.
-    const effectiveOps =
-      versionColumn !== undefined ? { ...ops, inc: { ...ops?.inc, [versionColumn]: 1 } } : ops;
-    const patcher = new CollectionPatcher(this.getPatcherContext(), patch, effectiveOps);
-    const { updateFilter, updateOptions } = patcher.preparePatch();
+    const { updateFilter, updateOptions } = this._patchPipeline(
+      patch,
+      ops,
+      this._versionColumnFor(opts, expectedVersion),
+    );
     if (updateFilter.length === 0) {
       // Nothing to set (an empty operator list, `$update` on an array without
-      // key props): the driver rejects an empty pipeline, so the row is only
-      // looked up (since 0.1.180; it threw before)
-      this._log("countDocuments (empty patch)", mongoFilter);
-      const matchedCount = await this.collection.countDocuments(mongoFilter, {
-        limit: 1,
-        ...this._getSessionOpts(),
-      });
-      return { matchedCount, modifiedCount: 0 };
+      // key props): the row is only looked up (since 0.1.180; it threw before)
+      return this._countUnpatched(mongoFilter, { limit: 1 });
     }
     this._log("updateOne (patch)", mongoFilter, updateFilter);
     return this._wrapUpdate(() =>
@@ -794,6 +787,63 @@ export class MongoAdapter extends BaseDbAdapter {
         ...this._getSessionOpts(),
       }),
     );
+  }
+
+  /**
+   * `updateMany` with array operators (since 0.1.182): the pipeline
+   * {@link nativePatch} builds, in one `updateMany` over every matching
+   * document — per batch of matching `_id`s for a filter holding relational
+   * predicates. Never CAS-checks; bumps the version unless `opts.keepVersion`.
+   */
+  override async nativePatchMany(
+    filter: FilterExpr,
+    patch: unknown,
+    ops?: TFieldOps,
+    opts?: TDbUpdateOptions,
+  ): Promise<TDbUpdateResult> {
+    const { updateFilter, updateOptions } = this._patchPipeline(
+      patch,
+      ops,
+      this._versionColumnFor(opts),
+    );
+    return this._updateMatching(filter, (mongoFilter) => {
+      if (updateFilter.length === 0) return this._countUnpatched(mongoFilter);
+      this._log("updateMany (patch)", mongoFilter, updateFilter);
+      return this._wrapUpdate(() =>
+        this.collection.updateMany(mongoFilter, updateFilter, {
+          ...updateOptions,
+          ...this._getSessionOpts(),
+        }),
+      );
+    });
+  }
+
+  /**
+   * A patch with nothing to set: the driver rejects an empty pipeline, so the
+   * matching documents are only counted.
+   */
+  private async _countUnpatched(
+    mongoFilter: Filter<any>,
+    opts?: CountDocumentsOptions,
+  ): Promise<TDbUpdateResult> {
+    this._log("countDocuments (empty patch)", mongoFilter);
+    const matchedCount = await this.collection.countDocuments(mongoFilter, {
+      ...opts,
+      ...this._getSessionOpts(),
+    });
+    return { matchedCount, modifiedCount: 0 };
+  }
+
+  /**
+   * The update pipeline of a patch (`CollectionPatcher`), with the version
+   * auto-bump injected into `ops.inc` so the patcher emits it as a
+   * `version = version + 1` aggregation expression alongside any
+   * user-supplied `$inc` / `$mul` ops.
+   */
+  private _patchPipeline(patch: unknown, ops: TFieldOps | undefined, versionColumn?: string) {
+    const effectiveOps =
+      versionColumn !== undefined ? { ...ops, inc: { ...ops?.inc, [versionColumn]: 1 } } : ops;
+    return new CollectionPatcher(this.getPatcherContext(), patch, effectiveOps).preparePatch();
   }
 
   // ── Annotation scanning hooks ────────────────────────────────────────────

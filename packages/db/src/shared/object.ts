@@ -96,12 +96,10 @@ export function deletePath(
  * @since 0.1.162
  */
 export function stableJson(value: unknown): string {
-  return JSON.stringify(value, (_key, v: unknown) => {
-    if (v === null || typeof v !== "object" || Array.isArray(v)) return v;
-    const sorted: Record<string, unknown> = {};
-    for (const k of Object.keys(v).toSorted()) {
-      sorted[k] = (v as Record<string, unknown>)[k];
-    }
-    return sorted;
-  });
+  return JSON.stringify(value, (_key, v: unknown) =>
+    v === null || typeof v !== "object" || Array.isArray(v)
+      ? v
+      : // `fromEntries` defines each key as an own property — `__proto__` included
+        Object.fromEntries(Object.entries(v).toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
+  );
 }

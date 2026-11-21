@@ -302,7 +302,9 @@ MongoDB uses aggregation pipelines for array patch operations instead of the rea
 - **`$upsert`** — Update if exists, insert if not
 - **`$replace`** — Replace the entire array
 
-Operator items are passed to the pipeline as literals (since 0.1.180), so a string that starts with `$` is stored as it was sent, and the operators of one field apply in the [documented order](/api/update-patch#embedded-array-patches). This is transparent to your code — the same patch API works across all adapters, but MongoDB executes updates atomically on the server using `$concatArrays`, `$filter`, `$map`, and other aggregation operators.
+Operator items are passed to the pipeline as literals (since 0.1.180), so a string that starts with `$` is stored as it was sent, and the operators of one field apply in the [documented order](/api/update-patch#embedded-array-patches). In an array without `@expect.array.key`, an element equals an item whatever the order of its objects' properties, at any depth, as on the other adapters (since 0.1.182; before, the pipeline compared embedded documents in their stored property order). See [Keyless Object Arrays](/api/update-patch#keyless-object-arrays). This is transparent to your code — the same patch API works across all adapters, but MongoDB executes updates atomically on the server using `$concatArrays`, `$filter`, `$map`, and other aggregation operators.
+
+[`updateMany` with array operators](/api/update-patch#array-ops-update-many) (since 0.1.182) sends that pipeline in one `updateMany` statement, so every matching document is patched from its own array — per batch of matching `_id`s when the filter holds [relational predicates](#relational-predicates). A patch that sets nothing (an operator with an empty item list on a collection without a version column) returns the match count with `modifiedCount: 0`.
 
 See [Patch Operations](/api/update-patch) for the full API.
 
@@ -628,6 +630,8 @@ category: string
 ```
 
 The adapter builds `$vectorSearch` aggregation pipelines from your schema. No subclassing or callbacks needed — pass a pre-computed embedding vector directly to `vectorSearch()`.
+
+When a threshold applies (`@db.search.vector.threshold` or `$threshold`), each row carries `_score`, the Atlas `vectorSearchScore` from `0` to `1` (higher = closer); without one, rows carry no score. The SQL adapters return a `_distance` instead. See [Result fields](/search/vector-search#result-fields).
 
 See [Vector Search](/search/vector-search) for the full annotation reference, programmatic API, and HTTP access.
 

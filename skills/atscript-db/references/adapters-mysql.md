@@ -85,6 +85,7 @@ MySQL `DATETIME`/`TIMESTAMP` columns are handled via `BaseDbAdapter.formatValue(
 
 - No per-query schema selection — the pool is bound to one database.
 - `VECTOR` requires MySQL 9.0+; older servers will reject the DDL.
+- Vector search rows carry `_distance` = the `VEC_DISTANCE_*` result (lower = closer; kept under any `$select`) → [crud.md § Search](crud.md#search).
 - `FULLTEXT` requires InnoDB/MyISAM — default engine is InnoDB.
 - `ON UPDATE CASCADE` on composite-FK columns requires InnoDB (default).
 - **String type mapping**: `string` → `TEXT`; `VARCHAR(N)` with `@expect.maxLength` (> 65535 → `LONGTEXT`); `CHAR(36)` with `@db.default.uuid` (0.1.170; was `VARCHAR(255)`) — PK, unique or plain, and the `@db.rel.FK` columns referencing it; `VARCHAR(255)` for other PKs, fields with another default, derived columns, and strings a foreign key references (0.1.170, below). `@db.mysql.type` overrides all.

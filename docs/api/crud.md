@@ -322,6 +322,8 @@ const result = await users.updateMany(
 
 `updateMany` writes own fields only — a navigation field in the payload throws `DbError("INVALID_QUERY")`. The payload is validated in `patch` mode, like `updateOne` (since 0.1.162): a wrong type, `null` on a non-nullable field, an empty `@meta.required` field or a failed `@expect.*` constraint throws a `ValidatorError` before any statement runs. Every update and replace also sets [`@db.onUpdate.now`](./defaults#on-update) fields (`number.timestamp.updated`) to the current time and increments [`@db.onUpdate.inc`](./defaults#on-update-inc) counters, overriding a value in the payload. An empty patch (`{}` or one that prunes to nothing) issues no `UPDATE`: it returns the honest match count with `modifiedCount: 0` and bumps no version. Any other patch bumps each matched row, except [version-exempt](./versioning#version-exempt) ones (`updateMany` never checks the version).
 
+The array operators `$insert`, `$upsert`, `$update` and `$remove` apply to each matched row's own stored array (since 0.1.182): every row ends with the array `updateOne` gives it. Outside MongoDB the rows are then written one by one in a transaction — see [Array operators in `updateMany`](./update-patch#array-ops-update-many).
+
 ## Replacing Records
 
 ### Replace One
@@ -415,6 +417,7 @@ await tasks.updateMany(
 - **`0` means nothing matched; a retryable error when contention persists.** When a round touches no rows although a row still matches the filter (it lost every picked row to a concurrent writer), it runs again, up to three more times; the checks and the retries run in the caller's transaction when there is one. If every attempt loses while rows still match, it throws `DbError("SERIALIZATION_FAILURE")` (`retryable: true`, `errors[0].path === "limit"`) — retry the call, or the whole transaction inside one ([Retrying](/api/transactions#retrying)). So `0` never comes from a race, and a loop until `0` does not stop early. MySQL's and SQLite's native statements take the next matching rows themselves and need no retry.
 - **Requires a primary key** — a table without one throws `INVALID_QUERY`.
 - **Everything else is unchanged** — filter guards, payload validation, version bumps and exemption, `@db.onUpdate.*` stamps; `$cas` stays rejected on `updateMany`.
+- **Array operators** (`$insert`, `$upsert`, `$update`, `$remove`; since 0.1.182) work in a bounded `updateMany` too. On every adapter the first `limit` keys are then read in order and the picked rows are written as in an [unbounded call](./update-patch#array-ops-update-many) — the native bounded statements in the table below are not used for such a patch, so the retry above applies on every adapter.
 - **Not exposed over HTTP** — moost-db has no bulk delete or filter-update endpoint.
 
 | Adapter         | How the bound runs                                                                                                                                       |

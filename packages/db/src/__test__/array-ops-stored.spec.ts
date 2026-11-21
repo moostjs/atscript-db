@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeAll, vi } from "vite-plus/test";
 
-import { DbError } from "../db-error";
 import { AtscriptDbTable } from "../table/db-table";
 import type { TDbFieldMeta } from "../types";
 import { MockAdapter, prepareFixtures } from "./test-utils";
@@ -61,8 +60,7 @@ function setup({ pgTags = false } = {}) {
 }
 
 /** A table of `type` on a fresh `MockAdapter`, with no rows. */
-function setupTable(type: any) {
-  const adapter = new MockAdapter();
+function setupTable(type: any, adapter = new MockAdapter()) {
   const table = new AtscriptDbTable(type, adapter);
   adapter.store.set(table.tableName, []);
   return {
@@ -348,7 +346,11 @@ describe("array operators: stored forms the resolver must cope with", () => {
     expect((await run({ keyless }, { keyless: { $remove: [item] } })).keyless).toEqual([
       { label: "y" },
     ]);
-    expect((await run({ keyless }, { keyless: { $upsert: [item] } })).keyless).toHaveLength(2);
+    const upserted = (await run({ keyless }, { keyless: { $upsert: [item] } })).keyless;
+    expect(upserted).toHaveLength(2);
+    // the stored element stays as it is, as on MongoDB (since 0.1.182; it
+    // was replaced by the item, taking the item's property order)
+    expect(Object.keys(upserted[0])).toEqual(["note", "label"]);
   });
 
   it("nested objects are compared the same way", async () => {
@@ -391,32 +393,10 @@ describe("array operators: stored forms the resolver must cope with", () => {
   });
 });
 
-// `updateMany` is one statement for every matched row, and `$insert` /
-// `$upsert` / `$update` / `$remove` need each row's stored array. Before
-// 0.1.180 the decomposed `field.__$op` key reached the adapter: an unknown
-// column on SQL, an object stored in place of the array on the memory adapter
-// and MongoDB. `$replace` is a plain set and still works.
-describe("updateMany refuses array patch operators", () => {
-  it("throws INVALID_QUERY naming the field — renamed and nested too; nothing reaches the adapter", async () => {
-    const { adapter, table, seed } = setupTable(AosRenamed);
-    seed({ id: 1, u_col: ["a"], box__labels: ["x"] });
-    const error = await table
-      .updateMany({ id: 1 }, {
-        uniq: { $insert: ["b"] },
-        box: { labels: { $remove: ["x"] } },
-      } as any)
-      .then(
-        () => undefined,
-        (e: unknown) => e as DbError,
-      );
-    expect(error).toBeInstanceOf(DbError);
-    expect(error!.code).toBe("INVALID_QUERY");
-    expect(error!.errors.map((e) => e.path).toSorted()).toEqual(["box.labels", "uniq"]);
-    expect(error!.errors[0]!.message).toMatch(/not supported by updateMany/);
-    expect(adapter.calls.filter((c) => c.method === "updateMany")).toEqual([]);
-  });
-
-  it("a plain array value is still written", async () => {
+// `$insert` / `$upsert` / `$update` / `$remove` in `updateMany` apply to each
+// matched row (since 0.1.182) — see `update-many-array-ops.spec.ts`.
+describe("updateMany with an array field", () => {
+  it("a plain array value is written in one statement", async () => {
     const { adapter, table, seed } = setupTable(AosRenamed);
     seed({ id: 1, u_col: ["a"] });
     await table.updateMany({ id: 1 }, { uniq: ["b", "c"] } as any);
@@ -461,5 +441,38 @@ describe("array operators on an element type with a phantom prop", () => {
     ).rejects.toMatchObject({
       errors: [{ code: "PATCH_FIELD_REQUIRED", params: { field: "qty" } }],
     });
+  });
+});
+
+/** The queries `findOne` received. */
+const reads = (adapter: MockAdapter) =>
+  adapter.calls.filter((c) => c.method === "findOne").map((c) => c.args[0]);
+
+// The read of the read-modify-write takes an exclusive row lock where the
+// adapter takes row locks (since 0.1.182): two concurrent operator patches of
+// one row no longer read the same array, so neither change is lost.
+describe("the read-modify-write locks the row it reads", () => {
+  class LockingMockAdapter extends MockAdapter {
+    override supportsReadLocks(): boolean {
+      return true;
+    }
+  }
+
+  it("an adapter with row locks: the read asks for an exclusive lock, updateOne and bulkUpdate alike", async () => {
+    const { adapter, table, seed } = setupTable(AosKeyed, new LockingMockAdapter());
+    seed({ id: 1, tags: ["a"] });
+    await table.updateOne({ id: 1, tags: { $insert: ["b"] } } as any);
+    await table.bulkUpdate([{ id: 1, tags: { $remove: ["a"] } }] as any);
+    expect(reads(adapter)).toEqual([
+      { filter: { id: 1 }, controls: {}, lock: { mode: "update", wait: "block" } },
+      { filter: { id: 1 }, controls: {}, lock: { mode: "update", wait: "block" } },
+    ]);
+  });
+
+  it("an adapter without row locks reads as before", async () => {
+    const { adapter, table, seed } = setupTable(AosKeyed);
+    seed({ id: 1, tags: ["a"] });
+    await table.updateOne({ id: 1, tags: { $insert: ["b"] } } as any);
+    expect(reads(adapter)).toEqual([{ filter: { id: 1 }, controls: {} }]);
   });
 });

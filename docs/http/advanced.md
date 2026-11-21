@@ -250,14 +250,16 @@ The controller calls the `computeEmbedding()` hook to convert the search text in
 curl "http://localhost:3000/articles/query?\$vector=embedding&\$search=machine+learning+basics"
 ```
 
-**Response:**
+**Response** (SQLite, PostgreSQL or MySQL, cosine index):
 
 ```json
 [
-  { "id": 12, "title": "Introduction to ML", "score": 0.95 },
-  { "id": 8, "title": "Deep Learning Guide", "score": 0.87 }
+  { "id": 12, "title": "Introduction to ML", "_distance": 0.1 },
+  { "id": 8, "title": "Deep Learning Guide", "_distance": 0.26 }
 ]
 ```
+
+Rows come closest first. Each one carries the adapter's own measure: `_distance` on the SQL adapters (lower = closer, returned whatever the `$select`), and `_score` on MongoDB (higher = closer, only when a threshold applies). The scales differ by adapter and metric. See [Result fields](/search/vector-search#result-fields).
 
 ### With Threshold
 

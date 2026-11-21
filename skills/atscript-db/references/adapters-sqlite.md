@@ -125,7 +125,7 @@ const hits = await docs.vectorSearch(queryVec, {
 - **Partition push-down**: top-level equality filters on fields declared `@db.search.filter '<indexName>'` are emitted inside the vec0 `WHERE` (`partition key` columns in the vec0 DDL). Non-partition filters and operator nodes (`$or`, `$gt`, …) become outer residual filters on the joined main row.
 - **Threshold**: `controls.$threshold` overrides `@db.search.vector.threshold`. Score-to-distance follows postgres semantics: cosine `distance = 2*(1 − score)`; l2 passes through as a raw distance ceiling.
 - Without `{ vector: true }`: `typeMapper` falls back to JSON `TEXT`, no vec0 table is created, and `vectorSearch` throws `Vector search requires the sqlite-vec extension`.
-- Result rows carry `_distance` (ascending = more similar). `count` returned by `vectorSearchWithCount` is approximate when residual filters or threshold trim heavily — same caveat as pgvector.
+- Result rows carry `_distance` (sqlite-vec distance, ascending = more similar; kept under any `$select`) → scale per metric + name-collision rule: [crud.md § Search](crud.md#search). `count` returned by `vectorSearchWithCount` is approximate when residual filters or threshold trim heavily — same caveat as pgvector.
 - `getSearchIndexes()` returns one entry per fulltext **and** per vector index (`type: 'text' | 'vector'`).
 
 ### Identifier safety

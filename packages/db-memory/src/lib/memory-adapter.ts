@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import {
   ALL_AGGREGATE_FNS,
   ALL_VIEW_CAPABILITIES,
@@ -26,6 +28,8 @@ import type {
   TDbUpdateOptions,
   TDbDeleteResult,
   TDbIsolationLevel,
+  TDbReadLock,
+  TTransactionOptions,
 } from "@atscript/db";
 // `@atscript/db` does NOT re-export the annotated-type; it comes from the
 // atscript compiler's utils entry (same import `db-space.ts` uses).
@@ -51,6 +55,25 @@ import type {
   TViewCapability,
   UniquSelect,
 } from "@atscript/db";
+
+/**
+ * The exclusive lock of one `withTransaction` scope of the in-memory adapter
+ * (since 0.1.182): taken by a `lock: 'update'` read — also the read of an
+ * array-operator patch — and held until the outermost scope ends. One lock
+ * for the whole process, so there is no lock order and no deadlock between
+ * scopes.
+ */
+interface TLockScope {
+  /** Resolves once the scope holds the lock — set by its first locking read. */
+  acquired?: Promise<void>;
+  /** Hands the lock on to the next scope. */
+  release?: () => void;
+}
+
+const lockScopes = new AsyncLocalStorage<TLockScope>();
+
+/** The last scope queued for the lock: the next one waits until it ends. */
+let lockTail: Promise<void> = Promise.resolve();
 
 /**
  * Provider (read-through) backing closure. Recomputes and returns the table's
@@ -1010,6 +1033,7 @@ export class MemoryAdapter extends BaseDbAdapter {
   }
 
   async findOne(query: DbQuery): Promise<Record<string, unknown> | null> {
+    await this._lockScope(query.lock);
     const { $sort, $nulls, $skip, $select } = this._readControls(query.controls ?? {});
     const index = $skip ?? 0;
     const sorted = hasSort($sort)
@@ -1039,6 +1063,7 @@ export class MemoryAdapter extends BaseDbAdapter {
   override async findManyWithCount(
     query: DbQuery,
   ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
+    await this._lockScope(query.lock);
     const filtered = await this._filteredRows(query);
     const { $sort, $nulls, $skip, $limit, $select } = this._readControls(query.controls ?? {});
     const topK = $limit === undefined ? undefined : ($skip ?? 0) + $limit;
@@ -1105,12 +1130,48 @@ export class MemoryAdapter extends BaseDbAdapter {
   }
 
   /**
-   * Locking reads are accepted and ignored inside a `withTransaction` scope
-   * (since 0.1.162) — the in-memory store has no concurrent transactions to
-   * lock rows against.
+   * Locking reads are accepted inside a `withTransaction` scope (since
+   * 0.1.162). `lock: 'update'` with the default `wait: 'block'` waits for
+   * any other scope holding the adapter's exclusive lock, then holds it until
+   * its own outermost scope ends (since 0.1.182; it was ignored before) — so
+   * concurrent read-modify-writes in one process, such as array-operator
+   * patches, do not overwrite each other. `share`, `nowait` and `skipLocked`
+   * are accepted and ignored.
    */
   override supportsReadLocks(): boolean {
     return true;
+  }
+
+  /**
+   * Runs `fn` in a transaction scope — no rollback here — whose exclusive
+   * lock (see {@link supportsReadLocks}) is released when the outermost scope
+   * ends. A nested call joins the lock scope it runs in — also one opened by
+   * another in-memory table; inside a transaction of another adapter it
+   * opens its own.
+   */
+  override async withTransaction<T>(fn: () => Promise<T>, opts?: TTransactionOptions): Promise<T> {
+    if (lockScopes.getStore()) return super.withTransaction(fn, opts);
+    const scope: TLockScope = {};
+    try {
+      return await lockScopes.run(scope, () => super.withTransaction(fn, opts));
+    } finally {
+      scope.release?.();
+    }
+  }
+
+  /** Takes the exclusive lock for the current scope on a blocking `update` read. */
+  private async _lockScope(lock: TDbReadLock | undefined): Promise<void> {
+    if (lock?.mode !== "update" || lock.wait !== "block") return;
+    const scope = lockScopes.getStore();
+    if (!scope) return;
+    if (!scope.acquired) {
+      // Queued once per scope; `release` is set at once, so the scope hands
+      // the lock on when it ends — however it ends
+      const held = new Promise<void>((resolve) => (scope.release = resolve));
+      scope.acquired = lockTail;
+      lockTail = lockTail.then(() => held);
+    }
+    await scope.acquired;
   }
 
   /** Every level is accepted and ignored (no transaction isolation). @since 0.1.162 */

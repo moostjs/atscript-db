@@ -137,12 +137,13 @@ embedding: db.vector
 
 - Pre-filter (0.1.151): top-level filter conjuncts on the index's `@db.search.filter` fields move into `$vectorSearch.filter` when the value is a string / number / boolean / `Date` / ObjectId under `$eq` (or bare), `$ne`, `$gt(e)`, `$lt(e)`, `$in`, `$nin` (non-empty) → full pages. Everything else (other fields, `null`, `$regex`, `$exists`, `$or`, predicates) filters the top-k AFTER the stage → page can be short. Several filter fields per index are all declared (≤ 0.1.150 kept only the last).
 - `$vectorSearch.limit` = `$skip + $limit` (≤ 0.1.150 a skipped page came back empty).
+- Rows carry `_score` (Atlas `vectorSearchScore`, 0–1, higher = closer) ONLY when a threshold applies; an inclusion `$select` drops it. Not the SQL adapters' `_distance` → [crud.md § Search](crud.md#search).
 - `searchWithCount` on Atlas `$search` with NO filter: page read directly + total from `$searchMeta` (`count: total`); filtered / classic `$text` / vector keep the `$facet`.
 - `findManyWithCount` without predicates: `find` + `countDocuments` (concurrent; sequential in a transaction).
 
 ## Patch / CollectionPatcher
 
-Every `updateOne`/`updateMany` patch compiles to a single `[ { $set: <pipeline> } ]` aggregation stage — one round-trip regardless of op count. See [patch.md](patch.md).
+Every `updateOne` / `bulkUpdate` patch compiles to an update pipeline of `$set` stages — one round-trip regardless of op count. `updateMany` uses the same pipeline when the patch has `$insert/$upsert/$update/$remove` (0.1.182: ONE `updateMany` statement, each document from its own array; nothing to set → honest `matchedCount`, `modifiedCount: 0`), else a plain `$set` / `$inc` / `$mul` document. See [patch.md](patch.md).
 
 ## Transactions
 

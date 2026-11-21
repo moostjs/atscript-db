@@ -270,7 +270,9 @@ Every adapter gives the same array for the same patch (since 0.1.180): `$insert`
 
 `$replace` stands alone: operators sent next to it on the same field are ignored (on MongoDB since 0.1.180; before, it applied them to the new array).
 
-Array operators work in `updateOne` and `bulkUpdate`. `updateMany` is one statement for every matched row, and `$insert`, `$upsert`, `$update` and `$remove` need each row's stored array, so it throws `DbError("INVALID_QUERY")` for them (since 0.1.180; before, the call failed or stored a broken value, depending on the adapter). `$replace` and a plain array value work in `updateMany`.
+Array operators work in `updateOne`, `bulkUpdate` and `updateMany` (since 0.1.182). In `updateMany` they apply to each matched row's own stored array, so every row ends with the array `updateOne` gives it — see [Array operators in `updateMany`](#array-ops-update-many).
+
+An array inside a nested object takes the operators too, at any depth (on the in-memory adapter since 0.1.182, see [Field Operations](/adapters/memory#field-operations-defaults)): `{ box: { labels: { $insert: ["y"] } } }`. The rest of the object follows the parent's [patch strategy](#embedded-object-patches): under the default (replace), the optional children the patch leaves out are cleared, as with any replaced object; under `@db.patch.strategy 'merge'` they stay. A merge-strategy object inside a replaced one is cleared the same way on every adapter but MongoDB, which keeps its omitted children.
 
 Items are validated like the items of a plain array set (since 0.1.153): an optional item field accepts `null` in `$update` too, and an error names the item property (`items.$update[0].qty`). Primitive `$remove` / `$update` values are checked one by one against the element type. Items are [normalized](/api/crud#normalization) first (since 0.1.170), keys included: `$remove: [" RED "]` removes the stored `"red"` when the element type lowercases and trims.
 
@@ -280,7 +282,26 @@ In relational databases (SQLite, PostgreSQL, MySQL), arrays are stored as JSON c
 
 ### Read-modify-write {#read-modify-write}
 
-On every adapter but MongoDB, which applies the operators natively, the update reads the row, applies the operators to the stored array and writes the whole array back, in one transaction. Since 0.1.178 the stored array is decoded the way a read decodes it, so a [SQLite vector](/adapters/sqlite#vector-storage) stored as a Float32 `BLOB` is patched as its numbers (and stored back as JSON text). A stored value that is still not an array, such as JSON text of a string or an object written by SQL of your own, fails the update with `Cannot apply array patch operators to "<column>": its stored value is not an array`, and nothing is written. `<column>` is the column as stored (`box__labels` for `box.labels`, the `@db.column` name of a renamed field). Before 0.1.178 such a value was spread item by item, a string into its characters.
+On every adapter but MongoDB, which applies the operators natively, the update reads the row, applies the operators to the stored array and writes the whole array back, in one transaction. Since 0.1.182 the read locks the row where the engine takes row locks (`FOR UPDATE` on PostgreSQL and MySQL), so two concurrent operator patches of one row run one after the other; before, both could read the same array and the second write dropped the first one's change. SQLite already ran them one at a time. Since 0.1.178 the stored array is decoded the way a read decodes it, so a [SQLite vector](/adapters/sqlite#vector-storage) stored as a Float32 `BLOB` is patched as its numbers (and stored back as JSON text). A stored value that is still not an array, such as JSON text of a string or an object written by SQL of your own, fails the update with `Cannot apply array patch operators to "<column>": its stored value is not an array`, and nothing is written. `<column>` is the column as stored (`box__labels` for `box.labels`, the `@db.column` name of a renamed field). Before 0.1.178 such a value was spread item by item, a string into its characters.
+
+### Array operators in `updateMany` {#array-ops-update-many}
+
+_Since 0.1.182; 0.1.180 and 0.1.181 refused them with `DbError("INVALID_QUERY")`._ `$insert`, `$upsert`, `$update` and `$remove` in `updateMany` apply to the stored array of each matched row, so rows that hold different arrays get different results — each the one `updateOne` with the same patch gives that row. Plain sets and [field operations](#field-ops) in the same patch apply to every matched row as usual:
+
+```typescript
+// every open ticket gets "triaged" added to and "stale" removed from its own tags
+await tickets.updateMany(
+  { status: "open" },
+  { status: "queued", tags: { $insert: ["triaged"], $remove: ["stale"] } },
+);
+```
+
+- **MongoDB** runs one `updateMany` statement with the update pipeline `updateOne` uses — for every patch with an array operator, `$replace` inside a nested object included.
+- **SQLite, PostgreSQL, MySQL and the in-memory adapter** read the patched arrays of the matched rows and write each row by its primary key: one `UPDATE` per row, all in one transaction — the caller's when [`withTransaction`](/api/transactions) is open, so a failing row rolls the whole call back (the in-memory adapter has no rollback). The rows are picked once, before any write, as a single statement picks them; on PostgreSQL and MySQL they stay locked (`FOR UPDATE`) until the transaction ends, and their arrays are read with the same lock, so they are the latest committed ones even when the caller's transaction read the rows earlier (MySQL's REPEATABLE READ would otherwise return that older snapshot). On the in-memory adapter, concurrent calls in one process run one after the other. For large match sets, loop a [bounded write](/api/crud#bounded-writes) to keep each transaction short.
+- **A table without a primary key** cannot be written row by row: on those adapters the call throws `DbError("INVALID_QUERY")` naming the field. Patch such rows with `updateOne` or `bulkUpdate`.
+- **Counts:** `matchedCount` and `modifiedCount` add up the row writes, counted as a plain `updateMany` counts them on the same adapter. A row deleted between the pick and its write is not counted.
+- **Bounded writes** (`{ limit, sort }`) take the operators too, on every adapter — see [Bounded writes](/api/crud#bounded-writes).
+- **Versions:** each written row's [version](./versioning) goes up by one, unless the patch writes only version-exempt fields; `$cas` stays refused on `updateMany`.
 
 ## Primitive Arrays
 
@@ -400,7 +421,9 @@ await table.updateOne({
 
 For object arrays without `@expect.array.key`, matching falls back to **full deep value equality**. This means `$remove` works (match entire objects), but `$update` is effectively a no-op (there are no key fields to locate a target element for partial update). This is the same on every adapter since 0.1.180; before, MongoDB added the `$update` items to the array as a set union.
 
-The order of an element's properties does not matter on SQLite, PostgreSQL, MySQL and the in-memory adapter (on PostgreSQL and MySQL since 0.1.180; they store JSON objects with re-ordered keys, so before, a stored object was never found there). MongoDB compares embedded documents property by property in their stored order: send the item's properties in the order they were written.
+The order of an element's properties does not matter, at any depth, on every adapter. `$remove`, `$upsert` and `$insert` on a `uniqueItems` array find `{ ts: 1, message: "Deployed" }` when `{ message: "Deployed", ts: 1 }` is stored. An array inside an element is compared in order, and a missing property is not equal to `null`. On MongoDB this holds since 0.1.182, on every server version the adapter supports, with one exception: an item property whose name contains `.`, starts with `$` or is empty is compared with `$getField`, which needs MongoDB 5.0 or later (as storing such a name does). Before, it compared embedded documents in their stored property order, so an item sent in another order removed nothing, and `$upsert` or a unique `$insert` appended a second copy. On PostgreSQL and MySQL it holds since 0.1.180; they store JSON objects with re-ordered keys, so before, a stored object was never found there.
+
+When `$upsert` or a unique `$insert` finds an equal element, the stored element stays as it is. An item that is appended is stored as you sent it. Before 0.1.182, a key-less `$upsert` on SQLite and the in-memory adapter replaced the equal element with the item, so the element took the item's property order.
 
 ```typescript
 import { $insert, $remove, $replace } from "@atscript/db/ops";

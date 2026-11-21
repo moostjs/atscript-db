@@ -38,6 +38,137 @@ function containsAggregationExpr(v: unknown): boolean {
 }
 
 /**
+ * Whether `value` holds a plain object at any depth. Only then can BSON
+ * equality (`$in` / `$eq`, which follows stored property order) differ from
+ * the comparison of the other adapters, which ignores property order.
+ */
+function holdsObject(value: unknown): boolean {
+  return Array.isArray(value) ? value.some(holdsObject) : isPlainObject(value);
+}
+
+/**
+ * The form two operator items are the same by: JSON text with every object's
+ * keys sorted (as `stableJson` writes it) — what the other adapters compare
+ * elements without key props by — except that a value JSON cannot represent
+ * (an `ObjectId`, a `Date`, …) keeps its BSON type, as `$in` / `$eq` compare
+ * it: an `ObjectId` never equals its hex string, nor a `Date` its ISO text.
+ */
+function itemForm(item: unknown): string {
+  // `this[key]` is the value before `toJSON`, which turns those into strings
+  return JSON.stringify([item], function (this: Record<string, unknown>, key, value: unknown) {
+    const raw = this[key];
+    if (raw !== null && typeof raw === "object" && !Array.isArray(raw) && !isPlainObject(raw)) {
+      return `\u0000${raw.constructor?.name}:${JSON.stringify(value)}`;
+    }
+    // keys sorted, as `stableJson` sorts them; the nested values stay raw
+    return isPlainObject(value)
+      ? Object.fromEntries(
+          Object.entries(value).toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+        )
+      : value;
+  });
+}
+
+/**
+ * `items` without those the same as an earlier one ({@link itemForm}) — what
+ * an operator that skips repeated items drops before it reaches the server.
+ */
+function distinctItems(items: unknown[]): unknown[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const form = itemForm(item);
+    if (seen.has(form)) return false;
+    seen.add(form);
+    return true;
+  });
+}
+
+const allOf = (checks: Document[]): Document =>
+  checks.length === 1 ? checks[0]! : { $and: checks };
+
+const anyOf = (checks: Document[]): Document =>
+  checks.length === 1 ? checks[0]! : { $or: checks };
+
+/** Whether a property name can follow a variable in a field path (`$$el.<name>`). */
+const isPathSegment = (name: string): boolean =>
+  name !== "" && !name.includes(".") && !name.startsWith("$") && !name.includes("\0");
+
+/**
+ * Appends to `checks` aggregation conditions that all hold exactly when the
+ * value of `expr` equals `item` the way the other adapters compare elements
+ * without key props: an object whatever the order of its properties, at
+ * every depth; an array element by element, in order; a scalar as BSON
+ * compares it; a missing property is not `null`. The conditions follow the
+ * item's structure — stored structure deeper than the item cannot equal it —
+ * and each one is safe to evaluate on any stored value.
+ *
+ * `depth` names the variables a nested array element is bound to (`v0`,
+ * `v1`, … from the outside in). Item values are `$literal`s.
+ */
+function equalityChecks(
+  expr: string | Document,
+  item: unknown,
+  depth: number,
+  checks: Document[] = [],
+): Document[] {
+  // `stableJson` writes `undefined` in an array as `null`
+  if (item === null || item === undefined) {
+    checks.push({ $eq: [{ $type: expr }, "null"] });
+  } else if (!holdsObject(item)) {
+    checks.push({ $eq: [expr, { $literal: item }] });
+  } else if (typeof expr !== "string") {
+    // An array element or `$getField` result is read more than once below
+    const name = `v${depth}`;
+    checks.push({
+      $let: { vars: { [name]: expr }, in: allOf(equalityChecks(`$$${name}`, item, depth + 1)) },
+    });
+  } else if (Array.isArray(item)) {
+    const elements = item.flatMap((el, i) =>
+      equalityChecks({ $arrayElemAt: [expr, i] }, el, depth),
+    );
+    checks.push({
+      $cond: [
+        { $isArray: expr },
+        allOf([{ $eq: [{ $size: expr }, item.length] }, ...elements]),
+        false,
+      ],
+    });
+  } else {
+    // `stableJson` leaves out an `undefined` property
+    const entries = Object.entries(item).filter(([, v]) => v !== undefined);
+    const isObject = { $eq: [{ $type: expr }, "object"] };
+    checks.push({
+      $eq: [{ $cond: [isObject, { $size: { $objectToArray: expr } }, -1] }, entries.length],
+    });
+    for (const [name, value] of entries) {
+      if (isPathSegment(name)) {
+        equalityChecks(`${expr}.${name}`, value, depth, checks);
+      } else {
+        // A name a field path cannot spell (MongoDB 5.0+, as is storing one)
+        const field = { $getField: { field: { $literal: name }, input: expr } };
+        checks.push({ $cond: [isObject, allOf(equalityChecks(field, value, depth)), false] });
+      }
+    }
+  }
+  return checks;
+}
+
+/** Condition: the value of `expr` equals `item` (see {@link equalityChecks}). */
+function equalsItem(expr: string, item: unknown): Document {
+  return allOf(equalityChecks(expr, item, 0));
+}
+
+/**
+ * Condition: array `arr` has an element equal to `item` — BSON `$in` when
+ * the item holds no object (it is exact then), else {@link equalsItem}.
+ */
+function holdsItem(arr: string, item: unknown): Document {
+  return holdsObject(item)
+    ? { $anyElementTrue: { $map: { input: arr, as: "el", in: equalsItem("$$el", item) } } }
+    : { $in: [{ $literal: item }, arr] };
+}
+
+/**
  * Context interface for CollectionPatcher.
  * Decouples the patcher from AsCollection, allowing MongoAdapter to provide this.
  */
@@ -364,6 +495,36 @@ export class CollectionPatcher {
   }
 
   /**
+   * Key-less `$upsert` / unique `$insert`: each item is appended, as sent and
+   * in the order sent, unless a stored element or an earlier item equals it.
+   * One rule for every item (since 0.1.182): an item that holds an object
+   * equals whatever the order of the objects' properties, as on the other
+   * adapters — before, BSON equality, which follows stored property order,
+   * appended a re-ordered item next to the equal element; a scalar as BSON
+   * compares it, so an `ObjectId` never equals its hex string (see
+   * {@link itemForm}; before, it did when another item held an object).
+   * Stored elements stay as they are.
+   */
+  private _appendAbsent(key: string, input: unknown[]): void {
+    if (!input.some(holdsObject)) {
+      // Scalars only: BSON `$in` against the stored and the earlier items
+      this._appendUnless(key, input, { $in: ["$$this", "$$value"] });
+      return;
+    }
+    // An item the same as an earlier one is dropped here, so each remaining
+    // item is checked against the stored array only
+    const added = distinctItems(input).map((item) => ({
+      $cond: [holdsItem("$$arr", item), [], literal([item])],
+    }));
+    this._set(key, {
+      $let: {
+        vars: { arr: { $ifNull: [`$${key}`, []] } },
+        in: { $concatArrays: ["$$arr", ...added] },
+      },
+    });
+  }
+
+  /**
    * `$insert` — what the read-modify-write of the other adapters does (since
    * 0.1.180; before, a keyed or unique insert was an upsert / a set union):
    * - keyed  → append, skipping an item whose key is already stored
@@ -383,7 +544,7 @@ export class CollectionPatcher {
     if (keys.length > 0) {
       this._appendUnless(key, input, this._keyStored(keys));
     } else if (flatType.metadata?.has("expect.array.uniqueItems")) {
-      this._appendUnless(key, input, { $in: ["$$this", "$$value"] });
+      this._appendAbsent(key, input);
     } else {
       this._set(key, {
         $concatArrays: [{ $ifNull: [`$${key}`, []] }, literal(input)],
@@ -410,7 +571,7 @@ export class CollectionPatcher {
     }
 
     if (keys.length === 0) {
-      this._appendUnless(key, input, { $in: ["$$this", "$$value"] });
+      this._appendAbsent(key, input);
       return;
     }
 
@@ -515,9 +676,16 @@ export class CollectionPatcher {
         },
       });
     } else {
-      this._set(key, {
-        $filter: { input: stored, as: "el", cond: { $not: { $in: ["$$el", literal(input)] } } },
-      });
+      // An item without objects matches as BSON compares (`$in`); one that
+      // holds objects whatever the order of their properties, as on the other
+      // adapters (since 0.1.182; before, BSON equality: an item sent in
+      // another property order removed nothing)
+      const scalars = input.filter((item) => !holdsObject(item));
+      const equal = distinctItems(input.filter(holdsObject)).map((item) =>
+        equalsItem("$$el", item),
+      );
+      if (scalars.length > 0) equal.unshift({ $in: ["$$el", literal(scalars)] });
+      this._set(key, { $filter: { input: stored, as: "el", cond: { $not: anyOf(equal) } } });
     }
   }
 }

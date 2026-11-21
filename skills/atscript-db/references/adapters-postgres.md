@@ -104,6 +104,7 @@ interface Document {
   | `euclidean`  | `<->`    | `distance = score` (raw max)  |
   | `dotProduct` | `<#>`    | `distance = -score` (negated) |
 
+- Rows carry `_distance` = the operator's result (lower = closer; kept under any `$select`) → [crud.md § Search](crud.md#search).
 - Pre-filter fields (`@db.search.filter 'doc_vec'`) are added to the SQL `WHERE` before the vector op.
 - Requires `CREATE EXTENSION IF NOT EXISTS vector;`.
 

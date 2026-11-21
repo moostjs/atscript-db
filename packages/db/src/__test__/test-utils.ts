@@ -128,6 +128,25 @@ export class NestedMockAdapter extends MockAdapter {
   }
 }
 
+/** A mock that honours `$sort` / `$limit` on reads, like a real engine. */
+export class OrderedMockAdapter extends MockAdapter {
+  override async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
+    let rows = await super.findMany(query);
+    const sort = query.controls?.$sort as Record<string, 1 | -1> | undefined;
+    if (sort) {
+      rows = rows.toSorted((a, b) => {
+        for (const [k, dir] of Object.entries(sort)) {
+          if (a[k] === b[k]) continue;
+          return (a[k] as number) < (b[k] as number) ? -dir : dir;
+        }
+        return 0;
+      });
+    }
+    const limit = query.controls?.$limit as number | undefined;
+    return limit === undefined ? rows : rows.slice(0, limit);
+  }
+}
+
 /**
  * Simple filter matching for tests — supports exact match (`null` matches a
  * missing value), $in, $eq, $lt, $and and $or.

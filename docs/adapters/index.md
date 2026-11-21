@@ -14,7 +14,7 @@ Atscript's DB layer is adapter-agnostic. The same `.as` definitions, queries, an
 
 **SQLite** is ideal for development and testing. Zero-config, single-file storage, and no server process make it the fastest way to get started. SQLite supports foreign keys via `PRAGMA foreign_keys` and fulltext search via FTS5 virtual tables. Its main limitation is ALTER TABLE support — column type changes and some modifications require table recreation.
 
-**MongoDB** is best for flexible schemas and document-oriented data. It stores nested objects natively (no flattening), supports native array patch operations (`$push`, `$pull`), and loads relations via `$lookup` in a single pipeline. Atlas Search enables text and vector search. Transactions require a replica set.
+**MongoDB** is best for flexible schemas and document-oriented data. It stores nested objects natively (no flattening), applies the array patch operators natively in one update (an aggregation pipeline of `$set` stages), and loads relations via `$lookup` in a single pipeline. Atlas Search enables text and vector search. Transactions require a replica set.
 
 **MySQL** is a solid choice for existing MySQL infrastructure. It offers wide hosting support, native FULLTEXT indexing, and `VECTOR(N)` support in MySQL 9.0+. In-place column modification via `ALTER TABLE MODIFY COLUMN` means schema changes are straightforward.
 
@@ -22,25 +22,25 @@ Atscript's DB layer is adapter-agnostic. The same `.as` definitions, queries, an
 
 ## Feature Comparison Matrix
 
-| Feature                      | PostgreSQL        | SQLite              | MongoDB              | MySQL          | Memory     |
-| ---------------------------- | ----------------- | ------------------- | -------------------- | -------------- | ---------- |
-| Native FK constraints        | Yes               | Yes (PRAGMA)        | Emulated             | Yes            | App-level  |
-| Transactional DDL            | Yes               | No                  | N/A                  | No             | N/A        |
-| Text search                  | GIN + tsvector    | FTS5                | Atlas Search         | FULLTEXT       | No         |
-| Vector search                | pgvector          | sqlite-vec (opt-in) | Atlas vectorSearch   | VECTOR(N) 9.0+ | No         |
-| JSON storage                 | JSONB             | TEXT                | Native               | JSON           | Native     |
-| Boolean type                 | Native            | INTEGER 0/1         | Native               | TINYINT(1)     | Native     |
-| UUID generation              | gen_random_uuid() | App-side            | App-side             | App-side       | App-side   |
-| Nested objects               | Flattened         | Flattened           | Native               | Flattened      | Native     |
-| Native patch ops             | No                | No                  | Yes ($push/$pull)    | No             | No         |
-| Native relations             | No                | No                  | Yes ($lookup)        | No             | No         |
-| Relational predicates        | `EXISTS`          | `EXISTS`            | `$lookup` pipeline   | `EXISTS`       | In-process |
-| In-place column modify       | Yes               | No (recreate)       | N/A                  | Yes            | N/A        |
-| Transactions                 | Full (incl. DDL)  | Yes                 | Replica set required | Yes (no DDL)   | No         |
-| Schema namespaces            | Schemas           | No                  | No                   | Databases      | No         |
-| Grouped queries              | Yes               | Yes                 | Yes                  | Yes            | Yes        |
-| Calendar buckets             | Yes               | Driver hook         | 4.0+                 | tz tables      | Yes        |
-| Adapter-specific annotations | `@db.pg.*`        | None                | `@db.mongo.*`        | `@db.mysql.*`  | None       |
+| Feature                      | PostgreSQL        | SQLite              | MongoDB               | MySQL          | Memory     |
+| ---------------------------- | ----------------- | ------------------- | --------------------- | -------------- | ---------- |
+| Native FK constraints        | Yes               | Yes (PRAGMA)        | Emulated              | Yes            | App-level  |
+| Transactional DDL            | Yes               | No                  | N/A                   | No             | N/A        |
+| Text search                  | GIN + tsvector    | FTS5                | Atlas Search          | FULLTEXT       | No         |
+| Vector search                | pgvector          | sqlite-vec (opt-in) | Atlas vectorSearch    | VECTOR(N) 9.0+ | No         |
+| JSON storage                 | JSONB             | TEXT                | Native                | JSON           | Native     |
+| Boolean type                 | Native            | INTEGER 0/1         | Native                | TINYINT(1)     | Native     |
+| UUID generation              | gen_random_uuid() | App-side            | App-side              | App-side       | App-side   |
+| Nested objects               | Flattened         | Flattened           | Native                | Flattened      | Native     |
+| Native patch ops             | No                | No                  | Yes (`$set` pipeline) | No             | No         |
+| Native relations             | No                | No                  | Yes ($lookup)         | No             | No         |
+| Relational predicates        | `EXISTS`          | `EXISTS`            | `$lookup` pipeline    | `EXISTS`       | In-process |
+| In-place column modify       | Yes               | No (recreate)       | N/A                   | Yes            | N/A        |
+| Transactions                 | Full (incl. DDL)  | Yes                 | Replica set required  | Yes (no DDL)   | No         |
+| Schema namespaces            | Schemas           | No                  | No                    | Databases      | No         |
+| Grouped queries              | Yes               | Yes                 | Yes                   | Yes            | Yes        |
+| Calendar buckets             | Yes               | Driver hook         | 4.0+                  | tz tables      | Yes        |
+| Adapter-specific annotations | `@db.pg.*`        | None                | `@db.mongo.*`         | `@db.mysql.*`  | None       |
 
 ## Installation Quick Reference
 
@@ -89,7 +89,7 @@ Adapters declare their capabilities via boolean flags on the `BaseDbAdapter` cla
 | `supportsColumnModify`        | ALTER COLUMN type changes                                              | Yes |   No   |  N/A  |  Yes  |  N/A   |
 
 ::: info How the generic layer uses these flags
-When `supportsNativeForeignKeys` is `false`, the generic layer implements cascade and set-null behavior in application code before deleting parent records. When `supportsNestedObjects` is `false`, nested objects are automatically flattened to `__`-separated column names (e.g., `address__city`). When `supportsNativePatch` is `true`, patch operations like array `$push`/`$pull` are delegated directly to the adapter instead of being decomposed into read-modify-write cycles.
+When `supportsNativeForeignKeys` is `false`, the generic layer implements cascade and set-null behavior in application code before deleting parent records. When `supportsNestedObjects` is `false`, nested objects are automatically flattened to `__`-separated column names (e.g., `address__city`). When `supportsNativePatch` is `true`, array patch operators (`$insert`, `$upsert`, `$update`, `$remove`) are delegated directly to the adapter instead of being decomposed into read-modify-write cycles.
 :::
 
 ## Next Steps

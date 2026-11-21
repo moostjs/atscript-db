@@ -259,6 +259,8 @@ const results = await documents.vectorSearch(queryEmbedding, {
 
 `$threshold` is a normalized similarity score (`0`–`1`) matching MongoDB Atlas semantics; the adapter converts it to the appropriate distance for the chosen metric.
 
+Each row carries `_distance`, the `sqlite-vec` distance of that row (lower = closer). See [Result fields](/search/vector-search#result-fields).
+
 ::: tip
 `sqlite-vec` is a native module — make sure your build target matches the platform you deploy to.
 :::
@@ -552,7 +554,7 @@ A [`@db.column.derived`](/api/storage#derived-columns) field (since 0.1.141) is 
 - **No database schemas** — the `@db.schema` annotation is ignored (SQLite has no schema namespaces).
 - **Vector search is opt-in via `sqlite-vec`** — see [Vector Search](#vector-search). Without the extension, `@db.search.vector` fields are stored as JSON `TEXT` and `vectorSearch()` throws.
 - **No native boolean type** — booleans are stored as `INTEGER` (`0`/`1`).
-- **No native array/JSON operations** — array patch operators (`$insert`, `$remove`, …) use generic [read-modify-write](/api/update-patch#read-modify-write) instead of native operations.
+- **No native array/JSON operations** — array patch operators (`$insert`, `$remove`, …) use generic [read-modify-write](/api/update-patch#read-modify-write) instead of native operations. In `updateMany` (since 0.1.182) that is one `UPDATE` per matched row, in one transaction — see [Array operators in `updateMany`](/api/update-patch#array-ops-update-many).
 - **Synchronous driver** — both `better-sqlite3` and `node:sqlite` are synchronous; the adapter wraps calls in promises for the async `BaseDbAdapter` contract.
 - **No native UUID generation** — UUIDs must be generated application-side.
 

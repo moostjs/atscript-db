@@ -1143,6 +1143,32 @@ export abstract class BaseDbAdapter {
     throw new Error("Native patch not supported by this adapter");
   }
 
+  /**
+   * Applies a patch payload to EVERY record matching `filter` with native
+   * database operations (since 0.1.182). Called by `updateMany` when the
+   * patch carries array operators (`$insert`, `$upsert`, `$update`,
+   * `$remove`) and {@link supportsNativePatch} returns `true`; every record
+   * must end as {@link nativePatch} would leave it. `patch` / `ops` have the
+   * shape `nativePatch` receives. No CAS: bump the version of every record
+   * written unless `opts.keepVersion`. Never receives `opts.limit` — a
+   * bounded `updateMany` picks its rows first and calls this once per batch
+   * with a filter holding their keys.
+   *
+   * Optional. Without it, `updateMany` reads the primary keys of the matched
+   * rows (inside one transaction) and calls {@link nativePatch} once per row.
+   *
+   * @param filter - Filter identifying the records to patch (physical names).
+   * @param patch - The patch payload with array operations.
+   * @param opts - `keepVersion`: skip the version bump (see {@link TDbUpdateOptions}).
+   * @returns Update result summed over the matched records.
+   */
+  nativePatchMany?(
+    filter: FilterExpr,
+    patch: unknown,
+    ops?: TFieldOps,
+    opts?: TDbUpdateOptions,
+  ): Promise<TDbUpdateResult>;
+
   // ── Adapter-specific annotation processing (overridable) ──────────────────
 
   /**

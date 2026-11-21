@@ -125,6 +125,31 @@ console.log(result.data); // similar documents
 console.log(result.count); // total matches above threshold
 ```
 
+### Result Fields {#result-fields}
+
+Each row comes back with one extra field: the database's own measure of how close the row is to the query vector. Its name and scale depend on the adapter:
+
+| Adapter    | Field       | Value                                                                                                                                                                                                                                   | Present                                                                       |
+| ---------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| SQLite     | `_distance` | The `sqlite-vec` distance, lower = closer. `cosine`: `1 − cosine similarity`, from `0` (same direction) to `2` (opposite). `euclidean`: the straight-line distance. `dotProduct` runs as cosine on SQLite, so it gets the cosine value. | On every row                                                                  |
+| PostgreSQL | `_distance` | The pgvector operator's result, lower = closer. `cosine` (`<=>`): `1 − cosine similarity`, `0` to `2`. `euclidean` (`<->`): the straight-line distance. `dotProduct` (`<#>`): the negative inner product.                               | On every row                                                                  |
+| MySQL      | `_distance` | The `VEC_DISTANCE_*` result of the index's metric, lower = closer. `cosine`: `1 − cosine similarity`, `0` to `2`.                                                                                                                       | On every row                                                                  |
+| MongoDB    | `_score`    | Atlas `vectorSearchScore`, from `0` to `1`, higher = closer. `cosine` and `dotProduct`: `(1 + similarity) / 2`. `euclidean`: `1 / (1 + distance)`.                                                                                      | Only when a threshold applies (`@db.search.vector.threshold` or `$threshold`) |
+
+The in-memory adapter has no vector search.
+
+The rows of `vectorSearchWithCount()` carry the same field, and so do the rows of `$vector` requests over HTTP (`/query` and `/pages`). The field is not part of the row's TypeScript type. Read it with a cast, for example `(row as { _distance?: number })._distance`.
+
+`$select` behaves differently per adapter:
+
+- **SQLite, PostgreSQL, MySQL:** `_distance` is returned whatever the `$select`. It is not a field you can name: `$select: ["title", "_distance"]` fails with `Unknown field "_distance"`.
+- **MongoDB:** an inclusion `$select` (`["title"]`) drops `_score`. An exclusion `$select` (`{ embedding: 0 }`) keeps it.
+
+DOs and DON'Ts:
+
+- **Don't compare the value across adapters or metrics.** A distance is not a score, and each engine has its own scale. Rows already come ordered closest first. To leave out far rows, pass `$threshold` instead of filtering on the field.
+- **Don't declare a field named `_distance` (SQLite, PostgreSQL, MySQL) or `_score` (MongoDB) on a table you vector-search.** The name collides with the result field. On SQLite, the search then orders the rows by your stored field instead of the distance, and the distance comes back as `_distance:1`. On MongoDB, the score replaces your stored value in the results whenever a threshold applies.
+
 ### Overriding Threshold at Query Time
 
 Use the `$threshold` control to override the schema-level default:

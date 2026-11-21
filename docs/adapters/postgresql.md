@@ -228,6 +228,8 @@ The `$threshold` parameter is a normalized similarity score (0--1) matching Mong
 - **Euclidean**: threshold is used as max distance directly
 - **Dot product**: threshold is negated
 
+Each row carries `_distance`, the operator's result for that row (lower = closer). See [Result fields](/search/vector-search#result-fields).
+
 ### Graceful Fallback
 
 When the pgvector extension is not available (not installed on the server), vector fields are stored as `JSONB` instead. The data is preserved, but indexed similarity search is not available — `vectorSearch()` will throw an error.

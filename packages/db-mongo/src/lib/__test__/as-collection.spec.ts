@@ -1131,17 +1131,90 @@ describe("[mongo] AsCollection with arrays", () => {
                 "as": "el",
                 "cond": {
                   "$not": {
-                    "$in": [
-                      "$$el",
+                    "$or": [
                       {
-                        "$literal": [
+                        "$and": [
                           {
-                            "key": "1",
-                            "value": "555",
+                            "$eq": [
+                              {
+                                "$cond": [
+                                  {
+                                    "$eq": [
+                                      {
+                                        "$type": "$$el",
+                                      },
+                                      "object",
+                                    ],
+                                  },
+                                  {
+                                    "$size": {
+                                      "$objectToArray": "$$el",
+                                    },
+                                  },
+                                  -1,
+                                ],
+                              },
+                              2,
+                            ],
                           },
                           {
-                            "key": "2",
-                            "value": "666",
+                            "$eq": [
+                              "$$el.key",
+                              {
+                                "$literal": "1",
+                              },
+                            ],
+                          },
+                          {
+                            "$eq": [
+                              "$$el.value",
+                              {
+                                "$literal": "555",
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                      {
+                        "$and": [
+                          {
+                            "$eq": [
+                              {
+                                "$cond": [
+                                  {
+                                    "$eq": [
+                                      {
+                                        "$type": "$$el",
+                                      },
+                                      "object",
+                                    ],
+                                  },
+                                  {
+                                    "$size": {
+                                      "$objectToArray": "$$el",
+                                    },
+                                  },
+                                  -1,
+                                ],
+                              },
+                              2,
+                            ],
+                          },
+                          {
+                            "$eq": [
+                              "$$el.key",
+                              {
+                                "$literal": "2",
+                              },
+                            ],
+                          },
+                          {
+                            "$eq": [
+                              "$$el.value",
+                              {
+                                "$literal": "666",
+                              },
+                            ],
                           },
                         ],
                       },
@@ -1284,40 +1357,92 @@ describe("[mongo] CollectionPatcher — $upsert", () => {
         {
           "$set": {
             "withoutKey": {
-              "$reduce": {
+              "$let": {
                 "in": {
-                  "$cond": [
+                  "$concatArrays": [
+                    "$$arr",
                     {
-                      "$in": [
-                        "$$this",
-                        "$$value",
-                      ],
-                    },
-                    "$$value",
-                    {
-                      "$concatArrays": [
-                        "$$value",
-                        [
-                          "$$this",
-                        ],
+                      "$cond": [
+                        {
+                          "$anyElementTrue": {
+                            "$map": {
+                              "as": "el",
+                              "in": {
+                                "$and": [
+                                  {
+                                    "$eq": [
+                                      {
+                                        "$cond": [
+                                          {
+                                            "$eq": [
+                                              {
+                                                "$type": "$$el",
+                                              },
+                                              "object",
+                                            ],
+                                          },
+                                          {
+                                            "$size": {
+                                              "$objectToArray": "$$el",
+                                            },
+                                          },
+                                          -1,
+                                        ],
+                                      },
+                                      3,
+                                    ],
+                                  },
+                                  {
+                                    "$eq": [
+                                      "$$el.key",
+                                      {
+                                        "$literal": "a",
+                                      },
+                                    ],
+                                  },
+                                  {
+                                    "$eq": [
+                                      "$$el.value",
+                                      {
+                                        "$literal": "b",
+                                      },
+                                    ],
+                                  },
+                                  {
+                                    "$eq": [
+                                      "$$el.attribute",
+                                      {
+                                        "$literal": "c",
+                                      },
+                                    ],
+                                  },
+                                ],
+                              },
+                              "input": "$$arr",
+                            },
+                          },
+                        },
+                        [],
+                        {
+                          "$literal": [
+                            {
+                              "attribute": "c",
+                              "key": "a",
+                              "value": "b",
+                            },
+                          ],
+                        },
                       ],
                     },
                   ],
                 },
-                "initialValue": {
-                  "$ifNull": [
-                    "$withoutKey",
-                    [],
-                  ],
-                },
-                "input": {
-                  "$literal": [
-                    {
-                      "attribute": "c",
-                      "key": "a",
-                      "value": "b",
-                    },
-                  ],
+                "vars": {
+                  "arr": {
+                    "$ifNull": [
+                      "$withoutKey",
+                      [],
+                    ],
+                  },
                 },
               },
             },
@@ -1654,39 +1779,83 @@ describe("[mongo] CollectionPatcher — uniqueItems", () => {
         {
           "$set": {
             "uniqueObjects": {
-              "$reduce": {
+              "$let": {
                 "in": {
-                  "$cond": [
+                  "$concatArrays": [
+                    "$$arr",
                     {
-                      "$in": [
-                        "$$this",
-                        "$$value",
-                      ],
-                    },
-                    "$$value",
-                    {
-                      "$concatArrays": [
-                        "$$value",
-                        [
-                          "$$this",
-                        ],
+                      "$cond": [
+                        {
+                          "$anyElementTrue": {
+                            "$map": {
+                              "as": "el",
+                              "in": {
+                                "$and": [
+                                  {
+                                    "$eq": [
+                                      {
+                                        "$cond": [
+                                          {
+                                            "$eq": [
+                                              {
+                                                "$type": "$$el",
+                                              },
+                                              "object",
+                                            ],
+                                          },
+                                          {
+                                            "$size": {
+                                              "$objectToArray": "$$el",
+                                            },
+                                          },
+                                          -1,
+                                        ],
+                                      },
+                                      2,
+                                    ],
+                                  },
+                                  {
+                                    "$eq": [
+                                      "$$el.name",
+                                      {
+                                        "$literal": "a",
+                                      },
+                                    ],
+                                  },
+                                  {
+                                    "$eq": [
+                                      "$$el.score",
+                                      {
+                                        "$literal": 1,
+                                      },
+                                    ],
+                                  },
+                                ],
+                              },
+                              "input": "$$arr",
+                            },
+                          },
+                        },
+                        [],
+                        {
+                          "$literal": [
+                            {
+                              "name": "a",
+                              "score": 1,
+                            },
+                          ],
+                        },
                       ],
                     },
                   ],
                 },
-                "initialValue": {
-                  "$ifNull": [
-                    "$uniqueObjects",
-                    [],
-                  ],
-                },
-                "input": {
-                  "$literal": [
-                    {
-                      "name": "a",
-                      "score": 1,
-                    },
-                  ],
+                "vars": {
+                  "arr": {
+                    "$ifNull": [
+                      "$uniqueObjects",
+                      [],
+                    ],
+                  },
                 },
               },
             },
@@ -1732,14 +1901,51 @@ describe("[mongo] CollectionPatcher — withoutKeyMerge", () => {
                 "as": "el",
                 "cond": {
                   "$not": {
-                    "$in": [
-                      "$$el",
+                    "$and": [
                       {
-                        "$literal": [
+                        "$eq": [
                           {
-                            "attribute": "x",
-                            "key": "1",
-                            "value": "a",
+                            "$cond": [
+                              {
+                                "$eq": [
+                                  {
+                                    "$type": "$$el",
+                                  },
+                                  "object",
+                                ],
+                              },
+                              {
+                                "$size": {
+                                  "$objectToArray": "$$el",
+                                },
+                              },
+                              -1,
+                            ],
+                          },
+                          3,
+                        ],
+                      },
+                      {
+                        "$eq": [
+                          "$$el.key",
+                          {
+                            "$literal": "1",
+                          },
+                        ],
+                      },
+                      {
+                        "$eq": [
+                          "$$el.value",
+                          {
+                            "$literal": "a",
+                          },
+                        ],
+                      },
+                      {
+                        "$eq": [
+                          "$$el.attribute",
+                          {
+                            "$literal": "x",
                           },
                         ],
                       },

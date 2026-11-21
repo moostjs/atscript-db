@@ -1,4 +1,9 @@
-import type { TAtscriptAnnotatedType, TAtscriptTypeArray } from "@atscript/typescript/utils";
+import {
+  isPhantomType,
+  type TAtscriptAnnotatedType,
+  type TAtscriptTypeArray,
+  type TAtscriptTypeObject,
+} from "@atscript/typescript/utils";
 
 import { DbError } from "../db-error";
 import type { AtscriptDbTable } from "../table/db-table";
@@ -30,7 +35,7 @@ export function decomposePatch(
 ): Record<string, unknown> {
   const update: Record<string, unknown> = {};
   // Table metadata read once per patch, not per key.
-  flattenPatchPayload(payload, "", update, table.getMetadata(), table);
+  flattenPatchPayload(payload, "", update, table.getMetadata());
 
   return update;
 }
@@ -40,7 +45,6 @@ function flattenPatchPayload(
   prefix: string,
   update: Record<string, unknown>,
   meta: TableMetadata,
-  table: AtscriptDbTable,
 ): void {
   const primaryKeys = meta.primaryKeys;
   const flatMap = meta.flatMap;
@@ -53,8 +57,7 @@ function flattenPatchPayload(
       continue;
     }
 
-    const isObjectValue = typeof value === "object" && value !== null && !Array.isArray(value);
-    if (!isObjectValue) {
+    if (!isObjectValue(value)) {
       if (value === null && meta.flattenedParents.has(key)) {
         // A flattened object set to null nulls its columns — every one is
         // nullable when the object is (optional or `| null`)
@@ -66,27 +69,111 @@ function flattenPatchPayload(
       continue;
     }
     const flatType = flatMap.get(key);
-    const isTopLevelArray = flatType?.metadata?.get(TOP_LEVEL_ARRAY_TAG) as boolean | undefined;
 
-    if (isTopLevelArray && !flatType?.metadata?.has("db.json")) {
+    if (isPatchableArray(flatType)) {
       // Top-level array with patch operators (@db.json fields are excluded; plain arrays fall through as $replace)
-      decomposeArrayPatch(key, value as Record<string, unknown>, flatType!, update, table);
+      decomposeArrayPatch(key, value, flatType!, update);
     } else if (flatType?.metadata?.get("db.patch.strategy") === "merge") {
       // Merge: omitted siblings preserved.
-      flattenPatchPayload(value as Record<string, unknown>, key, update, meta, table);
+      flattenPatchPayload(value, key, update, meta);
     } else if (meta.flattenedParents.has(key)) {
       // Replace: required-missing leaves are caught earlier by the strict validator;
       // null-fill the optional ones so the omission isn't silently lost.
-      flattenPatchPayload(value as Record<string, unknown>, key, update, meta, table);
+      flattenPatchPayload(value, key, update, meta);
       const optLeaves = meta.optionalLeavesByLogicalParent.get(key);
       if (optLeaves) {
         for (const lp of optLeaves) {
           if (!(lp in update)) update[lp] = null;
         }
       }
+    } else if (isStoredObject(flatType) && carriesArrayOps(value, key, meta)) {
+      // An object a nested-object adapter stores whole, with array operators
+      // inside: they need the stored arrays, so it is set leaf by leaf as the
+      // flattening adapters set it (since 0.1.182; before, the operator object
+      // itself was stored as the array's value)
+      decomposeReplaceObject(value, key, update, meta);
     } else {
       // Simple field set
       update[key] = value;
+    }
+  }
+}
+
+/** An object value, not an array — a nested object or an array-operator value (`{ $insert: [...] }`). */
+function isObjectValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Whether `type` is an object stored as such — not `@db.json`, not a union. */
+function isStoredObject(type: TAtscriptAnnotatedType | undefined): boolean {
+  return type?.type.kind === "object" && !type.metadata?.has("db.json");
+}
+
+/** Whether `type` is a top-level array that takes the array operators — not `@db.json`. */
+function isPatchableArray(type: TAtscriptAnnotatedType | undefined): boolean {
+  return !!type?.metadata?.get(TOP_LEVEL_ARRAY_TAG) && !type.metadata.has("db.json");
+}
+
+/**
+ * Whether a patch payload holds an array operator — `$replace` included — on
+ * an array field at any depth, top-level or inside nested objects (since
+ * 0.1.182). Decomposed, `$replace` is a plain set that no longer shows: a
+ * native-patch adapter's `updateMany` asks this to take such a patch to
+ * `nativePatchMany`, where it ends as `updateOne` leaves it.
+ */
+export function hasArrayOperators(
+  payload: Record<string, unknown>,
+  table: AtscriptDbTable,
+): boolean {
+  return carriesArrayOps(payload, "", table.getMetadata());
+}
+
+/** Whether `value` (the object at `prefix`, `""` for the payload) holds array operators, at any depth. */
+function carriesArrayOps(
+  value: Record<string, unknown>,
+  prefix: string,
+  meta: TableMetadata,
+): boolean {
+  for (const [prop, child] of Object.entries(value)) {
+    if (!isObjectValue(child)) continue;
+    const key = prefix ? `${prefix}.${prop}` : prop;
+    const childType = meta.flatMap.get(key);
+    if (isPatchableArray(childType)) return true;
+    if (isStoredObject(childType) && carriesArrayOps(child, key, meta)) return true;
+  }
+  return false;
+}
+
+/**
+ * Sets a replaced object of a nested-object adapter leaf by leaf, as the
+ * flattening adapters store it: a given leaf is set, an omitted optional
+ * child cleared (`null`), an array operator decomposed, and a nested object
+ * replaced the same way — also one with `@db.patch.strategy 'merge'`, whose
+ * omitted optional leaves the flattening adapters clear under a replaced
+ * parent. Required children are present (the strict validator ran).
+ */
+function decomposeReplaceObject(
+  value: Record<string, unknown>,
+  prefix: string,
+  update: Record<string, unknown>,
+  meta: TableMetadata,
+): void {
+  const objType = meta.flatMap.get(prefix)!;
+  for (const [prop, propType] of (objType.type as TAtscriptTypeObject).props) {
+    const key = `${prefix}.${prop}`;
+    if (isPhantomType(propType) || meta.ignoredFields.has(key)) continue;
+    const child = value[prop];
+    if (child === undefined) {
+      if (propType.optional) update[key] = null;
+      continue;
+    }
+    const childType = meta.flatMap.get(key);
+    if (isObjectValue(child) && isPatchableArray(childType)) {
+      decomposeArrayPatch(key, child, childType!, update);
+    } else if (isObjectValue(child) && isStoredObject(childType)) {
+      decomposeReplaceObject(child, key, update, meta);
+    } else {
+      update[key] = child;
     }
   }
 }
@@ -112,7 +199,6 @@ function decomposeArrayPatch(
   value: Record<string, unknown>,
   fieldType: TAtscriptAnnotatedType,
   update: Record<string, unknown>,
-  _table: AtscriptDbTable,
 ): void {
   const keyProps =
     fieldType.type.kind === "array"

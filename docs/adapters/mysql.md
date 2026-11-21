@@ -356,6 +356,8 @@ const results = await table.vectorSearch(queryEmbedding, {
 
 The `$threshold` parameter is a normalized similarity score (0--1) matching MongoDB Atlas semantics. The adapter converts it to the appropriate MySQL distance value internally (for cosine: `distance = 2 * (1 - score)`).
 
+Each row carries `_distance`, the distance function's result for that row (lower = closer). See [Result fields](/search/vector-search#result-fields).
+
 ### Graceful Fallback
 
 On MySQL versions prior to 9.0, vector fields are stored as `JSON` instead. The data is preserved, but indexed similarity search is not available — `vectorSearch()` will throw an error.
