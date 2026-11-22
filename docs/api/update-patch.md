@@ -296,6 +296,7 @@ A merge strategy applies to an object only where a patch reaches that object by 
 - inside an array element: a whole array, or a `$update` / `$upsert` item — also on an array with `@db.patch.strategy 'merge'`, which merges the item into the element one level deep, so the item's nested objects replace the stored ones;
 - inside a `@db.json` or `@db.encrypted` field, and on such a field itself;
 - inside a union member (`Prefs | string`, `Card | Bank`) or a tuple element, and on a field typed as such a union.
+- inside a type that contains itself, below its first repeat: with `Node { @db.patch.strategy 'merge' child?: Node }` stored at `root`, `root.child` merges and `root.child.child` is written as one value.
 
 One type can sit in both kinds of place: its merge field merges where a patch reaches it and is validated in full elsewhere.
 
