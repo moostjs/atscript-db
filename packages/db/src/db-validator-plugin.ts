@@ -16,6 +16,7 @@ import { DepthLimitExceededError } from "./db-error";
 import { DB_VALIDATOR_MESSAGES, type TDbValidatorErrorCode } from "./db-validator-messages";
 import { getDbFieldOp } from "./ops";
 import { getKeyProps } from "./patch/patch-types";
+import { mergeStrategyPaths } from "./shared/merge-paths";
 import { columnUnionBase, soleUnionMember } from "./shared/union-shape";
 
 export interface DbValidationContext {
@@ -305,7 +306,10 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
           return fail(ctx, "FIELD_OP_ON_DERIVED");
         }
         // Context check first: @db.json, non-merge objects, nav field passthrough
-        if (dbCtx.flatMap && !isFieldOpAllowed(ctx.path, dbCtx.flatMap, dbCtx.navFields)) {
+        if (
+          dbCtx.flatMap &&
+          !isFieldOpAllowed(ctx.path, dbCtx.flatMap, mergeStrategyPaths(ctx.root), dbCtx.navFields)
+        ) {
           return fail(ctx, "FIELD_OP_CONTEXT");
         }
         // Type check: field ops only make sense on numeric scalar fields
@@ -342,46 +346,30 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
 }
 
 /**
- * Checks whether a field op is valid at `path`.
+ * Checks whether a field op is valid at `path`: not on a `@db.json` field,
+ * and every proper prefix of the path is an object a patch reaches by its own
+ * path with the merge strategy (`mergePaths`, see `mergeStrategyPaths`; a
+ * path with an array / tuple index is never one). Anywhere else the object is
+ * written whole, and the op would be stored verbatim.
  *
- * Rejects when:
- * - The field itself is `@db.json` (ops on opaque blobs are meaningless).
- * - Any ancestor is `@db.json`.
- * - Any ancestor is a nested object without `@db.patch.strategy "merge"`.
- * - Any ancestor is an embedded array (arrays are written whole, so an op
- *   inside an item would be stored verbatim).
- *
- * Accepts immediately when an ancestor is a navigation field (TO/FROM/VIA) —
- * the nested data is extracted and validated against its own table separately.
+ * Accepts when a prefix is a navigation field (TO/FROM/VIA) — the nested data
+ * is extracted and validated against its own table separately.
  */
 function isFieldOpAllowed(
   path: string,
   flatMap: Map<string, TAtscriptAnnotatedType>,
+  mergePaths: ReadonlySet<string>,
   navFields?: ReadonlySet<string>,
 ): boolean {
-  // Reject ops directly on @db.json fields (even if the underlying type is numeric)
-  const field = flatMap.get(path);
-  if (field?.metadata.has("db.json")) {
-    return false;
-  }
-
-  // Walk ancestors
+  if (flatMap.get(path)?.metadata.has("db.json")) return false;
+  let allowed = true;
   let pos = path.length;
   while ((pos = path.lastIndexOf(".", pos - 1)) !== -1) {
     const ancestor = path.slice(0, pos);
-    // Nav field ancestor — ops inside are valid (validated by the related table)
-    if (navFields?.has(ancestor)) {
-      return true;
-    }
-    const entry = flatMap.get(ancestor);
-    if (!entry) continue;
-    if (entry.metadata.has("db.json")) return false;
-    if (entry.type.kind === "array") return false;
-    if (entry.type.kind === "object" && entry.metadata.get("db.patch.strategy") !== "merge") {
-      return false;
-    }
+    if (navFields?.has(ancestor)) return true;
+    if (!mergePaths.has(ancestor)) allowed = false;
   }
-  return true;
+  return allowed;
 }
 
 // ── Nav field handler ─────────────────────────────────────────────────────────
@@ -532,7 +520,7 @@ function handleArrayPatch(
   }
 
   // $update / $remove → validate each item (element type, key fields required)
-  const isMerge = def.metadata.get("db.patch.strategy") === "merge";
+  const isMerge = mergeStrategyPaths(ctx.root).has(ctx.path);
   for (const op of ["$update", "$remove"] as const) {
     if (ops[op] !== undefined) {
       if (!validatePartialItems(ctx, def, ops[op], op, isMerge)) {

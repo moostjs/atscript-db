@@ -485,7 +485,7 @@ interface Metric {
 | -------------------- | ---------- | ------------------- | ---------------------------------- |
 | `@db.patch.strategy` | Field      | `strategy` (string) | `'replace'` (default) or `'merge'` |
 
-Controls how nested objects are handled during PATCH/update operations. With `'replace'`, the entire nested object is overwritten. With `'merge'`, individual sub-fields are deep-merged.
+Controls how nested objects and arrays are handled during PATCH/update operations. With `'replace'`, the entire nested object is overwritten. With `'merge'`, the sub-fields the patch sends are written and the others keep their stored values (one level; a nested object follows its own annotation), and a keyed `$update` / `$upsert` item merges into the matched array element. `'merge'` applies only where a patch reaches the object by its own path — see [Where Merge Applies](/api/update-patch#where-merge-applies).
 
 ## PostgreSQL-Specific {#postgresql}
 

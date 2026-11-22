@@ -262,17 +262,14 @@ export async function vectorSearchWithCountImpl(
 /**
  * The stages right after `$vectorSearch`: its score into {@link SCORE_FIELD}
  * (the `$meta` is read here, ahead of any `$facet`) and, with a threshold,
- * into `_score` — kept for compatibility — with the `$match` on it.
+ * the `$match` on it.
  */
 function vectorScoreStages(threshold: number | undefined): Document[] {
-  const score = { $meta: "vectorSearchScore" };
-  if (threshold === undefined) {
-    return [{ $addFields: { [SCORE_FIELD]: score } }];
+  const stages: Document[] = [{ $addFields: { [SCORE_FIELD]: { $meta: "vectorSearchScore" } } }];
+  if (threshold !== undefined) {
+    stages.push({ $match: { [SCORE_FIELD]: { $gte: threshold } } });
   }
-  return [
-    { $addFields: { _score: score, [SCORE_FIELD]: score } },
-    { $match: { _score: { $gte: threshold } } },
-  ];
+  return stages;
 }
 
 // ── Geo search ($geoNear) ────────────────────────────────────────────────────
@@ -863,7 +860,7 @@ function buildVectorSearchStage(
 interface TSearchRunOptions {
   /**
    * A `$vectorSearch`: its score rides in {@link SCORE_FIELD} (the caller
-   * renames it to `$score`); `threshold` keeps the rows whose `_score` reaches it.
+   * renames it to `$score`); `threshold` keeps the rows whose score reaches it.
    */
   vector?: { threshold?: number };
   /** A classic `$text` match (relevance from `textScore`). */

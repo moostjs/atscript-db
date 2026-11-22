@@ -147,11 +147,14 @@ Field operations require that the target field maps to its own database column (
 
 ### Where Field Ops Do NOT Work
 
-| Context                                                         | Result               | Why                                                                                                   |
-| --------------------------------------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------- |
-| Inside a `@db.json` field                                       | **Validation error** | JSON fields are stored as an opaque blob — the database cannot reach inside to increment a single key |
-| Inside a nested object **without** `@db.patch.strategy 'merge'` | **Validation error** | Without merge strategy the entire object is replaced — there is no individual column to increment     |
-| Inside an embedded-array item (any array operator or plain set) | **Validation error** | The array is written whole — an operator inside an item would be stored as data (since 0.1.153)       |
+| Context                                                                                              | Result                               | Why                                                                                                   |
+| ---------------------------------------------------------------------------------------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| Inside a `@db.json` field                                                                            | **Validation error**                 | JSON fields are stored as an opaque blob — the database cannot reach inside to increment a single key |
+| Inside a nested object **without** `@db.patch.strategy 'merge'`                                      | **Validation error**                 | Without merge strategy the entire object is replaced — there is no individual column to increment     |
+| Inside an embedded-array item (any array operator or plain set)                                      | **Validation error**                 | The array is written whole — an operator inside an item would be stored as data (since 0.1.153)       |
+| Inside a tuple element, a union member, or a `T \| null` object without `@db.patch.strategy 'merge'` | **Validation error** (since 0.1.184) | Written as one value, like a replaced object — see [Where Merge Applies](#where-merge-applies)        |
+
+The error is a `FIELD_OP_CONTEXT` entry at the field's path. Under a `T | null` object or a union member, the validator reports the union instead: one entry at the field, whose `details` hold the `FIELD_OP_CONTEXT` entry. Through a relation, the path starts with the relation field (`author.stats.views`).
 
 ```typescript
 import { $inc } from "@atscript/db/ops";
@@ -179,6 +182,7 @@ Nested objects stored on a record (not navigation properties) use a strategy-bas
 - **Optional children of a replace branch are null-filled when omitted.** That's what distinguishes replace from merge — replace clears unspecified optional sub-fields, merge preserves them.
 - **Merge stays merge.** A merge-strategy object inside a replaced one still keeps the children the patch leaves out — see [Merge Inside a Replaced Object](#merge-inside-a-replaced-object).
 - **`@db.json` is always strict** — the column is an opaque blob; partial sub-shapes can't be decomposed.
+- **Merge applies only where a patch reaches the object by its own path** — not inside an array element, a JSON or encrypted field, a union member or a tuple element. See [Where Merge Applies](#where-merge-applies).
 
 ### Replace Strategy (Default)
 
@@ -284,6 +288,41 @@ await table.updateOne({ id: 1, profile: { settings: { theme: "light" } } });
 - The rule holds at any depth (a replace-strategy object inside the merge object is replaced again), with [array operators](#embedded-array-patches) inside the merge object, and in `updateOne`, `bulkUpdate`, `updateMany` and the HTTP `PATCH` endpoints.
 
 Every adapter gives this result since 0.1.183. Before, SQLite, PostgreSQL and MySQL cleared the merge object's omitted columns too (a required child included), the in-memory adapter stored the replaced parent as sent (so the merge object lost every child the patch left out), and MongoDB's `updateMany` did the same; MongoDB's `updateOne` and `bulkUpdate` already kept them.
+
+### Where Merge Applies {#where-merge-applies}
+
+A merge strategy applies to an object only where a patch reaches that object by its own path: from the top of the row through stored nested objects. A field typed `T | null` with an object `T` is a `T` here — `@db.patch.strategy 'merge'` on it, or on an object inside it, merges like on any nested object (on `T[] | null` the annotation is a build error: array operators are refused there). Everywhere else the strategy has no effect, on every adapter (since 0.1.184): the object is validated in full — a partial one is rejected, as an insert rejects it — and written as part of the whole value, and a field operator (`$inc`, `$dec`, `$mul`) inside it is refused as inside an array element. That is the case
+
+- inside an array element: a whole array, or a `$update` / `$upsert` item — also on an array with `@db.patch.strategy 'merge'`, which merges the item into the element one level deep, so the item's nested objects replace the stored ones;
+- inside a `@db.json` or `@db.encrypted` field, and on such a field itself;
+- inside a union member (`Prefs | string`, `Card | Bank`) or a tuple element, and on a field typed as such a union.
+
+One type can sit in both kinds of place: its merge field merges where a patch reaches it and is validated in full elsewhere.
+
+```atscript
+interface Prefs {
+    @db.patch.strategy 'merge'
+    geo?: { lat: number, lng: number, note?: string }
+}
+
+@db.table 'users'
+export interface User {
+    @meta.id
+    id: number
+
+    @db.patch.strategy 'merge'
+    prefs?: Prefs        // { prefs: { geo: { lat: 9 } } } keeps lng and note
+
+    @db.json
+    saved?: Prefs        // { saved: { geo: { lat: 9 } } } is rejected: lng is required
+
+    history?: Prefs[]    // an element is written as sent
+}
+```
+
+Written where it can never apply, the annotation is a build error, shown in your editor: on a field that also has `@db.json` or `@db.encrypted`, and inside an array element or a `@db.json` / `@db.encrypted` field, where the annotation is written. The build checks the annotation where it is written: inside one of these places, a merge-strategy field that arrives through a referenced type, through an object written in a type group (`( … ) | null`, `&`, a union, a tuple) or through `annotate` is not a build error, and it has no effect there. The same field merges wherever a patch reaches it by its own path.
+
+Before 0.1.184 a partial merge-strategy object in these places was stored without the children it left out — see [Upgrading](/guide/upgrading#v0-1-184).
 
 ## Embedded Array Patches
 
@@ -520,6 +559,8 @@ await table.updateOne({ id: 1, tags: { $insert: ["new"] } });
 // ✅ Read, change, send the whole array
 await table.updateOne({ id: 1, tags: [...row.tags, "new"] });
 ```
+
+A JSON field has no merge strategy: it is written as one value — see [Where Merge Applies](#where-merge-applies). To patch parts of the object, drop `@db.json` so it is stored in columns.
 
 ## Combining Operators
 

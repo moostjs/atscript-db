@@ -1,4 +1,4 @@
-import type { TAtscriptAnnotatedType } from "@atscript/typescript/utils";
+import type { TAtscriptAnnotatedType, TAtscriptTypeObject } from "@atscript/typescript/utils";
 
 /** `null` / `undefined` as a type: a union member that only adds NULL. */
 export function isNullishType(type: TAtscriptAnnotatedType): boolean {
@@ -42,6 +42,20 @@ export function soleUnionMember(type: TAtscriptAnnotatedType): TAtscriptAnnotate
   if (type.type.kind !== "union") return undefined;
   const { members } = unionValueMembers(type);
   return members.length === 1 ? members[0] : undefined;
+}
+
+/**
+ * The object stored behind a field: its own object type, or the object `T`
+ * of a `T | null` (a nullable `T` is a `T`); `undefined` for anything else.
+ * The one reading of "a stored object" the patch paths share (since 0.1.184).
+ */
+export function storedObjectType(
+  type: TAtscriptAnnotatedType | undefined,
+): TAtscriptAnnotatedType<TAtscriptTypeObject> | undefined {
+  const value = type && (soleUnionMember(type) ?? type);
+  return value?.type.kind === "object"
+    ? (value as TAtscriptAnnotatedType<TAtscriptTypeObject>)
+    : undefined;
 }
 
 /**

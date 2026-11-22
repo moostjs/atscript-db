@@ -15,6 +15,7 @@ import { tableNameOf } from "../rel/relation-helpers";
 import { resolveDesignType, resolveDefaultFromMetadata } from "./db-readable";
 import { resolveViewSource } from "./view-source";
 import { DERIVED_INCOMPATIBLE, isJsonLeafType } from "../shared/derived-rules";
+import { mergeStrategyPaths } from "../shared/merge-paths";
 import { findAncestorInSet, selfOrAncestor } from "../shared/object";
 import {
   ENCRYPTED_INCOMPATIBLE,
@@ -353,6 +354,10 @@ export class TableMetadata {
    * dotted paths as descriptors).
    */
   jsonParents: ReadonlySet<string> = new Set<string>();
+
+  /** Paths whose `@db.patch.strategy "merge"` applies ({@link mergeStrategyPaths}, since 0.1.184). */
+  mergePaths: ReadonlySet<string> = new Set<string>();
+
   /**
    * Logical paths holding a JSON value (`isJsonValueField`: JSON-stored, `json`
    * or `array` design type; non-ignored, nav-free descriptors) — a timestamp
@@ -535,6 +540,7 @@ export class TableMetadata {
 
     adapter.onBeforeFlatten?.(type);
     this._rootType = type;
+    this.mergePaths = mergeStrategyPaths(type);
 
     // Phase 1: Collect field tuples. flattenAnnotatedType fires onField
     // post-order — children before parent — so nav fields (whose descendants
@@ -1117,12 +1123,6 @@ export class TableMetadata {
     };
     for (const [name, why] of ENCRYPTED_INCOMPATIBLE) {
       if (metadata.has(name as never)) reject(`@${name}`, why);
-    }
-    if (metadata.get("db.patch.strategy") === "merge") {
-      reject(
-        '@db.patch.strategy "merge"',
-        "ciphertext is opaque — partial merges would silently drop omitted keys",
-      );
     }
   }
 

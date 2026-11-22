@@ -6,19 +6,23 @@ import { BetterSqlite3Driver } from "../better-sqlite3-driver";
 import { prepareFixtures } from "./test-utils";
 import {
   ANGLES,
+  ANGLE_SCORES,
   POINTS,
+  POINT_SCORES,
   Q_ANGLE,
   Q_POINT,
   expectAtLeast,
   expectDescending,
+  expectScores,
   ids,
   type Row,
 } from "../../../db/test-kit/vector-score-data";
 
 // Since 0.1.183 every vector row carries `$score` (higher = closer, the
-// MongoDB Atlas `vectorSearchScore` scale) next to the engine's `_distance`,
-// and the threshold is that score on every metric: a row is returned iff its
-// `$score` reaches it. Before, a `euclidean` threshold was a raw distance cap.
+// MongoDB Atlas `vectorSearchScore` scale), and the threshold is that score on
+// every metric: a row is returned iff its `$score` reaches it. Before, a
+// `euclidean` threshold was a raw distance cap. Since 0.1.184 the rows no
+// longer carry the engine's `_distance`.
 
 let sqliteVecAvailable = true;
 try {
@@ -54,56 +58,33 @@ describe.skipIf(!sqliteVecAvailable)("[sqlite] vector $score (since 0.1.183)", (
     driver = undefined;
   });
 
-  it("cosine: every row has $score = 1 − _distance / 2, in 0–1, falling along the order", async () => {
+  it("cosine: $score = (1 + cos) / 2, in 0–1, falling along the order; no _distance", async () => {
     const rows = await search(await seeded(fx.VsCos, ANGLES), Q_ANGLE);
     expect(ids(rows)).toEqual(["a", "b", "c", "e", "d"]);
-    for (const row of rows) {
-      expect(row.$score).toBeCloseTo(1 - row._distance / 2, 12);
-      expect(row.$score).toBeGreaterThanOrEqual(0);
-      expect(row.$score).toBeLessThanOrEqual(1);
-    }
-    expect(rows.map((r) => r.$score)).toEqual([
-      expect.closeTo(1, 6),
-      expect.closeTo((1 + Math.cos(Math.PI / 6)) / 2, 6),
-      expect.closeTo(0.5, 6),
-      expect.closeTo(0.25, 6),
-      expect.closeTo(0, 6),
-    ]);
+    expectScores(rows, ANGLE_SCORES);
     expectDescending(rows);
   });
 
-  it("euclidean: $score = 1 / (1 + _distance)", async () => {
+  it("euclidean: $score = 1 / (1 + distance); no _distance", async () => {
     const rows = await search(await seeded(fx.VsL2, POINTS), Q_POINT);
     expect(ids(rows)).toEqual(["a", "b", "c", "d", "e"]);
-    for (const row of rows) expect(row.$score).toBeCloseTo(1 / (1 + row._distance), 12);
-    expect(rows.map((r) => r.$score)).toEqual([
-      expect.closeTo(1, 6),
-      expect.closeTo(2 / 3, 6),
-      expect.closeTo(0.5, 6),
-      expect.closeTo(0.25, 6),
-      expect.closeTo(0.1, 6),
-    ]);
+    expectScores(rows, POINT_SCORES);
     expectDescending(rows);
   });
 
   it("dotProduct runs as cosine on SQLite, so it is scored as cosine", async () => {
     const rows = await search(await seeded(fx.VsDot, ANGLES), Q_ANGLE);
     expect(ids(rows)).toEqual(["a", "b", "c", "e", "d"]);
-    for (const row of rows) expect(row.$score).toBeCloseTo(1 - row._distance / 2, 12);
+    expectScores(rows, ANGLE_SCORES);
     expectDescending(rows);
   });
 
-  it("$select keeps $score (and _distance) in its inclusion and exclusion forms", async () => {
+  it("$select keeps $score in its inclusion and exclusion forms", async () => {
     const table = await seeded(fx.VsCos, ANGLES);
     const included = await search(table, Q_ANGLE, { $select: ["title"] });
-    expect(included[0]).toEqual({ title: "0°", _distance: expect.any(Number), $score: 1 });
+    expect(included[0]).toEqual({ title: "0°", $score: 1 });
     const excluded = await search(table, Q_ANGLE, { $select: { embedding: 0 } });
-    expect(excluded[0]).toEqual({
-      id: "a",
-      title: "0°",
-      _distance: expect.any(Number),
-      $score: 1,
-    });
+    expect(excluded[0]).toEqual({ id: "a", title: "0°", $score: 1 });
     // not a field: it cannot be named
     await expect(search(table, Q_ANGLE, { $select: ["title", "$score"] })).rejects.toThrow(
       'Unknown field "$score"',
@@ -167,8 +148,43 @@ describe.skipIf(!sqliteVecAvailable)("[sqlite] vector $score (since 0.1.183)", (
     } as never);
     expect(page.count).toBe(3);
     expect(page.data).toEqual([
-      { id: "a", _distance: expect.any(Number), $score: expect.closeTo(1, 6) },
-      { id: "b", _distance: expect.any(Number), $score: expect.closeTo(0.933, 3) },
+      { id: "a", $score: expect.closeTo(1, 6) },
+      { id: "b", $score: expect.closeTo(0.933, 3) },
     ]);
+  });
+
+  // Since 0.1.184 the distance rides in an internal column: a stored field
+  // named `_distance` (or `_score`) is an ordinary column. Before, SQLite
+  // ordered by the stored `_distance`, scored from it, and returned the
+  // distance as `_distance:1`.
+  it("a stored _distance / _score field is returned as stored and does not rank", async () => {
+    const stored = ANGLES.map(({ id, title, embedding }, i) => ({
+      id,
+      title,
+      embedding,
+      _distance: 100 - i,
+      _score: i,
+    }));
+    const table = await seeded(fx.VsStored, stored);
+    const rows = await search(table, Q_ANGLE);
+    expect(ids(rows)).toEqual(["a", "b", "c", "e", "d"]);
+    expect(rows.map((r) => r.$score)).toEqual(ANGLE_SCORES.map((s) => expect.closeTo(s, 6)));
+    expect(rows[0]).toEqual({
+      id: "a",
+      title: "0°",
+      _distance: 100,
+      _score: 0,
+      embedding: expect.any(Array),
+      $score: expect.closeTo(1, 6),
+    });
+    expect(rows.find((r) => r.id === "d")).toMatchObject({ _distance: 96, _score: 4 });
+    const [included] = await search(table, Q_ANGLE, { $select: ["_distance"], $threshold: 0.9 });
+    expect(included).toEqual({ _distance: 100, $score: expect.closeTo(1, 6) });
+    const page = await table.vectorSearchWithCount(Q_ANGLE, {
+      filter: {},
+      controls: { $threshold: 0.4 },
+    } as never);
+    expect(page.count).toBe(3);
+    expect(ids(page.data as never)).toEqual(["a", "b", "c"]);
   });
 });

@@ -51,13 +51,7 @@ import {
   preflightNestedWrite,
 } from "../rel/nested-writer";
 import { type DbValidationContext } from "../db-validator-plugin";
-import {
-  buildPatchPartial,
-  dbPlugin,
-  dbValidatorOptions,
-  forceNavNonOptional,
-  type ValidatorMode,
-} from "../validator";
+import { dbValidatorOptions, type ValidatorMode } from "../validator";
 import { normalizeWritePayload } from "../shared/normalize-write";
 import type { IntegrityStrategy } from "../strategies/integrity";
 import { NativeIntegrity } from "../strategies/integrity";
@@ -3046,23 +3040,14 @@ export class AtscriptDbTable<
     let opts = this._optionsByPurpose.get(purpose);
     if (opts) return opts;
     const adapterPlugins = this.adapter.getValidatorPlugins();
-    if (purpose === "insert" || purpose === "patch" || purpose === "bulkReplace") {
-      // Standard modes use the shared builder — the same one `@atscript/db-client`
-      // runs, so server and client preflight cannot drift. Server-managed fields
-      // (`@db.default*`, `@db.rel.FK`, `@db.column.version`) are accepted when
-      // absent by the shared plugin's skip list, at every nesting depth.
-      const mode: ValidatorMode = purpose === "bulkReplace" ? "replace" : purpose;
+    const mode = PURPOSE_MODES[purpose];
+    if (mode) {
+      // Standard modes (`bulkUpdate` is "patch") use the shared builder — the
+      // same one `@atscript/db-client` runs, so server and client preflight
+      // cannot drift. Server-managed fields (`@db.default*`, `@db.rel.FK`,
+      // `@db.column.version`) are accepted when absent by the shared plugin's
+      // skip list, at every nesting depth.
       opts = dbValidatorOptions(this.type, mode, adapterPlugins);
-    } else if (purpose === "bulkUpdate") {
-      // bulkUpdate: path-aware partial — root + nav sub-trees + merge branches stay
-      // partial; everything else is strict so a missing required leaf can't reach
-      // the storage layer (it'd surface as a NOT NULL violation).
-      const plugins = adapterPlugins.length ? [...adapterPlugins, dbPlugin] : [dbPlugin];
-      opts = {
-        plugins,
-        partial: buildPatchPartial(this._meta.navFields),
-        replace: forceNavNonOptional,
-      };
     } else {
       opts = { plugins: adapterPlugins };
     }

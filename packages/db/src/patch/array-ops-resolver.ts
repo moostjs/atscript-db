@@ -87,7 +87,8 @@ export function resolveArrayOps(
 
   // Resolve each field's ops. `field` is the physical column: the key of the
   // raw row and of `fromStorageFormatters` (a `@db.column` rename included).
-  const { fromStorageFormatters: fromStorage, leafByPhysical } = table.getMetadata();
+  const meta = table.getMetadata();
+  const { fromStorageFormatters: fromStorage, leafByPhysical, mergePaths } = meta;
   for (const [field, ops] of opsMap) {
     const stored = storedValue(currentRecord, field);
     const decoded = stored == null ? undefined : fromStorage?.get(field)?.(stored);
@@ -100,15 +101,21 @@ export function resolveArrayOps(
       );
     }
     // The array's settings (key props, `uniqueItems`, merge strategy) are
-    // annotations of the logical field — `flatMap` is keyed by its path.
-    const arrayType = table.flatMap.get(leafByPhysical.get(field)?.path ?? field) as
+    // annotations of the logical field — `flatMap` is keyed by its path. A
+    // nested-object adapter keys it by document path: a renamed top-level key
+    // reads back to its field (since 0.1.184).
+    const top = field.split(".")[0]!;
+    const renamed = [...meta.columnMap].find(([, column]) => column === top)?.[0];
+    const path =
+      leafByPhysical.get(field)?.path ?? (renamed ? renamed + field.slice(top.length) : field);
+    const arrayType = table.flatMap.get(path) as
       | TAtscriptAnnotatedType<TAtscriptTypeArray>
       | undefined;
     const keyProps = arrayType ? getKeyProps(arrayType) : new Set<string>();
     const uniqueItems = arrayType?.metadata?.get("expect.array.uniqueItems") as
       | { message?: string }
       | undefined;
-    const mergeStrategy = arrayType?.metadata?.get("db.patch.strategy") === "merge";
+    const mergeStrategy = mergePaths.has(path);
 
     // Use keys from decomposer if available, otherwise from type metadata
     const effectiveKeys = ops.keys && ops.keys.length > 0 ? new Set(ops.keys) : keyProps;

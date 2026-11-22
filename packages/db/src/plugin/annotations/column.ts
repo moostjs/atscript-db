@@ -1,6 +1,14 @@
 import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { TAnnotationsTree } from "@atscript/core";
-import { isArray, isInterface, isProp, isRef, isStructure, isPrimitive } from "@atscript/core";
+import {
+  isArray,
+  isGroup,
+  isInterface,
+  isProp,
+  isRef,
+  isStructure,
+  isPrimitive,
+} from "@atscript/core";
 import type {
   AtscriptDoc,
   SemanticNode,
@@ -14,6 +22,7 @@ import {
   getDbTableOwner,
   getParentStruct,
   getParentTypeName,
+  isNullMember,
   primitiveBaseType,
   searchFieldVerdict,
   validateFieldBaseType,
@@ -27,6 +36,33 @@ import {
   jsonChainInfo,
   sealedSearchProblem,
 } from "../../shared/view-validation";
+
+/**
+ * Walks a prop's ancestors (prop → structure → (prop | array → prop |
+ * interface)): the nearest one written as one value — an array the prop sits
+ * in an element of (`via: "element"`) or a prop carrying one of `wholeValue`
+ * (`via`: that annotation) — and the interface the walk ends at. A structure
+ * inside a type group (`( … )`, `|`, `&`, a tuple) has no owner node.
+ */
+function walkFieldAncestors(field: SemanticNode, wholeValue: readonly string[]) {
+  let node: SemanticNode = field;
+  let whole: { id: string; via: string } | undefined;
+  while (node.ownerNode && isStructure(node.ownerNode)) {
+    let up: SemanticNode | undefined = node.ownerNode.ownerNode;
+    let via: string | undefined;
+    while (up && isArray(up)) {
+      via = "element";
+      up = up.ownerNode;
+    }
+    if (!up) break;
+    if (isInterface(up)) return { whole, owner: up };
+    if (!isProp(up)) break;
+    via ??= wholeValue.find((name) => up.countAnnotations(name) > 0);
+    if (via) whole ??= { id: up.id ?? "", via };
+    node = up;
+  }
+  return { whole };
+}
 
 /**
  * Compile-time placement rules of `@db.column.version.exempt` (E1–E5, W1, W2).
@@ -57,39 +93,17 @@ function validateVersionExempt(token: Token): TMessages {
     fail(`${tag} has no effect on an ignored field`, 2);
   }
 
-  // Ancestor walk: prop → structure → (prop | array → prop | interface)
-  let node: SemanticNode = field;
-  let tableOwner: SemanticNode | undefined;
-  let reported = false;
-  while (node.ownerNode && isStructure(node.ownerNode)) {
-    let up: SemanticNode | undefined = node.ownerNode.ownerNode;
-    let viaArray = false;
-    while (up && isArray(up)) {
-      viaArray = true;
-      up = up.ownerNode;
-    }
-    if (!up) break;
-    if (isInterface(up)) {
-      tableOwner = up;
-      break;
-    }
-    if (!isProp(up)) break;
-    if (!reported && viaArray) {
-      fail(
-        `${tag} cannot sit inside an array — mark the array field '${up.id ?? ""}' itself; array elements are not separate columns`,
-      );
-      reported = true;
-    } else if (!reported && up.countAnnotations("db.json") > 0) {
-      fail(
-        `${tag} cannot sit inside a @db.json field — mark the @db.json field '${up.id ?? ""}' itself; a JSON column is written as one value`,
-      );
-      reported = true;
-    }
-    node = up;
+  const { whole, owner: tableOwner } = walkFieldAncestors(field, ["db.json"]);
+  if (whole) {
+    fail(
+      whole.via === "element"
+        ? `${tag} cannot sit inside an array — mark the array field '${whole.id}' itself; array elements are not separate columns`
+        : `${tag} cannot sit inside a @db.json field — mark the @db.json field '${whole.id}' itself; a JSON column is written as one value`,
+    );
   }
 
   // W1: the enclosing top-level table declares no version column
-  if (tableOwner && isInterface(tableOwner) && tableOwner.countAnnotations("db.table") > 0) {
+  if (tableOwner && tableOwner.countAnnotations("db.table") > 0) {
     const struct = tableOwner.getDefinition();
     let hasVersion = false;
     if (struct && isStructure(struct)) {
@@ -105,6 +119,51 @@ function validateVersionExempt(token: Token): TMessages {
     }
   }
   return errors;
+}
+
+/**
+ * Build errors of `@db.patch.strategy "merge"` written where it never applies:
+ * on a `@db.json` / `@db.encrypted` field, or inside an array element or such
+ * a field. Author feedback only — at runtime it is inert there, as everywhere
+ * `mergeStrategyPaths` skips.
+ * @since 0.1.184
+ */
+function validateMergePlacement(token: Token, doc: AtscriptDoc): TMessages {
+  const tag = '@db.patch.strategy "merge"';
+  const errors = validateIncompatible(
+    token,
+    tag,
+    [
+      ["db.json", "a JSON column is written as one value"],
+      ["db.encrypted", "an encrypted field is written as one value"],
+    ],
+    doc,
+  );
+  if (errors.length > 0) return errors;
+  const { whole } = walkFieldAncestors(token.parentNode!, ["db.json", "db.encrypted"]);
+  if (whole) {
+    const where = whole.via === "element" ? "an array element" : `a @${whole.via} field`;
+    errors.push({
+      message: `${tag} cannot sit inside ${where} ('${whole.id}') — it is written as one value, so the merge strategy never applies there`,
+      severity: 1,
+      range: token.range,
+    });
+  }
+  return errors;
+}
+
+/**
+ * The definition behind a field type, refs unwound and a `T | null` of an
+ * object `T` read as its `T` (a nullable object is an object, as at runtime —
+ * `storedObjectType`). A `T[] | null` stays a union: array operators are
+ * refused on it, so no patch strategy applies there.
+ */
+function nullableBase(def: SemanticNode | undefined, doc: AtscriptDoc): SemanticNode | undefined {
+  if (def && isRef(def)) return nullableBase(doc.unwindType(def.id!, def.chain)?.def, doc);
+  if (!def || !isGroup(def) || def.op !== "|") return def;
+  const values = def.unwrap().filter((member) => !isNullMember(member));
+  const base = values.length === 1 ? nullableBase(values[0], doc) : undefined;
+  return isStructure(base) || isInterface(base) ? base : def;
 }
 
 /** Annotations a `@db.onUpdate.inc` field cannot carry, with the reason. */
@@ -159,9 +218,18 @@ export const dbColumnAnnotations: TAnnotationsTree = {
   patch: {
     strategy: new AnnotationSpec({
       description: annotationExample(
-        "Defines the **patching strategy** for updating nested objects.\n\n" +
-          '- **"replace"** → The field or object will be **fully replaced**.\n' +
-          '- **"merge"** → The field or object will be **merged recursively** (applies only to objects, not arrays).',
+        "Defines the **patching strategy** of a nested object or array field in patches " +
+          "(`updateOne`, `bulkUpdate`, `updateMany`, HTTP `PATCH`).\n\n" +
+          '- **"replace"** (default) → the object is **replaced**: required children must be sent, ' +
+          "omitted optional ones are cleared. On a keyed array, a `$update` / `$upsert` item replaces " +
+          "the matched element.\n" +
+          '- **"merge"** → only the children the patch sends change; the others keep their stored ' +
+          "values. On a keyed array, a `$update` / `$upsert` item merges into the matched element. " +
+          "One level only: a nested object follows its own annotation.\n\n" +
+          '**"merge" applies only where a patch reaches the object by its own path** (an object ' +
+          "`T | null` field is a `T`). Inside an " +
+          "array or tuple element, a union member or a `@db.json` / `@db.encrypted` field it never " +
+          "applies: the object is validated in full and written as part of the whole value.",
         '@db.patch.strategy "merge"',
         "settings: {",
         "  notifications: boolean",
@@ -186,21 +254,16 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         if (!definition) {
           return errors;
         }
-        let wrongType = false;
-        if (isRef(definition)) {
-          const def = doc.unwindType(definition.id!, definition.chain)?.def;
-          if (!isStructure(def) && !isInterface(def) && !isArray(def)) {
-            wrongType = true;
-          }
-        } else if (!isStructure(definition) && !isInterface(definition) && !isArray(definition)) {
-          wrongType = true;
-        }
-        if (wrongType) {
+        const def = nullableBase(definition, doc);
+        if (!isStructure(def) && !isInterface(def) && !isArray(def)) {
           errors.push({
             message: `@db.patch.strategy requires a field of type object or array`,
             severity: 1,
             range: token.range,
           });
+        }
+        if (args[0]?.text === "merge") {
+          errors.push(...validateMergePlacement(token, doc));
         }
         return errors;
       },
@@ -717,7 +780,8 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         "into separate columns. Use on nested object fields that should remain as JSON " +
         "in the database. On a primitive field (string / number / boolean) it stores the " +
         "value as JSON too: SQL adapters filter the column only with `$exists` and never sort " +
-        "it — drop `@db.json` to get a typed, sortable scalar column.",
+        "it — drop `@db.json` to get a typed, sortable scalar column.\n\n" +
+        "The column is always written as one value: a patch replaces it whole.",
       "@db.json",
       "metadata: { key: string, value: string }",
     ),

@@ -3,11 +3,10 @@
 import type {
   TAtscriptAnnotatedType,
   TAtscriptTypeArray,
-  TAtscriptTypeObject,
   TValidatorOptions,
   Validator,
 } from "@atscript/typescript/utils";
-import { getKeyProps, getDbFieldOp, isPlainObject } from "@atscript/db";
+import { getKeyProps, getDbFieldOp, isPlainObject, storedObjectType } from "@atscript/db";
 import type { TFieldOps } from "@atscript/db";
 import { type Document, type Filter, type UpdateFilter, type UpdateOptions } from "mongodb";
 import { joinPath } from "./path-utils";
@@ -174,6 +173,8 @@ function holdsItem(arr: string, item: unknown): Document {
  */
 export interface TCollectionPatcherContext {
   flatMap: Map<string, TAtscriptAnnotatedType>;
+  /** The document paths whose merge strategy applies (`TableMetadata.mergePaths`). */
+  mergePaths: ReadonlySet<string>;
   prepareId(id: any): any;
   createValidator(opts?: Partial<TValidatorOptions>): Validator<any>;
 }
@@ -337,14 +338,14 @@ export class CollectionPatcher {
       const isObjectValue = typeof value === "object" && value !== null && !Array.isArray(value);
       if (isObjectValue && topLevelArray && !flatType?.metadata?.has("db.json")) {
         this.parseArrayPatch(key, value, flatType!);
-      } else if (isObjectValue && flatType?.metadata?.get("db.patch.strategy") === "merge") {
+      } else if (isObjectValue && this.collection.mergePaths.has(key)) {
         this.flattenPayload(value, key);
       } else if (
         isObjectValue &&
-        flatType?.type.kind === "object" &&
-        !flatType.metadata?.has("db.json")
+        storedObjectType(flatType) &&
+        !flatType!.metadata?.has("db.json")
       ) {
-        this._flattenReplaceObject(value as Record<string, unknown>, key, flatType);
+        this._flattenReplaceObject(value as Record<string, unknown>, key, flatType!);
       } else if (key !== "_id") {
         this._setLeaf(key, value, flatType);
       }
@@ -353,17 +354,17 @@ export class CollectionPatcher {
   }
 
   /**
-   * Walk the schema's props for a replace-strategy nested object so omitted
-   * optional children become explicit nulls (parity with SQL `column = NULL`).
-   * Required-missing leaves are caught earlier by the strict validator.
+   * Walk the schema's props for a replace-strategy nested object (a `T | null`
+   * one included, `storedObjectType`) so omitted optional children become
+   * explicit nulls (parity with SQL `column = NULL`). Required-missing leaves
+   * are caught earlier by the strict validator.
    */
   private _flattenReplaceObject(
     value: Record<string, unknown>,
     prefix: string,
     flatType: TAtscriptAnnotatedType,
   ): void {
-    const propsMap = (flatType.type as TAtscriptTypeObject).props;
-    for (const [propKey, propType] of propsMap) {
+    for (const [propKey, propType] of storedObjectType(flatType)!.type.props) {
       const childKey = `${prefix}.${propKey}`;
       const childValue = value[propKey];
       if (childValue === undefined) {
@@ -373,7 +374,6 @@ export class CollectionPatcher {
       const childIsObject =
         typeof childValue === "object" && childValue !== null && !Array.isArray(childValue);
       const propIsJson = propType.metadata?.has("db.json");
-      const propIsMerge = propType.metadata?.get("db.patch.strategy") === "merge";
       // An array operator on an array of this object (since 0.1.180; before,
       // the operator object itself was stored as the field's value)
       const childFlatType = this.collection.flatMap.get(childKey);
@@ -381,12 +381,12 @@ export class CollectionPatcher {
         this.parseArrayPatch(childKey, childValue, childFlatType);
         continue;
       }
-      if (childIsObject && propType.type.kind === "object" && !propIsJson) {
-        if (propIsMerge) {
-          this.flattenPayload(childValue, childKey);
-        } else {
-          this._flattenReplaceObject(childValue as Record<string, unknown>, childKey, propType);
-        }
+      if (childIsObject && this.collection.mergePaths.has(childKey)) {
+        this.flattenPayload(childValue, childKey);
+        continue;
+      }
+      if (childIsObject && storedObjectType(propType) && !propIsJson) {
+        this._flattenReplaceObject(childValue as Record<string, unknown>, childKey, propType);
         continue;
       }
       this._setLeaf(childKey, childValue, propType);
@@ -424,8 +424,8 @@ export class CollectionPatcher {
     // applies them: remove → update → upsert → insert (since 0.1.180; before,
     // insert → upsert → update)
     this._remove(key, toRemove, keys, flatType);
-    this._update(key, toUpdate, keys, flatType);
-    this._upsert(key, toUpsert, keys, flatType);
+    this._update(key, toUpdate, keys);
+    this._upsert(key, toUpsert, keys);
     this._insert(key, toInsert, keys, flatType);
   }
 
@@ -560,12 +560,7 @@ export class CollectionPatcher {
    *              or append when none has it
    * - key-less → append unless an equal element is stored
    */
-  private _upsert(
-    key: string,
-    input: any[] | undefined,
-    keys: string[],
-    flatType: TAtscriptAnnotatedType,
-  ) {
+  private _upsert(key: string, input: any[] | undefined, keys: string[]) {
     if (!input?.length) {
       return;
     }
@@ -575,7 +570,7 @@ export class CollectionPatcher {
       return;
     }
 
-    const mergeStrategy = flatType.metadata?.get("db.patch.strategy") === "merge";
+    const mergeStrategy = this.collection.mergePaths.has(key);
     this._appendUnless(key, input, this._keyStored(keys), {
       $map: {
         input: "$$value",
@@ -598,17 +593,12 @@ export class CollectionPatcher {
    *   0.1.180, as on every other adapter; before, the items were added to
    *   the array as a set union)
    */
-  private _update(
-    key: string,
-    input: any[] | undefined,
-    keys: string[],
-    flatType: TAtscriptAnnotatedType,
-  ) {
+  private _update(key: string, input: any[] | undefined, keys: string[]) {
     if (!input?.length || keys.length === 0) {
       return;
     }
 
-    const mergeStrategy = flatType.metadata?.get("db.patch.strategy") === "merge";
+    const mergeStrategy = this.collection.mergePaths.has(key);
 
     // sequentially apply each patch item
     this._set(key, {

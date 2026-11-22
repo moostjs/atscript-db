@@ -13,11 +13,14 @@ import {
 } from "./live-server";
 import {
   ANGLES,
+  ANGLE_SCORES,
   POINTS,
+  POINT_SCORES,
   Q_ANGLE,
   Q_POINT,
   expectAtLeast,
   expectDescending,
+  expectScores,
   ids,
   type Row,
 } from "../../../db/test-kit/vector-score-data";
@@ -26,7 +29,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 // Server-gated: runs against a live server that evaluates the adapter's
 // distance expressions (`VEC_DISTANCE_COSINE` / `VEC_DISTANCE_EUCLIDEAN` over
-// `STRING_TO_VECTOR`), skips otherwise. Override with `ATSCRIPT_MYSQL_TEST_URL`
+// `STRING_TO_VECTOR`), skips otherwise — and no released server has both
+// (MariaDB has the former, MySQL the latter; see the MySQL adapter docs, vector
+// support), so it skips everywhere today. Override with `ATSCRIPT_MYSQL_TEST_URL`
 // (or `MYSQL_TEST_URI`; an admin connection — the spec creates and drops its
 // own `vector_score` database).
 //
@@ -74,36 +79,25 @@ describe.skipIf(!vectorSql)("[mysql live] vector $score (since 0.1.183)", () => 
     await dropMysqlDatabase(DB);
   });
 
-  it("cosine: every row has $score = 1 − _distance / 2, in 0–1, falling along the order", async () => {
+  it("cosine: $score = (1 + cos) / 2, in 0–1, falling along the order; no _distance (since 0.1.184)", async () => {
     const rows = await search(fx.VsCos, Q_ANGLE);
     expect(ids(rows)).toEqual(["a", "b", "c", "e", "d"]);
-    for (const row of rows) {
-      expect(row.$score).toBeCloseTo(1 - row._distance / 2, 12);
-      expect(row.$score).toBeGreaterThanOrEqual(-1e-6);
-      expect(row.$score).toBeLessThanOrEqual(1 + 1e-6);
-    }
+    expectScores(rows, ANGLE_SCORES);
     expectDescending(rows);
   });
 
-  it("euclidean: $score = 1 / (1 + _distance)", async () => {
+  it("euclidean: $score = 1 / (1 + distance); no _distance", async () => {
     const rows = await search(fx.VsL2, Q_POINT);
     expect(ids(rows)).toEqual(["a", "b", "c", "d", "e"]);
-    for (const row of rows) expect(row.$score).toBeCloseTo(1 / (1 + row._distance), 12);
-    expect(rows.map((r) => r.$score)).toEqual([
-      expect.closeTo(1, 6),
-      expect.closeTo(2 / 3, 6),
-      expect.closeTo(0.5, 6),
-      expect.closeTo(0.25, 6),
-      expect.closeTo(0.1, 6),
-    ]);
+    expectScores(rows, POINT_SCORES);
     expectDescending(rows);
   });
 
   it("$select keeps $score in its inclusion and exclusion forms", async () => {
     const [included] = await search(fx.VsCos, Q_ANGLE, { $select: ["title"] });
-    expect(included).toEqual({ title: "0°", _distance: expect.any(Number), $score: 1 });
+    expect(included).toEqual({ title: "0°", $score: 1 });
     const [excluded] = await search(fx.VsCos, Q_ANGLE, { $select: { embedding: 0 } });
-    expect(excluded).toEqual({ id: "a", title: "0°", _distance: expect.any(Number), $score: 1 });
+    expect(excluded).toEqual({ id: "a", title: "0°", $score: 1 });
   });
 
   it("cosine threshold: every row reaches it, the row just under it is out", async () => {

@@ -576,7 +576,7 @@ GET /<controller>/meta/form/:name
 → TSerializedAnnotatedType
 ```
 
-Returns the serialized form schema for the named `@InputForm` type. Annotation allowlist matches `/meta.type` (kept: `meta.*`, `expect.*`, `db.rel.*`, plus a small `db.json` / `db.patch.strategy` / `db.default*` / `db.http.path` whitelist). Schemas are serialized once and cached per `(controller, name)`.
+Returns the serialized form schema for the named `@InputForm` type. Annotation allowlist matches `/meta.type` (kept: `meta.*`, `expect.*`, `db.rel.*`, plus a small `db.json` / `db.encrypted` / `db.patch.strategy` / `db.default*` / `db.http.path` whitelist). Schemas are serialized once and cached per `(controller, name)`.
 
 Discovery is lazy: hitting `/meta/form/:name` triggers `discoverActions` if `/meta` hasn't been called yet on this process. Unknown names → HTTP 404.
 

@@ -103,6 +103,8 @@ When to use `@db.json`:
 - **Dynamic or loosely-structured data** where flattening creates too many columns
 - **Highly nested structures** where deep flattening is impractical
 
+A patch writes a JSON column as one value: a merge strategy does not apply on or inside a `@db.json` field — see [Where Merge Applies](/api/update-patch#where-merge-applies).
+
 ::: tip
 Arrays are always stored as JSON regardless of `@db.json`. You only need the annotation for plain objects you want to keep as a single column.
 :::

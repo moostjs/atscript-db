@@ -48,7 +48,7 @@ export const dbSearchAnnotations: TAnnotationsTree = {
           "Marks a field as a **vector embedding** for **similarity search**.\n\n" +
             "- Each adapter maps this to its native vector type and index:\n" +
             "  - **MongoDB** → Atlas `$vectorSearch` index\n" +
-            "  - **MySQL 9+** → `VECTOR(N)` column + `VEC_DISTANCE_*` functions\n" +
+            "  - **MySQL** → `VECTOR(N)` column on MySQL 9+ and MariaDB (`JSON` on MySQL 8); vector search does not run on current MySQL or MariaDB servers\n" +
             "  - **PostgreSQL** → pgvector `vector(N)` column + distance operators\n" +
             "  - **SQLite** → `BLOB` column + `vec0` virtual index (requires the `sqlite-vec` extension; falls back to JSON `TEXT` when unavailable)\n" +
             "- Each search result carries `$score`: higher = closer, on the MongoDB Atlas `vectorSearchScore` scale on every database.",

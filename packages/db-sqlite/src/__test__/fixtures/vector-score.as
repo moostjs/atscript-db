@@ -45,3 +45,20 @@ export interface VsSchema {
     @db.search.vector.threshold 0.3
     embedding: number[]
 }
+
+// since 0.1.184: fields named like the engine-specific result fields of
+// earlier versions are ordinary stored columns
+@db.table 'vs_stored'
+export interface VsStored {
+    @meta.id
+    id: string
+
+    title: string
+
+    _distance: number
+
+    _score: number
+
+    @db.search.vector 2, "cosine"
+    embedding: number[]
+}

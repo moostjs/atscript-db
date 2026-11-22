@@ -137,7 +137,7 @@ embedding: db.vector
 
 - Pre-filter (0.1.151): top-level filter conjuncts on the index's `@db.search.filter` fields move into `$vectorSearch.filter` when the value is a string / number / boolean / `Date` / ObjectId under `$eq` (or bare), `$ne`, `$gt(e)`, `$lt(e)`, `$in`, `$nin` (non-empty) → full pages. Everything else (other fields, `null`, `$regex`, `$exists`, `$or`, predicates) filters the top-k AFTER the stage → page can be short. Several filter fields per index are all declared (≤ 0.1.150 kept only the last).
 - `$vectorSearch.limit` = `$skip + $limit` (≤ 0.1.150 a skipped page came back empty).
-- Rows carry `$score` (0.1.183) = Atlas `vectorSearchScore` (0–1, higher = closer) on EVERY row, any `$select` (internal alias, renamed after fetch). Legacy `_score` (same value) still only when a threshold applies, dropped by an inclusion `$select`; the threshold `$match` is on it as before → [crud.md § Search](crud.md#search).
+- Rows carry `$score` (0.1.183) = Atlas `vectorSearchScore` (0–1, higher = closer) on EVERY row, any `$select` (internal alias, renamed after fetch). No `_score` since 0.1.184 (≤ 0.1.183: same value, only with a threshold); a stored `_score` field is returned as stored → [crud.md § Search](crud.md#search).
 - `searchWithCount` on Atlas `$search` with NO filter: page read directly + total from `$searchMeta` (`count: total`); filtered / classic `$text` / vector keep the `$facet`.
 - `findManyWithCount` without predicates: `find` + `countDocuments` (concurrent; sequential in a transaction).
 

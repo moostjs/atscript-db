@@ -39,17 +39,17 @@ describe("vector search SQL builders", () => {
       maxDistance: 0.4,
     });
     expect(sql).toBe(
-      `SELECT * FROM (SELECT * FROM (SELECT "t".*, dist("embedding", ?) AS "_distance" FROM "docs" AS "t" WHERE "status" = ?) AS "_d" WHERE "_distance" IS NOT NULL) AS "_v" ` +
-        `WHERE "_distance" <= ? ORDER BY "_distance" ASC LIMIT ? OFFSET ?`,
+      `SELECT * FROM (SELECT * FROM (SELECT "t".*, dist("embedding", ?) AS "__atscript_distance" FROM "docs" AS "t" WHERE "status" = ?) AS "_d" WHERE "__atscript_distance" IS NOT NULL) AS "_v" ` +
+        `WHERE "__atscript_distance" <= ? ORDER BY "__atscript_distance" ASC LIMIT ? OFFSET ?`,
     );
     expect(params).toEqual(["[1,0]", "on", 0.4, 5, 10]);
   });
 
-  it("projects $select on the outer query and always keeps _distance", () => {
+  it("projects $select on the outer query and always selects the distance", () => {
     const source = vectorDistanceSource(dialect, "docs", WHERE, DIST);
     const select = new UniquSelect(["id", "title"]);
     const { sql } = buildVectorSearchSelect(dialect, source, { select, limit: 20 });
-    expect(sql).toMatch(/^SELECT "_v"\."id", "_v"\."title", "_v"\."_distance" FROM \(/);
+    expect(sql).toMatch(/^SELECT "_v"\."id", "_v"\."title", "_v"\."__atscript_distance" FROM \(/);
     expect(sql).not.toContain("OFFSET");
   });
 
@@ -61,7 +61,7 @@ describe("vector search SQL builders", () => {
       maxDistance: 1,
       residual,
     });
-    expect(sql).toContain(`WHERE "_distance" <= ? AND (_v."kind" = ?) ORDER BY`);
+    expect(sql).toContain(`WHERE "__atscript_distance" <= ? AND (_v."kind" = ?) ORDER BY`);
     expect(params).toEqual([1, 1, "a", 3]);
   });
 
@@ -69,7 +69,7 @@ describe("vector search SQL builders", () => {
     const source = vectorDistanceSource(numbered, "docs", WHERE, DIST, false);
     const { sql, params } = buildVectorSearchCount(numbered, source, { maxDistance: 0.5 });
     expect(sql).toBe(
-      `SELECT COUNT(*) AS cnt FROM (SELECT * FROM (SELECT dist("embedding", $1) AS "_distance" FROM "docs" AS "t" WHERE "status" = $2) AS "_d" WHERE "_distance" IS NOT NULL) AS "_v" WHERE "_distance" <= $3`,
+      `SELECT COUNT(*) AS cnt FROM (SELECT * FROM (SELECT dist("embedding", $1) AS "__atscript_distance" FROM "docs" AS "t" WHERE "status" = $2) AS "_d" WHERE "__atscript_distance" IS NOT NULL) AS "_v" WHERE "__atscript_distance" <= $3`,
     );
     expect(params).toEqual(["[1,0]", "on", 0.5]);
   });
@@ -80,7 +80,7 @@ describe("vector search SQL builders", () => {
   it("a plain-table source leaves out rows without a distance", () => {
     for (const withRows of [true, false]) {
       const source = vectorDistanceSource(dialect, "docs", WHERE, DIST, withRows);
-      expect(source.sql).toMatch(/\) AS "_d" WHERE "_distance" IS NOT NULL$/);
+      expect(source.sql).toMatch(/\) AS "_d" WHERE "__atscript_distance" IS NOT NULL$/);
       expect(source.params).toEqual(["[1,0]", "on"]);
     }
   });
@@ -149,12 +149,17 @@ describe("vector $score ⇄ distance", () => {
     expect(vectorMaxDistance("cosine", 1.5)).toBeLessThan(0);
   });
 
-  it("addVectorScore keeps _distance and reads a numeric string", () => {
-    expect(addVectorScore({ id: 1, _distance: 1 }, "euclidean")).toEqual({
+  // since 0.1.184 — the distance column is internal: `$score` replaces it,
+  // and a stored field named `_distance` is an ordinary column.
+  it("addVectorScore replaces the distance column with $score and reads a numeric string", () => {
+    expect(addVectorScore({ id: 1, __atscript_distance: 1 }, "euclidean")).toEqual({
       id: 1,
-      _distance: 1,
       $score: 0.5,
     });
-    expect(addVectorScore({ _distance: "0.5" }, "cosine").$score).toBe(0.75);
+    expect(addVectorScore({ __atscript_distance: "0.5" }, "cosine")).toEqual({ $score: 0.75 });
+    expect(addVectorScore({ _distance: 7, __atscript_distance: 0 }, "cosine")).toEqual({
+      _distance: 7,
+      $score: 1,
+    });
   });
 });

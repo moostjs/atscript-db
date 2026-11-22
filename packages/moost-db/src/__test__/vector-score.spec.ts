@@ -12,7 +12,8 @@ import { bootHttp, prepareFixtures, type THttpSend } from "./test-utils";
 // Since 0.1.183 every row of a `$vector` read carries `$score` (higher =
 // closer, the `$threshold` scale) in the JSON response — under `$select` too,
 // on `/query` and `/pages` — like `$distance` on `/geo`. It is not a field: a
-// client cannot name it in `$select`.
+// client cannot name it in `$select`. Since 0.1.184 the rows no longer carry
+// the engine's `_distance`.
 
 let sqliteVecAvailable = true;
 try {
@@ -24,7 +25,7 @@ try {
 let space: DbSpace;
 let send: THttpSend;
 
-type Row = { id?: number; title?: string; _distance: number; $score: number };
+type Row = { id?: number; title?: string; $score: number };
 
 const VECTOR = "$search=q&$vector=embedding";
 
@@ -67,12 +68,12 @@ describe.skipIf(!sqliteVecAvailable)("[sqlite] $score over HTTP", () => {
       [2, 0.5],
       [3, 0],
     ]);
-    for (const row of rows) expect(row.$score).toBeCloseTo(1 - row._distance / 2, 12);
+    for (const row of rows) expect(row).not.toHaveProperty("_distance");
   });
 
   it("$select keeps $score; $threshold returns only rows that reach it", async () => {
     const selected = await send("GET", `/vs/query?${VECTOR}&$select=title`);
-    expect(selected.body[0]).toEqual({ id: 1, title: "same", _distance: 0, $score: 1 });
+    expect(selected.body[0]).toEqual({ id: 1, title: "same", $score: 1 });
 
     const capped = await send("GET", `/vs/query?${VECTOR}&$threshold=0.4`);
     expect((capped.body as Row[]).map((r) => r.id)).toEqual([1, 2]);
@@ -82,9 +83,7 @@ describe.skipIf(!sqliteVecAvailable)("[sqlite] $score over HTTP", () => {
     const res = await send("GET", `/vs/pages?${VECTOR}&$threshold=0.4&$size=1`);
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ count: 2, pages: 2 });
-    expect(res.body.data).toEqual([
-      { id: 1, title: "same", embedding: [1, 0, 0], _distance: 0, $score: 1 },
-    ]);
+    expect(res.body.data).toEqual([{ id: 1, title: "same", embedding: [1, 0, 0], $score: 1 }]);
   });
 
   it("$score is not a field: $select cannot name it and /meta does not list it", async () => {

@@ -1,6 +1,6 @@
 # patch
 
-Decompose patch payloads into: scalar sets, field ops (`$inc`/`$dec`/`$mul`), array ops, JSON-column merges. SQL adapters emit `UPDATE … SET col = ?`; MongoDB emits a `$set` aggregation pipeline via `CollectionPatcher`.
+Decompose patch payloads into: scalar sets, field ops (`$inc`/`$dec`/`$mul`), array ops, merge-strategy object sets. SQL adapters emit `UPDATE … SET col = ?`; MongoDB emits a `$set` aggregation pipeline via `CollectionPatcher`.
 
 ## Field ops
 
@@ -75,13 +75,14 @@ Operator items are `@normalize.*`-normalized before validation (0.1.170), `$upda
 
 Per-field control of nested-object patch semantics. See [validation.md § Validator modes](validation.md#validator-modes-at-a-glance) for the validator-side detail.
 
-| Branch                                       | Strategy | Validator behaviour                                     | Storage behaviour                                    |
-| -------------------------------------------- | -------- | ------------------------------------------------------- | ---------------------------------------------------- |
-| Default (no annotation)                      | replace  | Strict — every required child must be present, else 400 | Optional children user omits → explicit `null`       |
-| `@db.patch.strategy 'merge'` (one level)     | merge    | Partial — omitted siblings allowed                      | Omitted siblings preserved                           |
-| Descendant of a merge branch (no annotation) | replace  | Strict again — merge does NOT propagate                 | Same as default                                      |
-| Merge branch inside a replace branch         | merge    | Partial — but sent if required (the parent is strict)   | Omitted children kept; parent's own omitted → `null` |
-| `@db.json` field                             | replace  | Always strict — opaque blob, no partial decomposition   | Whole JSON value rewritten                           |
+| Branch                                                 | Strategy | Validator behaviour                                     | Storage behaviour                                    |
+| ------------------------------------------------------ | -------- | ------------------------------------------------------- | ---------------------------------------------------- |
+| Default (no annotation)                                | replace  | Strict — every required child must be present, else 400 | Optional children user omits → explicit `null`       |
+| `@db.patch.strategy 'merge'` (one level)               | merge    | Partial — omitted siblings allowed                      | Omitted siblings preserved                           |
+| Descendant of a merge branch (no annotation)           | replace  | Strict again — merge does NOT propagate                 | Same as default                                      |
+| Merge branch inside a replace branch                   | merge    | Partial — but sent if required (the parent is strict)   | Omitted children kept; parent's own omitted → `null` |
+| `@db.json` field                                       | replace  | Always strict — opaque blob, no partial decomposition   | Whole JSON value rewritten                           |
+| `'merge'` object NOT reached by its own path (0.1.184) | inert    | Strict — a partial object is rejected, as on insert     | Written as part of the whole value                   |
 
 ```atscript
 interface User {
@@ -125,14 +126,20 @@ A merge object stored as `null` / missing (any depth) becomes what the patch sen
 
 `@db.patch.strategy` is the only strategy annotation, MongoDB included — `@db.mongo.patch.strategy` no longer exists ([mongo-annotations.md](mongo-annotations.md#replaced--removed-use-the-generic-core-annotation-instead)).
 
+## Where merge applies (0.1.184)
+
+ONE rule, the same for validation (server + db-client preflight), field ops, array ops and every adapter: a merge strategy applies to an object only where a patch reaches that object by its OWN PATH — from the row's top through stored objects. An object `T | null` IS a `T`: merge on it (compiles since 0.1.184) or inside it merges on every adapter (`T[] | null` + merge = build error: array ops are refused there). Under an array / tuple element, a union member (`Prefs | string`, `A | B`), a `@db.json` or `@db.encrypted` field, and on such a field (or on a union field) itself, it has NO EFFECT on every adapter: the object is validated in full (partial → rejected like insert) and written as part of the whole value. `$inc`/`$dec`/`$mul` allowed only when every enclosing object is a merge object reached by path (else refused: a top-level `FIELD_OP_CONTEXT` entry under a tuple / array element; under a `T | null` or a union member the union's entry, whose `details` carry `FIELD_OP_CONTEXT`; via a relation the path starts with the relation field). A shared type keeps merging where reached by path. Merge on an array field = keyed `$update`/`$upsert` merge into the element, one level deep (a nested merge object in the item is replaced). `mergeStrategyPaths(type)` (`@atscript/db/validator`) = the set of dot-paths where it applies — form/patch builders send partial objects only there.
+
+- ≤ 0.1.183: partial merge objects in those places passed validation and were stored without their omitted (even required) children; SQL merged a union-of-objects member; `@db.json` + merge on one field → SQLite `no such column`, memory + Mongo merged; `@db.encrypted` + merge → metadata build threw; a merge object inside a `T | null` lost omitted children on memory + Mongo; field ops inside a non-merge `T | null` / union member were APPLIED on SQL (now refused — breaking for SQL apps: add `'merge'` or send the computed value) and stored as `{ "$inc": 1 }` on memory + Mongo; in a tuple element they were stored as the value.
+- Build errors (editor diagnostics), author feedback only: merge on a field with `@db.json` / `@db.encrypted`; merge WRITTEN inside an array element or a `@db.json` / `@db.encrypted` field. Not build errors (and no effect in those places): merge fields of referenced types, of objects written in type groups (`| null`, `&`, unions, tuples), `annotate`-added ones. No runtime error for any placement.
+- Write shape of a `T | null` object WITHOUT a merge child: only Mongo `updateOne` / `bulkUpdate` changed — field by field like a plain replaced object (omitted optional → `null`, stored keys outside the type survive); Mongo `updateMany` and memory (unless the patch carries a merge object / array op inside) still set it whole (the updateOne/updateMany difference plain objects already have on Mongo). `/meta` keeps `db.encrypted` (0.1.184).
+
 ## `@db.json` columns
 
 Fields tagged `@db.json` are serialized to a single JSON column (or native `JSONB`/`JSON` type per adapter). Patch handling:
 
-- SQL adapters: the column is read, merged in JS, and written back (one round-trip).
-- MongoDB: stored verbatim in the document; patch goes through the usual pipeline. Since 0.1.155 an object value (`@db.json`, a union of objects, `T | null`; renamed with `@db.column` too) REPLACES the stored object (plain nested objects keep their `@db.patch.strategy`) — before, the pipeline `$set` merged it in (a member switch kept the old member's keys).
-
-Avoid `@db.json` on high-write fields — every partial update becomes a read-modify-write.
+- Written as ONE value on every adapter: a patch replaces the whole column (SQL `SET col = ?`; MongoDB `$set` of the literal object). Since 0.1.155 a MongoDB object value (`@db.json`, a union of objects; `T | null` — since 0.1.184 written field by field in `updateOne` / `bulkUpdate`, still whole in `updateMany`; renamed with `@db.column` too) REPLACES the stored object (plain nested objects keep their `@db.patch.strategy`) — before, the pipeline `$set` merged it in (a member switch kept the old member's keys).
+- See the one rule in § Where merge applies above.
 
 ## `@db.depth.limit N` — security guard on nested writes
 
@@ -159,7 +166,7 @@ Converts patch payloads to `$set` aggregation stages using `$reduce`, `$filter`,
 
 - scalar `SET col = ?` assignments,
 - `SET col = col + ?` / `- ?` / `* ?` for field ops,
-- JSON column merges for `@db.json` / nested objects (with `'merge'` strategy).
+- dot-path sets for merge-strategy nested objects (a `@db.json` column is always set whole).
 
 Array ops against scalar arrays in SQL columns emit an in-application diff-and-replace, since SQL dialects don't have first-class array algebra portable across engines.
 

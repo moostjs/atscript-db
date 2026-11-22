@@ -672,7 +672,7 @@ export interface Document {
 }
 ```
 
-On sync, the adapter provisions its native vector type/index (pgvector for PostgreSQL, Atlas vector index for MongoDB, `VECTOR(N)` for MySQL 9+, `vec0` shadow table for SQLite with `sqlite-vec` loaded). See [Vector Search](/search/vector-search) for the full query API.
+On sync, the adapter provisions its native vector type/index (pgvector for PostgreSQL, Atlas vector index for MongoDB, `vec0` shadow table for SQLite with `sqlite-vec` loaded). MySQL gets a `VECTOR(N)` column on MySQL 9 and later and on MariaDB, but vector search does not run there — see [MySQL vector support](/adapters/mysql#vector-support-mysql-9-0). See [Vector Search](/search/vector-search) for the full query API.
 
 ## What Is NOT Synced
 

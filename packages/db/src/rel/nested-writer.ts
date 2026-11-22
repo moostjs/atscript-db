@@ -1374,7 +1374,10 @@ export async function applyPatchNestedTo(
     if (patches.length === 0) {
       continue;
     }
-    await plan.targetTable.bulkUpdate(patches, { maxDepth, _depth: depth + 1 });
+    // The target's errors name the relation, as a FROM level's do (since 0.1.184)
+    await wrapNestedError(plan.navField, () =>
+      plan.targetTable.bulkUpdate(patches, { maxDepth, _depth: depth + 1 }),
+    );
   }
 }
 

@@ -77,7 +77,7 @@ export const dbPlugin: (options?: TDbPluginOptions) => TAtscriptPlugin = (option
                   "- Equivalent to `number[]` but explicitly marks the field as a vector embedding.\n" +
                   "- Each adapter maps this to its native vector type:\n" +
                   "  - **MongoDB** → BSON array\n" +
-                  "  - **MySQL 9+** → `VECTOR(N)`\n" +
+                  "  - **MySQL** → `VECTOR(N)` on MySQL 9+ and MariaDB, `JSON` on MySQL 8 (vector search does not run on MySQL or MariaDB)\n" +
                   "  - **PostgreSQL** → pgvector `vector(N)`\n" +
                   "  - **SQLite** → Float32 `BLOB` with the `sqlite-vec` extension (since 0.1.178), JSON `TEXT` without it",
                 '@db.search.vector 1536, "cosine"',

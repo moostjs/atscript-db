@@ -255,10 +255,10 @@ export class MongoAdapter extends BaseDbAdapter {
 
   /** Unique fields accumulated during onFieldScanned, returned via getMetadataOverrides. */
   private _pendingUniqueFields: string[] = [];
-  /** {@link _patcherFlatMap}'s memo. */
-  private _patcherFlatMapMemo?: {
+  /** {@link _patcherMaps}' memo. */
+  private _patcherMapsMemo?: {
     src: Map<string, TAtscriptAnnotatedType>;
-    map: Map<string, TAtscriptAnnotatedType>;
+    maps: Pick<TCollectionPatcherContext, "flatMap" | "mergePaths">;
   };
 
   constructor(
@@ -728,7 +728,7 @@ export class MongoAdapter extends BaseDbAdapter {
   /** Returns the context object used by CollectionPatcher. */
   getPatcherContext(): TCollectionPatcherContext {
     return {
-      flatMap: this._patcherFlatMap(),
+      ...this._patcherMaps(),
       prepareId: (id: any) => this.prepareIdFromIdType(id),
       createValidator: (opts?: Partial<TValidatorOptions>) =>
         this._table.createValidator(opts) as Validator<any>,
@@ -740,20 +740,22 @@ export class MongoAdapter extends BaseDbAdapter {
    * with `@db.column` names already applied (`translatePatchKeys`), so a
    * renamed union / `@db.json` field is found — and replaced, not merged —
    * under its stored name. Derived fields are left out (they map to their
-   * source's path). Built once per flat map.
+   * source's path). The merge-strategy paths are keyed the same way. Built
+   * once per flat map.
    */
-  private _patcherFlatMap(): Map<string, TAtscriptAnnotatedType> {
+  private _patcherMaps(): Pick<TCollectionPatcherContext, "flatMap" | "mergePaths"> {
     const src = this._table.flatMap;
-    let memo = this._patcherFlatMapMemo;
+    let memo = this._patcherMapsMemo;
     if (memo?.src !== src) {
       const meta = this._table.getMetadata();
       const map = new Map<string, TAtscriptAnnotatedType>();
       for (const [path, type] of src) {
         if (!meta.derivedFields.has(path)) map.set(meta.documentPath(path), type);
       }
-      memo = this._patcherFlatMapMemo = { src, map };
+      const mergePaths = new Set([...meta.mergePaths].map((path) => meta.documentPath(path)));
+      memo = this._patcherMapsMemo = { src, maps: { flatMap: map, mergePaths } };
     }
-    return memo.map;
+    return memo.maps;
   }
 
   // ── Native patch ─────────────────────────────────────────────────────────

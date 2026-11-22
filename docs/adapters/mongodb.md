@@ -631,7 +631,7 @@ category: string
 
 The adapter builds `$vectorSearch` aggregation pipelines from your schema. No subclassing or callbacks needed — pass a pre-computed embedding vector directly to `vectorSearch()`.
 
-Each row carries `$score`, the Atlas `vectorSearchScore` from `0` to `1` (higher = closer), with or without a threshold and whatever the `$select` (since 0.1.183; the SQL adapters return the same scale). When a threshold applies (`@db.search.vector.threshold` or `$threshold`), rows also carry the same value as `_score`, as before; an inclusion `$select` drops `_score`. See [Result fields](/search/vector-search#result-fields).
+Each row carries `$score`, the Atlas `vectorSearchScore` from `0` to `1` (higher = closer), with or without a threshold and whatever the `$select` (since 0.1.183; the SQL adapters return the same scale). Before 0.1.184, when a threshold applied, rows also carried the same value as `_score`. See [Result fields](/search/vector-search#result-fields).
 
 See [Vector Search](/search/vector-search) for the full annotation reference, programmatic API, and HTTP access.
 

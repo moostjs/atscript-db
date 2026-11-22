@@ -87,6 +87,8 @@ export {
 export { resolveFulltextIndex } from "./shared/search-term";
 export { nestDottedWith } from "./shared/with-nesting";
 export { soleUnionMember } from "./shared/union-shape";
+// ── Since 0.1.184 ────────────────────────────────────────────────────────────
+export { storedObjectType } from "./shared/union-shape";
 export { searchMemberKind } from "./shared/search-fields";
 export type { TSearchMemberKind } from "./shared/search-fields";
 

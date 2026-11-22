@@ -8,8 +8,9 @@ import { createTestSpace, prepareFixtures } from "./test-utils";
 // with or without a threshold (before, only `_score`, and only with a
 // threshold). A `$`-name cannot come out of `$addFields`, so the score rides
 // in `__atscript_score` and is renamed after fetch, as geo's `$distance` is.
-// `_score` and the threshold `$match` are unchanged. Atlas Vector Search does
-// not run on a local MongoDB: these tests pin the pipeline and the row mapping.
+// Since 0.1.184 the threshold `$match` reads that field too, and rows no
+// longer carry `_score`. Atlas Vector Search does not run on a local MongoDB:
+// these tests pin the pipeline and the row mapping.
 
 const mongo = createTestSpace();
 const SCORE = { $meta: "vectorSearchScore" };
@@ -47,14 +48,32 @@ describe("[mongo] vector $score (since 0.1.183)", () => {
     expect(rows).toEqual([{ _id: "a", title: "x", $score: 0.8 }]);
   });
 
-  it("with a threshold: _score and its $match stay, $score is added", async () => {
-    const adapter = mocked([{ _id: "a", title: "x", _score: 0.9, __atscript_score: 0.9 }]);
+  it("with a threshold: the $match reads the internal score field, no _score (since 0.1.184)", async () => {
+    const adapter = mocked([{ _id: "a", title: "x", __atscript_score: 0.9 }]);
     const rows = await adapter.vectorSearch(VEC, { filter: {}, controls: { $threshold: 0.7 } });
     expect(pipeline().slice(1, 3)).toEqual([
-      { $addFields: { _score: SCORE, __atscript_score: SCORE } },
-      { $match: { _score: { $gte: 0.7 } } },
+      { $addFields: { __atscript_score: SCORE } },
+      { $match: { __atscript_score: { $gte: 0.7 } } },
     ]);
-    expect(rows).toEqual([{ _id: "a", title: "x", _score: 0.9, $score: 0.9 }]);
+    expect(rows).toEqual([{ _id: "a", title: "x", $score: 0.9 }]);
+  });
+
+  // Before 0.1.184 a threshold wrote the score into `_score`, replacing a
+  // stored `_score` in the results.
+  it("a stored _score field is never written by the pipeline and comes back as stored", async () => {
+    for (const controls of [{}, { $threshold: 0.7 }]) {
+      const adapter = mocked([{ _id: "a", _score: 42, __atscript_score: 0.9 }]);
+      const rows = await adapter.vectorSearch(VEC, { filter: {}, controls });
+      expect(JSON.stringify(pipeline())).not.toMatch(/"_score"/);
+      expect(rows).toEqual([{ _id: "a", _score: 42, $score: 0.9 }]);
+
+      const counted = mocked([
+        { data: [{ _id: "a", _score: 42, __atscript_score: 0.9 }], meta: [{ count: 1 }] },
+      ]);
+      const page = await counted.vectorSearchWithCount(VEC, { filter: {}, controls });
+      expect(JSON.stringify(pipeline())).not.toMatch(/"_score"/);
+      expect(page).toEqual({ data: [{ _id: "a", _score: 42, $score: 0.9 }], count: 1 });
+    }
   });
 
   it("$select keeps the score: inclusion projects it, exclusion leaves it", async () => {

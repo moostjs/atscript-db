@@ -18,6 +18,8 @@ export { isPlainObject, isEmptyObject } from "./shared/object";
 export { normalizeWritePayload } from "./shared/normalize-write";
 // Fields the server stamps on every update (`@db.onUpdate.now` / `.inc`), since 0.1.163
 export { SERVER_STAMPED_ON_UPDATE_KEYS, isServerStampedOnUpdate } from "./shared/server-stamped";
+// Where a patch may send a partial object (`@db.patch.strategy "merge"`), since 0.1.184
+export { mergeStrategyPaths } from "./shared/merge-paths";
 
 import {
   flattenAnnotatedType,
@@ -29,6 +31,7 @@ import {
 } from "@atscript/typescript/utils";
 
 import { createDbValidatorPlugin } from "./db-validator-plugin";
+import { mergeStrategyPaths } from "./shared/merge-paths";
 
 /** Write operation mode for validator configuration. */
 export type ValidatorMode = "insert" | "patch" | "replace";
@@ -74,7 +77,8 @@ export function dbValidatorOptions(
   const plugins = extraPlugins ? [...extraPlugins, dbPlugin] : [dbPlugin];
   return {
     plugins,
-    partial: mode === "patch" ? buildPatchPartial(collectNavRoots(type)) : false,
+    partial:
+      mode === "patch" ? buildPatchPartial(collectNavRoots(type), mergeStrategyPaths(type)) : false,
     replace: forceNavNonOptional,
     ...(opts?.unknownProps ? { unknownProps: opts.unknownProps } : {}),
   };
@@ -87,20 +91,22 @@ export function dbValidatorOptions(
  *
  * - the root object is partial (a patch names only the fields it touches)
  * - nav-relation subtrees are partial (nested data is validated by its own table)
- * - `@db.patch.strategy "merge"` blocks are partial (the decomposer merges
- *   per leaf, so absent keys survive server-side by design)
+ * - the objects in `mergePaths` ({@link mergeStrategyPaths}) are partial: a
+ *   `@db.patch.strategy "merge"` object a patch reaches by its own path is
+ *   merged per leaf, so absent keys survive server-side by design
  *
- * Every other nested object stays strict: non-merge blocks are `$set` as a
- * whole (replace semantics), so their required fields really are required.
+ * Every other nested object stays strict: it is written as a whole (replace
+ * semantics, or part of an array element, a union member, a JSON or an
+ * encrypted value), so its required fields really are required.
  */
 export function buildPatchPartial(
   navPaths: ReadonlySet<string>,
+  mergePaths: ReadonlySet<string>,
 ): (def: TAtscriptAnnotatedType<TAtscriptTypeObject>, path: string) => boolean {
-  return (def, path) => {
+  return (_def, path) => {
     if (path === "") return true;
     const root = path.split(".")[0];
-    if (navPaths.has(root)) return true;
-    return def.metadata.get("db.patch.strategy") === "merge";
+    return navPaths.has(root) || mergePaths.has(path);
   };
 }
 

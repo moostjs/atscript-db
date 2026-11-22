@@ -142,15 +142,18 @@ describe("@db.encrypted — rejected combinations (metadata build)", () => {
         ["db.mongo.search.text", [{}]],
       ],
     ],
-    [
-      '@db.patch.strategy "merge"',
-      [
-        ["db.encrypted", true],
-        ["db.patch.strategy", "merge"],
-      ],
-    ],
   ] as Array<[string, Array<[string, unknown]>]>)("rejects @db.encrypted + %s", (_label, meta) => {
     expect(() => buildTable({ id: id(), secret: leaf("string", meta) })).toThrow(/@db.encrypted/);
+  });
+
+  // Since 0.1.184 the merge strategy is inert on an encrypted field (it is
+  // written as one value): the build reports the pair, the table builds.
+  it('builds @db.encrypted + @db.patch.strategy "merge": the strategy does not apply', () => {
+    const secret = objLeaf({ a: leaf("string") }, [
+      ["db.encrypted", true],
+      ["db.patch.strategy", "merge"],
+    ]);
+    expect(buildTable({ id: id(), secret }).getMetadata().mergePaths.has("secret")).toBe(false);
   });
 
   it("rejects an FK referencing an encrypted target field", () => {

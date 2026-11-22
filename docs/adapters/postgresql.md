@@ -230,7 +230,7 @@ The `$threshold` parameter is a minimum `$score` (0--1) matching MongoDB Atlas s
 
 Before 0.1.183 a euclidean threshold was the maximum distance itself and a dot product one required `dot product >= threshold`; see [Upgrading](/guide/upgrading#v0-1-183).
 
-Each row carries `$score` (since 0.1.183, higher = closer) and `_distance`, the operator's result for that row (lower = closer). See [Result fields](/search/vector-search#result-fields).
+Each row carries `$score` (since 0.1.183, higher = closer). Before 0.1.184 it also carried `_distance`, the operator's result for that row. See [Result fields](/search/vector-search#result-fields).
 
 ### Graceful Fallback
 

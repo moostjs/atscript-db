@@ -2,13 +2,13 @@ import {
   isPhantomType,
   type TAtscriptAnnotatedType,
   type TAtscriptTypeArray,
-  type TAtscriptTypeObject,
 } from "@atscript/typescript/utils";
 
 import { DbError } from "../db-error";
 import type { TFieldOps } from "../ops";
 import type { AtscriptDbTable } from "../table/db-table";
 import type { TableMetadata } from "../table/table-metadata";
+import { storedObjectType } from "../shared/union-shape";
 import { getKeyProps } from "./patch-types";
 
 /** Metadata tag the flattener puts on top-level array fields (shared with `isVersionExemptPatch`). */
@@ -49,6 +49,7 @@ function flattenPatchPayload(
 ): void {
   const primaryKeys = meta.primaryKeys;
   const flatMap = meta.flatMap;
+  const mergePaths = meta.mergePaths;
   for (const _key of Object.keys(payload)) {
     const value = payload[_key];
     const key = prefix ? `${prefix}.${_key}` : _key;
@@ -74,7 +75,7 @@ function flattenPatchPayload(
     if (isPatchableArray(flatType)) {
       // Top-level array with patch operators (@db.json fields are excluded; plain arrays fall through as $replace)
       decomposeArrayPatch(key, value, flatType!, update);
-    } else if (flatType?.metadata?.get("db.patch.strategy") === "merge") {
+    } else if (mergePaths.has(key)) {
       // Merge: omitted siblings preserved.
       flattenPatchPayload(value, key, update, meta);
     } else if (meta.flattenedParents.has(key)) {
@@ -105,19 +106,14 @@ function isObjectValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Whether `type` is an object stored as such — not `@db.json`, not a union. */
+/** Whether `type` is an object stored as such ({@link storedObjectType}) — not `@db.json`. */
 function isStoredObject(type: TAtscriptAnnotatedType | undefined): boolean {
-  return type?.type.kind === "object" && !type.metadata?.has("db.json");
+  return !!storedObjectType(type) && !type!.metadata?.has("db.json");
 }
 
 /** Whether `type` is a top-level array that takes the array operators — not `@db.json`. */
 function isPatchableArray(type: TAtscriptAnnotatedType | undefined): boolean {
   return !!type?.metadata?.get(TOP_LEVEL_ARRAY_TAG) && !type.metadata.has("db.json");
-}
-
-/** Whether `type` is a stored object with `@db.patch.strategy 'merge'`. */
-function isMergeObject(type: TAtscriptAnnotatedType | undefined): boolean {
-  return isStoredObject(type) && type?.metadata?.get("db.patch.strategy") === "merge";
 }
 
 /** Whether `leaf`, under the replaced object `value` at `parent`, is inside a merge-strategy object the patch gives. */
@@ -136,7 +132,7 @@ function inGivenMergeObject(
     node = (node as Record<string, unknown>)[prop];
     if (!isObjectValue(node)) return false;
     path += `.${prop}`;
-    if (meta.flatMap.get(path)?.metadata?.get("db.patch.strategy") === "merge") return true;
+    if (meta.mergePaths.has(path)) return true;
   }
   return false;
 }
@@ -154,7 +150,7 @@ function carriesLeafWrites(
     if (!isObjectValue(child)) continue;
     const key = `${prefix}.${prop}`;
     const childType = meta.flatMap.get(key);
-    if (isPatchableArray(childType) || isMergeObject(childType)) return true;
+    if (isPatchableArray(childType) || meta.mergePaths.has(key)) return true;
     if (isStoredObject(childType) && carriesLeafWrites(child, key, meta)) return true;
   }
   return false;
@@ -185,8 +181,7 @@ function decomposeReplaceObject(
   update: Record<string, unknown>,
   meta: TableMetadata,
 ): void {
-  const objType = meta.flatMap.get(prefix)!;
-  for (const [prop, propType] of (objType.type as TAtscriptTypeObject).props) {
+  for (const [prop, propType] of storedObjectType(meta.flatMap.get(prefix))!.type.props) {
     const key = `${prefix}.${prop}`;
     if (isPhantomType(propType) || meta.ignoredFields.has(key)) continue;
     const child = value[prop];
@@ -197,7 +192,7 @@ function decomposeReplaceObject(
     const childType = meta.flatMap.get(key);
     if (isObjectValue(child) && isPatchableArray(childType)) {
       decomposeArrayPatch(key, child, childType!, update);
-    } else if (isObjectValue(child) && isMergeObject(childType)) {
+    } else if (isObjectValue(child) && meta.mergePaths.has(key)) {
       flattenPatchPayload(child, key, update, meta);
     } else if (isObjectValue(child) && isStoredObject(childType)) {
       decomposeReplaceObject(child, key, update, meta);

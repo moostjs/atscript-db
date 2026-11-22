@@ -6,6 +6,42 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.184 {#v0-1-184}
+
+### Changes
+
+- **Vector search rows no longer carry `_distance` or `_score`.** `vectorSearch()`, `vectorSearchWithCount()` and HTTP `$vector` reads (`/query`, `/pages`) return `$score` and no engine-specific field: `_distance` (SQLite, PostgreSQL, MySQL) and `_score` (MongoDB, when a threshold applied) are gone. **Affected:** code that reads `_distance` or `_score` from vector search rows. Read `$score` instead; the old values follow from it, up to floating-point rounding:
+
+  | Adapter, metric                                         | Old field   | From `$score`         |
+  | ------------------------------------------------------- | ----------- | --------------------- |
+  | SQLite, PostgreSQL — `cosine` (SQLite `dotProduct` too) | `_distance` | `2 × (1 − $score)`    |
+  | SQLite, PostgreSQL — `euclidean`                        | `_distance` | `1 / $score − 1`      |
+  | PostgreSQL — `dotProduct` (the `<#>` value)             | `_distance` | `1 − 2 × $score`      |
+  | MongoDB — any metric, with a threshold                  | `_score`    | `$score` (same value) |
+
+  See [Result Fields](/search/vector-search#result-fields).
+
+- **A merge strategy applies only where a patch reaches the object by its own path.** Inside an array element, a `@db.json` or `@db.encrypted` field, a union member or a tuple element, a `@db.patch.strategy 'merge'` object is now validated in full, on every adapter and in the [db-client](/http/client) preflight: a patch carrying part of it is rejected with the validation error an insert gives. Before, the partial object passed validation and was stored as sent, without the children it left out — required ones included. A full object is stored as sent, as before; in a member of a union of objects, SQLite, PostgreSQL and MySQL now store it as sent too instead of merging it, as MongoDB and the in-memory adapter did. The same type still merges where a patch reaches it through stored objects. **Affected:** patches that send part of a merge-strategy object in one of these places. Send the whole object there, or store it where a patch reaches it by its path (a nested object of the row). See [Where Merge Applies](/api/update-patch#where-merge-applies).
+- **`$inc` / `$dec` / `$mul` inside an object the merge strategy does not apply to are refused on every adapter**, as they always were inside a plain replace-strategy object: inside a `T | null` object or a member of a union of objects without `@db.patch.strategy 'merge'`, and in a tuple element — also inside a related row (to-one and to-many). Before, inside such a `T | null` object or union member, SQLite, PostgreSQL and MySQL applied the operator (`1` became `2`), while the in-memory adapter and MongoDB stored the operator object as the field's value; in a tuple element the operator passed validation and was stored as the value. **Affected:** apps on SQLite, PostgreSQL or MySQL that increment a field inside a `T | null` object or a union member. Put `@db.patch.strategy 'merge'` on that object, or send the computed value. The refusal is a `FIELD_OP_CONTEXT` entry at the field's path under a tuple or array element; under a `T | null` object or a union member it is the union's validation entry, whose `details` hold the `FIELD_OP_CONTEXT` entry. Through a relation the path starts with the relation field (`author.stats.views`). See [Where Field Ops Do NOT Work](/api/update-patch#where-field-ops-do-not-work).
+- **A `T | null` object is a `T` in patches.** `@db.patch.strategy 'merge'` on a field typed `T | null` with an object `T` now compiles, validates partially and merges on every adapter. A merge-strategy object inside a `T | null` now merges on the in-memory adapter and MongoDB, as it already did on SQL; before, those two stored the `T | null` object as sent, so the merge child lost the children the patch left out, required ones included. Before, the build refused `'merge'` on such a field (`requires a field of type object or array`); a type that carried it anyway (through `annotate`) was validated in full at the top of the row and replaced inside a replaced parent on SQL and MongoDB. Without a merge child, only MongoDB's `updateOne` and `bulkUpdate` write a `T | null` object differently: field by field, like a plain replaced object there, so an optional field the patch leaves out reads back as `null` instead of missing, and stored keys outside the type survive the patch (`{ name, age, extra }` patched with `{ name: "Y" }` keeps `extra`). MongoDB's `updateMany` and the in-memory adapter still set such an object whole, unless the patch carries a merge object or an array operator inside it — the `updateOne` / `updateMany` difference plain replaced objects already have on MongoDB. `'merge'` on `T[] | null` stays a build error: array operators are refused on such a field. **Affected:** tables with `T | null` objects patched on MongoDB, or holding merge-strategy objects.
+- **`@db.patch.strategy 'merge'` on a union of several types has no effect.** The build refuses it (`requires a field of type object or array`); added through `annotate`, it now leaves the value validated in full and replaced whole, where 0.1.183 merged it leaf by leaf.
+- **`@db.patch.strategy 'merge'` where it never applies is a build error**, shown in your editor: on a field that also has `@db.json` or `@db.encrypted`, and written inside an array element or a `@db.json` / `@db.encrypted` field. At runtime such a field is written as one value on every adapter: a `@db.json` field with the merge strategy failed on SQLite with `no such column` while MongoDB and the in-memory adapter merged it, and a table with an `@db.encrypted` field carrying the merge strategy no longer refuses to build. **Affected:** schemas with the annotation in these places; remove it (the default describes what happens), drop `@db.json` to store the object in columns, or put `'merge'` on the array field itself to merge a patched element (one level deep). See [Where Merge Applies](/api/update-patch#where-merge-applies).
+- **`/meta` keeps `@db.encrypted` on the served type**, next to `@db.json` and `@db.patch.strategy`, so the db-client preflight finds where the merge strategy applies as the server does. See [`GET /meta`](/http/crud#get-meta).
+
+### Fixes
+
+- **In-memory adapter: `$update` and `$upsert` on an array renamed with `@db.column` follow its merge strategy.** On a top-level merge-strategy array with a `@db.column` name, an item replaced the matched element; it now merges into it, as on the other adapters.
+- **A stored field named `_distance` or `_score` no longer collides with vector search.** It is returned as stored, and the search ranks by the distance. Before, SQLite ordered the rows by a stored `_distance`, computed `$score` from it and returned the distance as `_distance:1`; PostgreSQL and MySQL could not search such a table, since the search query then held two `_distance` columns; MongoDB replaced a stored `_score` with the score when a threshold applied.
+
+### Documentation
+
+- **MySQL: vector search does not run on current MySQL or MariaDB servers.** On MySQL 9 and later and on every MariaDB server the adapter creates a `VECTOR(N)` column that a vector cannot be written into, and on MariaDB before 11.7 creating it fails. The docs now state what happens on each server; the adapter is unchanged. Use PostgreSQL, SQLite or MongoDB for vector search. See [MySQL vector support](/adapters/mysql#vector-support-mysql-9-0).
+
+### Custom adapters
+
+- `buildPatchPartial(navPaths, mergePaths)` of `@atscript/db/validator` takes the merge paths as a second argument — pass `mergeStrategyPaths(type)`, exported there too. `storedObjectType(type)` of `@atscript/db` returns the object stored behind a field (`T | null` read as `T`) for a native patch that walks nested objects.
+- `VECTOR_DISTANCE_ALIAS` of `@atscript/db-sql-tools` is now `"__atscript_distance"` (was `"_distance"`), and `addVectorScore()` removes that column from the row it scores. An engine-specific row source given to `buildVectorSearchSelect()` / `buildVectorSearchCount()` must select its distance as `VECTOR_DISTANCE_ALIAS`, not as a literal `_distance`. An adapter that overrides `vectorSearch()` / `vectorSearchWithCount()` must return no engine-specific distance or score field next to `$score`. See [`vectorSearch()`](/adapters/creating-adapters#vectorsearch-vector-query-indexname).
+
 ## 0.1.183 {#v0-1-183}
 
 ### Changes
@@ -20,7 +56,7 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 
 ### New
 
-- **`$score` on every vector search row.** `vectorSearch()`, `vectorSearchWithCount()` and HTTP `$vector` reads (`/query`, `/pages`) now return `$score` on every row of every adapter with vector search: higher = closer, on the MongoDB Atlas `vectorSearchScore` scale (`cosine` `(1 + cosine similarity) / 2`, `euclidean` `1 / (1 + distance)`, `dotProduct` `(1 + dot product) / 2`). It is the threshold's scale, so every returned row's `$score` reaches the threshold (up to floating-point rounding). It is returned whatever the `$select`, typed `& { $score: number }` on the table methods, and typed on the rows of a `Client.query()` / `pages()` call whose controls hold `$search` and `$vector`. The engine-specific fields stay as they were — `_distance` on SQLite, PostgreSQL and MySQL, `_score` on MongoDB when a threshold applies — so code that reads them keeps working; move to `$score`, which compares across adapters and metrics. On MongoDB the score is now read without a threshold too. See [Result Fields](/search/vector-search#result-fields).
+- **`$score` on every vector search row.** `vectorSearch()`, `vectorSearchWithCount()` and HTTP `$vector` reads (`/query`, `/pages`) now return `$score` on every row of every adapter with vector search: higher = closer, on the MongoDB Atlas `vectorSearchScore` scale (`cosine` `(1 + cosine similarity) / 2`, `euclidean` `1 / (1 + distance)`, `dotProduct` `(1 + dot product) / 2`). It is the threshold's scale, so every returned row's `$score` reaches the threshold (up to floating-point rounding). It is returned whatever the `$select`, typed `& { $score: number }` on the table methods, and typed on the rows of a `Client.query()` / `pages()` call whose controls hold `$search` and `$vector`. The engine-specific fields stay as they were (removed in [0.1.184](#v0-1-184)) — `_distance` on SQLite, PostgreSQL and MySQL, `_score` on MongoDB when a threshold applies — so code that reads them keeps working; move to `$score`, which compares across adapters and metrics. On MongoDB the score is now read without a threshold too. See [Result Fields](/search/vector-search#result-fields).
 
 ### Fixes
 
@@ -49,7 +85,7 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 
 ### Documentation
 
-- **Vector search rows carry an engine-specific extra field:** `_distance` on SQLite, PostgreSQL and MySQL, and `_score` on MongoDB when a threshold applies. It is now documented with its scale per adapter and its `$select` rules. See [Result Fields](/search/vector-search#result-fields).
+- **Vector search rows carry an engine-specific extra field** (removed in [0.1.184](#v0-1-184)): `_distance` on SQLite, PostgreSQL and MySQL, and `_score` on MongoDB when a threshold applies. It is now documented with its scale per adapter and its `$select` rules. See [Result Fields](/search/vector-search#result-fields).
 
 ### Custom adapters
 
@@ -515,7 +551,7 @@ The first sync moves the stored values into the new layout — see [Union column
 - **A unique index over a `T | null` field, or over a field inside an optional or `| null` object, is present-only on MongoDB and the in-memory adapter.** Several rows without a value no longer conflict, as on the SQL adapters. MongoDB rebuilds such indexes with a `partialFilterExpression` on the first sync.
 - **`T | null` fields can hold NULL for `$nulls`** — a `$nulls` / `@db.sort.nulls` entry on one is applied (it was dropped as "not nullable"), and a unique index over one no longer counts as a total order for the [primary-key tie-breaker](/api/queries#tie-breaker), so the primary key is appended to such sorts.
 - **Setting an optional or `| null` object to `null` in a patch clears its columns** on the SQL adapters. It used to fail with an unknown-column error.
-- **MongoDB replaces object values whole in patches.** A `@db.json` object, a union of objects or a `T | null` object in a patch replaces the stored object, also under a `@db.column` name (a plain nested object keeps its `@db.patch.strategy`). Before, the update pipeline merged it into the stored object, so switching `payment` from a card to a bank payment kept `card`.
+- **MongoDB replaces object values whole in patches.** A `@db.json` object, a union of objects or a `T | null` object (in `updateOne` and `bulkUpdate` written field by field since [0.1.184](#v0-1-184)) in a patch replaces the stored object, also under a `@db.column` name (a plain nested object keeps its `@db.patch.strategy`). Before, the update pipeline merged it into the stored object, so switching `payment` from a card to a bank payment kept `card`.
 - **JSON string values round-trip on PostgreSQL and MySQL.** A JSON column holding a string (a string member of a mixed union, or a `@db.json` field typed as a string) failed to parse on read, or came back as another type (`"5"` as `5`). `Mysql2Driver` now reads JSON columns as text (`jsonStrings: true`, and in its `typeCast`) — pass `jsonStrings: true` to a `mysql2` pool you create yourself, or a JSON string value read through it fails to parse or changes type.
 
 ### What the first schema sync changes {#v0-1-155-sync}

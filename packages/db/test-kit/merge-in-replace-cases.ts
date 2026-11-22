@@ -157,7 +157,7 @@ const mergeInReplaceCases: Array<
 ];
 
 /** `value` without its `null` properties (and MongoDB's `_id`), at every depth. */
-function withoutNulls(value: unknown): unknown {
+export function withoutNulls(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(withoutNulls);
   if (value === null || typeof value !== "object") return value;
   const out: Record<string, unknown> = {};

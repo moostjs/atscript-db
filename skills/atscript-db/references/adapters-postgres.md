@@ -106,7 +106,7 @@ interface Document {
 
   ≤ 0.1.182: euclidean `distance <= s`, dotProduct `<#> <= −s` (`dot >= s`). A row whose vector column is NULL is never returned or counted (≤ 0.1.182 it came last with `_distance: null`).
 
-- Rows carry `$score` + `_distance` = the operator's result (lower = closer); both kept under any `$select` → [crud.md § Search](crud.md#search).
+- Rows carry `$score`, kept under any `$select`; no `_distance` since 0.1.184 → [crud.md § Search](crud.md#search).
 - Pre-filter fields (`@db.search.filter 'doc_vec'`) are added to the SQL `WHERE` before the vector op.
 - Requires `CREATE EXTENSION IF NOT EXISTS vector;`.
 

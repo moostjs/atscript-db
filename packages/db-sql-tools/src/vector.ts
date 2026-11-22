@@ -2,11 +2,14 @@ import type { UniquSelect } from "@atscript/db";
 
 import type { SqlDialect, TSqlFragment } from "./dialect";
 import { finalizeParams } from "./dialect";
-import { SEARCH_SOURCE_ALIAS } from "./geo";
+import { GEO_DISTANCE_ALIAS, SEARCH_SOURCE_ALIAS } from "./geo";
 import { buildProjection } from "./sql-builder";
 
-/** Column every vector search row carries: the engine's distance to the query vector. */
-export const VECTOR_DISTANCE_ALIAS = "_distance";
+/**
+ * Internal alias for the engine's distance column in vector search queries,
+ * the same as geo's: {@link addVectorScore} turns it into the public `$score`.
+ */
+export const VECTOR_DISTANCE_ALIAS = GEO_DISTANCE_ALIAS;
 
 /**
  * A similarity metric with a `$score` scale, by its distance (lower = closer):
@@ -57,9 +60,9 @@ export function vectorMaxDistance(metric: TVectorMetric, threshold: number): num
 }
 
 /**
- * Adds `$score` to a vector search row (in place) from its `_distance`, which
- * stays. Every row has a distance: a row source never yields one without
- * ({@link vectorDistanceSource}).
+ * Replaces a vector search row's {@link VECTOR_DISTANCE_ALIAS} column with
+ * `$score` (in place). Every row has a distance: a row source never yields
+ * one without ({@link vectorDistanceSource}).
  * @since 0.1.183
  */
 export function addVectorScore(
@@ -67,6 +70,7 @@ export function addVectorScore(
   metric: TVectorMetric,
 ): Record<string, unknown> {
   row.$score = vectorScoreFromDistance(metric, Number(row[VECTOR_DISTANCE_ALIAS]));
+  delete row[VECTOR_DISTANCE_ALIAS];
   return row;
 }
 
@@ -79,8 +83,8 @@ const SOURCE_ALIAS = "_v";
  * never returned nor counted):
  *
  * ```sql
- * SELECT * FROM (SELECT t.*, <distExpr> AS _distance FROM <table> t WHERE <where>) _d
- * WHERE _distance IS NOT NULL
+ * SELECT * FROM (SELECT t.*, <distExpr> AS __atscript_distance FROM <table> t WHERE <where>) _d
+ * WHERE __atscript_distance IS NOT NULL
  * ```
  *
  * `withRows: false` selects the distance only (the count companion).
@@ -126,19 +130,19 @@ function outerWhere(
 
 /**
  * Builds a distance-ranked vector search SELECT over a row source that
- * carries a `_distance` column ({@link vectorDistanceSource}, or an
- * engine-specific one such as a vector-index join):
+ * carries a {@link VECTOR_DISTANCE_ALIAS} column ({@link vectorDistanceSource},
+ * or an engine-specific one such as a vector-index join):
  *
  * ```sql
- * SELECT <_v.cols, _v._distance | *> FROM (<source>) _v
- * [WHERE _distance <= ? [AND (<residual>)]]
- * ORDER BY _distance ASC LIMIT ? [OFFSET ?]
+ * SELECT <_v.cols, _v.__atscript_distance | *> FROM (<source>) _v
+ * [WHERE __atscript_distance <= ? [AND (<residual>)]]
+ * ORDER BY __atscript_distance ASC LIMIT ? [OFFSET ?]
  * ```
  *
  * `$select` projects the OUTER query exactly like `buildSelect` does
  * (inclusion and exclusion forms, resolved by `UniquSelect.asArray`), so a
- * residual filter still sees every source column; `_distance` is always
- * returned. `maxDistance` is the threshold on the engine's distance scale;
+ * residual filter still sees every source column; the distance column is
+ * always selected. `maxDistance` is the threshold on the engine's distance scale;
  * a `residual` filter references the source's columns qualified by `_v`.
  * Placeholders are finalized for the dialect.
  * @since 0.1.143

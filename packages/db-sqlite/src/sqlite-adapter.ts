@@ -76,6 +76,7 @@ import {
   replaceColumnsFor,
   SEARCH_SOURCE_ALIAS,
   fromSourceSql,
+  VECTOR_DISTANCE_ALIAS,
   vectorMaxDistance,
   viewReadSource,
   type TSqlFromSource,
@@ -2195,7 +2196,7 @@ export class SqliteAdapter extends BaseDbAdapter {
 
     return {
       source: {
-        sql: `SELECT t.*, v.distance AS _distance FROM "${esc(vecTable)}" v JOIN "${esc(tableName)}" t ON t.rowid = v.rowid WHERE ${innerWhereParts.join(" AND ")}`,
+        sql: `SELECT t.*, v.distance AS "${VECTOR_DISTANCE_ALIAS}" FROM "${esc(vecTable)}" v JOIN "${esc(tableName)}" t ON t.rowid = v.rowid WHERE ${innerWhereParts.join(" AND ")}`,
         params,
       },
       limit,

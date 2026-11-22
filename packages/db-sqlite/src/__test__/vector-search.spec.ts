@@ -5,6 +5,7 @@ import { SqliteAdapter } from "../sqlite-adapter";
 import { BetterSqlite3Driver } from "../better-sqlite3-driver";
 
 import { prepareFixtures } from "./test-utils";
+import { expectAtLeast, expectDescending } from "../../../db/test-kit/vector-score-data";
 
 // Skip the real-extension suite when sqlite-vec can't load (CI without
 // prebuilt binaries). The JSON-TEXT fallback path is covered by the
@@ -214,15 +215,15 @@ dscribe("SqliteAdapter vector search (real sqlite-vec)", () => {
         controls: { $limit: 1 },
       } as any);
       expect((nearNew[0] as any).id).toBe("d1");
-      const distNew = (nearNew[0] as any)._distance as number;
+      const scoreNew = (nearNew[0] as any).$score as number;
 
       // Search for the OLD direction — the same row should now be far away
       const nearOld = await adapter.vectorSearch(basis(DIMS_512, 0), {
         filter: {},
         controls: { $limit: 1 },
       } as any);
-      const distOld = (nearOld[0] as any)._distance as number;
-      expect(distOld).toBeGreaterThan(distNew);
+      const scoreOld = (nearOld[0] as any).$score as number;
+      expect(scoreOld).toBeLessThan(scoreNew);
     });
 
     it("deletes row → vec0 row disappears", async () => {
@@ -319,11 +320,7 @@ dscribe("SqliteAdapter vector search (real sqlite-vec)", () => {
       } as any);
       expect(results).toHaveLength(4);
 
-      // Ascending order by _distance
-      const distances = results.map((r) => (r as any)._distance as number);
-      for (let i = 1; i < distances.length; i++) {
-        expect(distances[i]).toBeGreaterThanOrEqual(distances[i - 1]);
-      }
+      expectDescending(results as any);
 
       // Closest is the exact-match basis vector
       expect((results[0] as any).id).toBe("v0");
@@ -358,9 +355,7 @@ dscribe("SqliteAdapter vector search (real sqlite-vec)", () => {
         controls: { $limit: 10, $threshold: 0.9 },
       } as any);
       expect(strict.length).toBeGreaterThanOrEqual(1);
-      for (const r of strict) {
-        expect((r as any)._distance as number).toBeLessThanOrEqual(0.2 + 1e-6);
-      }
+      expectAtLeast(strict as any, 0.9);
       const strictIds = strict.map((r) => (r as any).id);
       expect(strictIds).toContain("v0");
       expect(strictIds).not.toContain("vneg0");
@@ -659,9 +654,9 @@ dscribe("SqliteAdapter vector search (real sqlite-vec)", () => {
       expect((results[1] as any).id).toBe("near");
       expect((results[2] as any).id).toBe("far");
 
-      const distances = results.map((r) => (r as any)._distance as number);
-      expect(distances[0]).toBeLessThan(distances[1]);
-      expect(distances[1]).toBeLessThan(distances[2]);
+      const scores = results.map((r) => (r as any).$score as number);
+      expect(scores[0]).toBeGreaterThan(scores[1]);
+      expect(scores[1]).toBeGreaterThan(scores[2]);
     });
 
     it("treats the threshold as a score, 1 / (1 + distance), not a distance (since 0.1.183)", async () => {
@@ -682,7 +677,6 @@ dscribe("SqliteAdapter vector search (real sqlite-vec)", () => {
       expect(ids).not.toContain("far");
 
       for (const r of results) {
-        expect((r as any)._distance as number).toBeLessThanOrEqual(1.0 + 1e-6);
         expect(r.$score).toBeGreaterThanOrEqual(0.5 - 1e-6);
       }
     });

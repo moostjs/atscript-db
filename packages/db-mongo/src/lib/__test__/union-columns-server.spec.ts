@@ -95,7 +95,10 @@ describe("MongoAdapter — union fields", () => {
     expect(await noteIds({ meta: { $exists: true } })).toEqual([2]);
   });
 
-  it("patches: a renamed merge object merges; @db.json and `T | null` objects are replaced", async () => {
+  // Since 0.1.184 a `T | null` object is written field by field like any
+  // nested object (an omitted optional field reads back as `null`); before,
+  // it was replaced whole.
+  it("patches: a renamed merge object merges; @db.json objects are replaced, `T | null` ones written field by field", async () => {
     const profiles = space.getTable(fx.UcProfile);
     const full = { name: "A", age: 1 };
     await profiles.insertOne({
@@ -117,9 +120,9 @@ describe("MongoAdapter — union fields", () => {
     const row = (await profiles.findOne({ filter: { id: 1 } } as any)) as Record<string, any>;
     expect(row.merged).toEqual({ name: "A", age: 5 });
     expect(row.blob).toEqual({ name: "B" });
-    expect(row.maybe).toEqual({ name: "C" });
+    expect(row.maybe).toEqual({ name: "C", age: null });
     // renamed (`@db.column`): replaced under the stored name too
     expect(row.rblob).toEqual({ name: "D" });
-    expect(row.rmaybe).toEqual({ name: "E" });
+    expect(row.rmaybe).toEqual({ name: "E", age: null });
   });
 });

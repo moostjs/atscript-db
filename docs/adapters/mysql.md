@@ -6,7 +6,7 @@ outline: deep
 
 <!--@include: ../_experimental-warning.md-->
 
-The MySQL adapter (`@atscript/db-mysql`) connects your `.as` models to MySQL and MariaDB databases via the `mysql2` driver. MySQL offers wide hosting availability, native FULLTEXT indexes for text search, `VECTOR(N)` columns in MySQL 9.0+, and in-place column modification through `ALTER TABLE MODIFY COLUMN`.
+The MySQL adapter (`@atscript/db-mysql`) connects your `.as` models to MySQL and MariaDB databases via the `mysql2` driver. MySQL offers wide hosting availability, native FULLTEXT indexes for text search, and in-place column modification through `ALTER TABLE MODIFY COLUMN`. Vector search does not run on current MySQL or MariaDB servers — see [Vector Support](#vector-support-mysql-9-0).
 
 ## Installation
 
@@ -169,7 +169,7 @@ The editor completes the common engines and character sets, but the lists are no
 | `@db.json`                            | `JSON`                                    | Stored as a single JSON column; descendant paths are not queryable (400 since 0.1.128)                                                                        |
 | Arrays                                | `JSON`                                    | Same — select the column as a whole; filters accept only `$exists` (since 0.1.132)                                                                            |
 | `@db.default.uuid`                    | `CHAR(36)`                                | Generated client-side via `crypto.randomUUID()`; `VARCHAR(N)` with `@expect.maxLength` — see [uuid columns](#uuid-columns)                                    |
-| `@db.search.vector`                   | `VECTOR(N)`                               | MySQL 9.0+; falls back to `JSON` on older versions                                                                                                            |
+| `@db.search.vector`                   | `VECTOR(N)`                               | On MySQL 9 and later and on every MariaDB server; `JSON` on MySQL 8 — see [Vector Support](#vector-support-mysql-9-0)                                         |
 | `db.geoPoint`                         | `POINT SRID 4326`                         | Native geographic point. See [Geo Search](/search/geo-search)                                                                                                 |
 
 To filter, sort or group by a leaf inside a `@db.json` column, expose it as a [typed view field](/views/#reading-json-leaves).
@@ -320,53 +320,27 @@ A composite key uses a row-value `IN`; a table without a primary key falls back 
 MySQL FULLTEXT indexes do not support explicit column ordering. Atscript omits the ASC/DESC modifiers for FULLTEXT index fields automatically.
 :::
 
-## Vector Support (MySQL 9.0+)
+## Vector Support {#vector-support-mysql-9-0}
 
-MySQL 9.0 introduced native `VECTOR(N)` columns for storing fixed-dimension vectors. The adapter auto-detects the server version and uses native vector columns when available.
-
-```atscript
-@db.table "documents"
-export interface Document {
-  @meta.id
-  id: string
-
-  title: string
-
-  @db.search.vector 1536, "cosine"
-  embedding: number[]
-}
-```
-
-### Distance Metrics
-
-| Similarity         | MySQL Function           | Description             |
-| ------------------ | ------------------------ | ----------------------- |
-| `cosine` (default) | `VEC_DISTANCE_COSINE`    | Cosine distance         |
-| `euclidean`        | `VEC_DISTANCE_EUCLIDEAN` | L2 / Euclidean distance |
-| `dotProduct`       | —                        | Not supported (refused) |
-
-### Runtime Search
-
-```typescript
-const results = await table.vectorSearch(queryEmbedding, {
-  filter: { status: "published" },
-  controls: { $limit: 10, $threshold: 0.8 },
-});
-```
-
-The `$threshold` parameter is a minimum `$score` (0--1) matching MongoDB Atlas semantics. The adapter converts it to the distance it allows: for cosine `distance <= 2 × (1 − threshold)`, for euclidean `distance <= 1 / threshold − 1` (since 0.1.183; before, the cosine conversion was used; a threshold of `0` or below caps nothing).
-
-Each row carries `$score` (since 0.1.183, higher = closer) and `_distance`, the distance function's result for that row (lower = closer). See [Result fields](/search/vector-search#result-fields).
-
-`dotProduct` vector search is not supported on MySQL: the call is refused with `DbError("INVALID_QUERY")` (HTTP 400) before any query runs (since 0.1.183; before, it failed in the database). For normalized vectors, `cosine` gives the same order.
-
-### Graceful Fallback
-
-On MySQL versions prior to 9.0, vector fields are stored as `JSON` instead. The data is preserved, but indexed similarity search is not available — `vectorSearch()` will throw an error.
-
-::: tip
-Check your MySQL version with `SELECT VERSION()`. Vector support requires MySQL 9.0 or later.
+::: warning Vector search does not run on current MySQL or MariaDB servers
+The adapter's search query computes the distance with `VEC_DISTANCE_COSINE()` / `VEC_DISTANCE_EUCLIDEAN()`, which only MariaDB has, over `STRING_TO_VECTOR()`, which only MySQL has, so it fails on every server. Use [PostgreSQL](./postgresql), [SQLite](./sqlite) or [MongoDB](./mongodb) for vector search.
 :::
+
+What a `@db.search.vector` field does on each server:
+
+| Server                 | Column (schema sync)                                      | Writing a vector | `vectorSearch()`                                    |
+| ---------------------- | --------------------------------------------------------- | ---------------- | --------------------------------------------------- |
+| MySQL 8.x              | `JSON`                                                    | Works            | Throws `Vector search requires MySQL 9.0+`          |
+| MariaDB 10.x to 11.6   | `VECTOR(N)` — fails: these versions have no `VECTOR` type | —                | —                                                   |
+| MySQL 9.0 and later    | `VECTOR(N)`                                               | Does not work    | Fails: MySQL has no `VEC_DISTANCE_*` functions      |
+| MariaDB 11.7 and later | `VECTOR(N)`                                               | Does not work    | Fails: MariaDB has no `STRING_TO_VECTOR()` function |
+
+- **Column type.** The adapter creates `VECTOR(N)` when `SELECT VERSION()` starts with 9 or a higher number — every MariaDB release does (`10.11.6-MariaDB`) — and `JSON` otherwise, that is on MySQL 8. It creates no vector index.
+- **Writes.** The adapter sends a vector as JSON text. A `VECTOR` column holds binary float32 values and takes text only through a conversion function (`STRING_TO_VECTOR()` on MySQL, `VEC_FromText()` on MariaDB), which the adapter does not call, so a vector cannot be stored in a `VECTOR(N)` column.
+- **Distance functions.** MySQL's only vector distance function, `DISTANCE()`, is available on MySQL HeatWave on OCI and MySQL AI, not in the Community or Commercial servers. MariaDB has `VEC_DISTANCE_EUCLIDEAN()` and `VEC_DISTANCE_COSINE()`, and no dot-product distance.
+- **`isVectorSearchable()`** reports `true` on MySQL 9 and later and on MariaDB, once the adapter has read the version (at schema sync or the first search), although the search fails there.
+- **`dotProduct`** indexes are refused with `DbError("INVALID_QUERY")` (HTTP 400) before any query runs, on MySQL 9 and later and on MariaDB (since 0.1.183).
+- **Storing embeddings without searching them:** declare the field `number[]` without `@db.search.vector`. It is a `JSON` column on every server.
 
 ## In-Place Column Modification
 
@@ -554,6 +528,7 @@ which MySQL materializes first. The rewrite needs a primary key; a table without
 - **`AUTO_INCREMENT` in a composite key must be the first key column** — InnoDB requires an auto-increment column to lead an index, so `(seq, tenantId)` works and `(tenantId, seq)` is refused at sync time (an `error` entry). The generated part is reported in `insertedId` for one-row inserts only; a multi-row insert reports `undefined` for it (see [Composite primary keys](/api/crud#insert-composite-id))
 - **Auto-increment gaps in batch inserts** — with `innodb_autoinc_lock_mode=2` (the MySQL 8.0+ default), concurrent inserts may cause gaps in auto-increment sequences during multi-row inserts
 - **No native boolean** — booleans are stored as `TINYINT(1)` (`0`/`1`)
+- **No vector search** — the search query fails on every current MySQL and MariaDB server, and on MySQL 9 and later and on MariaDB a vector cannot be written; see [Vector Support](#vector-support-mysql-9-0)
 - **Key length prefix** — InnoDB limits an index key part to 3072 bytes (`ROW_FORMAT=DYNAMIC`/`COMPRESSED`, the default since 5.7.7), i.e. **768 characters on `utf8mb4`** (1024 on `utf8mb3`, 3072 on `latin1`). Since 0.1.128 the adapter derives the prefix from the **mapped column type**: `VARCHAR(n)`/`CHAR(n)` within the limit get **no prefix**; longer ones get the full limit (`(768)` on utf8mb4); `TEXT`/`BLOB` families always get `(255)`; numeric, `ENUM`, `JSON`, `VECTOR`, geometry and `FULLTEXT` members never get one. Earlier releases put `(255)` on every string member — which failed on `VARCHAR(128)`/`CHAR(1)` (`ER_WRONG_SUB_KEY`) and, on a **unique** index over a `VARCHAR(300)`, silently enforced uniqueness over the first 255 characters only. The character set is the column's own (`@db.mysql.charset` on the field, a foreign-key column's referenced one), else the table's — a `latin1` `VARCHAR(1000)` is indexed in full. Live indexes whose prefix differs from the rule (`INFORMATION_SCHEMA.STATISTICS.SUB_PART`, with a prefix equal to the column's declared length treated as none) are rebuilt once; a column that changes to a type needing a prefix (a unique string losing its `@expect.maxLength`) has its full indexes dropped before the change and re-created with the prefix. Declare `@expect.maxLength` on unique string fields so they map to `VARCHAR(n)` and are indexed in full; a composite index whose members exceed 3072 bytes in total fails with the engine's `ER_TOO_LONG_KEY` as an `error` entry
 
 ## See Also

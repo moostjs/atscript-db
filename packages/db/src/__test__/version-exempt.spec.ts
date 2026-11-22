@@ -392,6 +392,19 @@ export interface VxdT {
     expect(d.some((m) => m.severity === 1 && /array field 'items'/.test(m.message))).toBe(true);
   });
 
+  it("E5 — an @db.encrypted object in between does not hide the array", async () => {
+    const d = await diagnosticsFor(
+      table(`items: {
+        @db.encrypted
+        e: {
+            @db.column.version.exempt
+            x?: string
+        }
+    }[]`),
+    );
+    expect(d.some((m) => m.severity === 1 && /array field 'items'/.test(m.message))).toBe(true);
+  });
+
   it("E6 — with @db.column.derived", async () => {
     const d = await diagnosticsFor(`
 @db.table 'vxd_t'

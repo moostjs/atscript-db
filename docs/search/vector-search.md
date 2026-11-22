@@ -148,27 +148,16 @@ const rows = await docs.vectorSearch(queryVector, {
 - **Threshold:** a row is returned only when its `$score` reaches the threshold (`$threshold`, else `@db.search.vector.threshold`), up to floating-point rounding. Without a `$sort`, rows come closest first, so `$score` falls along the result.
 - **`$select`:** `$score` is returned whatever the `$select`, in its inclusion and exclusion forms. It is not a field you can name: `$select: ["title", "$score"]` fails with `Unknown field "$score"`.
 - **Everywhere:** the rows of `vectorSearchWithCount()` carry it, and so do the rows of `$vector` requests over HTTP (`/query` and `/pages`). `vectorSearch()` and `vectorSearchWithCount()` type their rows `& { $score: number }`, and the [browser client](/http/client) types it on `query()` / `pages()` rows of a query with `$search` and `$vector`.
-- **MySQL `dotProduct`:** not supported — the search is refused with `INVALID_QUERY`; see [MySQL vector support](/adapters/mysql#vector-support-mysql-9-0).
+- **MySQL:** vector search does not run on current MySQL or MariaDB servers; see [MySQL vector support](/adapters/mysql#vector-support-mysql-9-0).
+
+`$score` is the only field a vector search adds to a row. Before 0.1.184 rows also carried an engine-specific field — `_distance` on SQLite, PostgreSQL and MySQL, `_score` on MongoDB when a threshold applied. [Upgrading](/guide/upgrading#v0-1-184) shows how to compute those values from `$score`. A stored field of yours named `_distance` or `_score` is now an ordinary field.
 
 The in-memory adapter has no vector search.
-
-#### Engine-specific fields {#engine-specific-fields}
-
-Rows also keep the field each adapter returned before 0.1.183, unchanged, for code that already reads it. Read `$score` in new code.
-
-| Adapter    | Field       | Value                                                                                                                                                                                                     | Present                                                                                                        |
-| ---------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| SQLite     | `_distance` | The `sqlite-vec` distance, lower = closer. `cosine`: `1 − cosine similarity`, `0` to `2`. `euclidean`: the straight-line distance. `dotProduct` gets the cosine value.                                    | On every row, whatever the `$select`                                                                           |
-| PostgreSQL | `_distance` | The pgvector operator's result, lower = closer. `cosine` (`<=>`): `1 − cosine similarity`, `0` to `2`. `euclidean` (`<->`): the straight-line distance. `dotProduct` (`<#>`): the negative inner product. | On every row, whatever the `$select`                                                                           |
-| MySQL      | `_distance` | The `VEC_DISTANCE_*` result of the index's metric, lower = closer. `cosine`: `1 − cosine similarity`, `0` to `2`. `euclidean`: the straight-line distance.                                                | On every row, whatever the `$select`                                                                           |
-| MongoDB    | `_score`    | Atlas `vectorSearchScore` — the value of `$score`.                                                                                                                                                        | Only when a threshold applies (`@db.search.vector.threshold` or `$threshold`); an inclusion `$select` drops it |
 
 DOs and DON'Ts:
 
 - **Do cut far rows with `$threshold`**, not by filtering rows on `$score` yourself: the threshold applies before the page is cut, so pages and counts stay right.
 - **Do use normalized vectors with `dotProduct`.** With other vectors the score can leave `0`–`1`, and one threshold means a different closeness for vectors of different lengths.
-- **Don't compare `_distance` across adapters or metrics.** Each engine has its own distance scale; `$score` is the portable value.
-- **Don't declare a field named `_distance` (SQLite, PostgreSQL, MySQL) or `_score` (MongoDB) on a table you vector-search.** The name collides with the result field. On SQLite, the search then orders the rows by your stored field instead of the distance, computes `$score` from that field, and returns the distance as `_distance:1`. On MongoDB, the score replaces your stored value in the results whenever a threshold applies.
 
 ### Overriding Threshold at Query Time
 
@@ -299,7 +288,7 @@ Cosine similarity is the default and works well for most text embedding models (
 | -------------- | --------------------------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **PostgreSQL** | `vector(N)` via pgvector                                                          | HNSW index            | Auto-provisions pgvector extension; distance operators `<->`, `<#>`, `<=>`                                                                                               |
 | **MongoDB**    | Embedded array                                                                    | Atlas `$vectorSearch` | Requires Atlas M10+ cluster                                                                                                                                              |
-| **MySQL**      | `VECTOR(N)`                                                                       | Native (9.0+)         | `VEC_DISTANCE_*` functions                                                                                                                                               |
+| **MySQL**      | `VECTOR(N)` on MySQL 9 and later and on MariaDB; `JSON` on MySQL 8                | None                  | **Vector search does not run** on current MySQL or MariaDB servers — see [MySQL vector support](/adapters/mysql#vector-support-mysql-9-0)                                |
 | **SQLite**     | Float32 `BLOB` when `sqlite-vec` is loaded (since 0.1.178); JSON `TEXT` otherwise | `vec0` virtual table  | Requires the `sqlite-vec` extension; falls back to JSON storage without it. Older rows and read-back precision: [SQLite vector storage](/adapters/sqlite#vector-storage) |
 
 ::: warning SQLite vector search requires `sqlite-vec`

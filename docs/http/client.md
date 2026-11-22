@@ -950,6 +950,8 @@ For form and plugin code, `@atscript/db/validator` exports `isServerStampedOnUpd
 
 Patch preflight is **merge-aware** (since 0.1.124), mirroring the server's update validation exactly: a nested [`@db.patch.strategy 'merge'`](../api/update-patch#embedded-object-patches) block validates as a deep partial — absent required keys (e.g. server-stamped fields) pass, present keys are still type-checked — while non-merge nested objects keep full validation, since they are `$set` as a whole. Insert and replace always validate the full shape.
 
+A form or patch builder decides the same way where it may send a partial object: `mergeStrategyPaths(type)` from `@atscript/db/validator` (since 0.1.184) returns the dot-paths (no array indices) of the objects and arrays whose merge strategy applies — those a patch reaches by their own path, as [Where Merge Applies](/api/update-patch#where-merge-applies) describes. A patch may leave children out of an object only when its path is in the set; any other nested object is sent whole. On the client, pass the deserialized `/meta` type.
+
 ### Lenient writes (projected metas) {#lenient-writes}
 
 When the served `/meta` type is a **projection** of the full server-side type (e.g. an ARBAC read overlay strips fields the caller may write but not read), strict preflight rejects legitimate writes carrying those fields. Opt into tolerance for _unknown_ properties on writes — required fields and formats stay enforced, and the server remains authoritative:

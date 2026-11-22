@@ -25,6 +25,7 @@ export function isVersionExemptPatch(
   // Metadata read once per patch, not per key.
   const primaryKeys = meta.primaryKeys;
   const flatMap = meta.flatMap;
+  const mergePaths = meta.mergePaths;
   // The SDK's own `@db.onUpdate.now` / `@db.onUpdate.inc` stamps neither make
   // nor break exemption.
   const stamps = meta.onUpdateNow;
@@ -45,8 +46,7 @@ export function isVersionExemptPatch(
         isObjectValue &&
         !isDbFieldOp(value) &&
         !flatType?.metadata?.get(TOP_LEVEL_ARRAY_TAG) &&
-        !flatType?.metadata?.has("db.json") &&
-        flatType?.metadata?.get("db.patch.strategy") === "merge"
+        mergePaths.has(key)
       ) {
         const inner = walk(value as Record<string, unknown>, key);
         if (inner === "versioned") return "versioned";

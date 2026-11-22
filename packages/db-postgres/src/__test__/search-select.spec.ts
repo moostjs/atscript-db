@@ -55,19 +55,19 @@ describe("[postgres] geoSearch $select", () => {
 });
 
 describe("[postgres] vectorSearch $select", () => {
-  it("projects inclusion and exclusion forms, keeping _distance", async () => {
+  it("projects inclusion and exclusion forms, keeping the distance column", async () => {
     const { driver, table } = await makeTable(fx.SsDoc);
     await table.vectorSearch(VEC, { filter: {}, controls: { $select: ["id"] } });
     // The projection applies to the outer query; the ranked source reads the rows.
     expect(searchSql(driver, "::vector")).toContain(
-      `SELECT "_v"."id", "_v"."_distance" FROM (SELECT * FROM (SELECT "t".*, ("embedding" <=> $1::vector) AS "_distance"`,
+      `SELECT "_v"."id", "_v"."__atscript_distance" FROM (SELECT * FROM (SELECT "t".*, ("embedding" <=> $1::vector) AS "__atscript_distance"`,
     );
 
     driver.calls.length = 0;
     await table.vectorSearchWithCount(VEC, { filter: {}, controls: { $select: { pin: 0 } } });
     const sql = searchSql(driver, "::vector");
     expect(sql).toContain(
-      `SELECT "_v"."id", "_v"."title", "_v"."embedding", "_v"."_distance" FROM`,
+      `SELECT "_v"."id", "_v"."title", "_v"."embedding", "_v"."__atscript_distance" FROM`,
     );
     expect(sql).not.toContain(`"pin"`);
   });
@@ -76,7 +76,7 @@ describe("[postgres] vectorSearch $select", () => {
     const { driver, table } = await makeTable(fx.SsDoc);
     await table.vectorSearch(VEC, { filter: {}, controls: {} });
     expect(searchSql(driver, "::vector")).toContain(
-      `SELECT * FROM (SELECT "t".*, ("embedding" <=> $1::vector) AS "_distance"`,
+      `SELECT * FROM (SELECT "t".*, ("embedding" <=> $1::vector) AS "__atscript_distance"`,
     );
   });
 });
