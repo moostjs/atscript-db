@@ -50,7 +50,9 @@ describe("[mongo] classic text index with integer members", () => {
       },
     });
     // textScore stays valid; equality-only rows have no score and sort last
-    expect(pipeline()).toContainEqual({ $addFields: { _score: { $meta: "textScore" } } });
+    expect(pipeline()).toContainEqual({
+      $addFields: { __atscript_score: { $meta: "textScore" } },
+    });
   });
 
   it("a non-integer term is the plain $text match", async () => {

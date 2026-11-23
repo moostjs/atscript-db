@@ -18,6 +18,8 @@ let client: MongoClient;
 const t = (type: unknown): any => space.getTable(type as never);
 const ids = (rows: Array<Record<string, unknown>>) =>
   rows.map((r) => r.id as number).toSorted((a, b) => a - b);
+const byId = (rows: Array<Record<string, unknown>>) =>
+  rows.toSorted((a, b) => (a.id as number) - (b.id as number));
 
 beforeAll(async () => {
   await prepareFixtures();
@@ -95,6 +97,20 @@ describe("[mongo] integer fulltext members (real server)", () => {
       controls: { $groupBy: ["title"], $count: true, $search: "2946" },
     });
     expect(agg[0].count).toBe(3);
+  });
+
+  // Since 0.1.185 a row carries no score field (before, rows carried `_score`).
+  it.each([
+    ["no $select", {}],
+    ["an inclusion $select", { $select: ["id", "title"] }],
+    ["an exclusion $select", { $select: { alt_no: 0 } }],
+  ])("search rows are the rows findMany returns, with %s", async (_, controls) => {
+    const stored = byId(
+      await t(fx.NsItem).findMany({ filter: { id: { $in: [2, 3, 6] } }, controls }),
+    );
+    expect(stored).toHaveLength(3);
+    expect(byId(await t(fx.NsItem).search("2946", { controls }))).toEqual(stored);
+    expect(byId((await t(fx.NsItem).searchWithCount("2946", { controls })).data)).toEqual(stored);
   });
 
   it("an integer-only index matches by number and nothing else", async () => {

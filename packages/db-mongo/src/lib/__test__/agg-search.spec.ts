@@ -129,14 +129,13 @@ describe("[mongo] grouped $search — classic $text pipeline shape", () => {
     expect(rows.slice(count.length - 1)).toEqual([{ $sort: { cnt: -1 } }, { $limit: 5 }]);
   });
 
-  it("adds no relevance $sort, no default $limit and no _score projection", async () => {
+  it("adds no relevance $sort, no default $limit and no score field", async () => {
     await adapter.aggregate(groupedQuery({ $select: COUNT_SELECT, $search: "widget" }));
 
     const pipeline = lastPipeline();
-    expect(pipeline).not.toContainEqual({ $sort: { _score: -1 } });
     expect(pipeline).not.toContainEqual({ $limit: 1000 });
     expect(pipeline.some((s) => "$sort" in s || "$limit" in s)).toBe(false);
-    // A $limit before $group would silently truncate group counts; a _score
+    // A $limit before $group would silently truncate group counts; a score
     // $addFields would have nothing to survive into the grouped rows anyway.
     expect(JSON.stringify(pipeline)).not.toContain("_score");
     expect(JSON.stringify(pipeline)).not.toContain("textScore");

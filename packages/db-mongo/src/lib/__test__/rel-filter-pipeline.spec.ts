@@ -477,13 +477,14 @@ describe("read paths switch to a pipeline only with predicates", () => {
     expect(pipeline[0]).toEqual({ $match: { $text: { $search: "crash" } } });
     expect(stageNames(pipeline)).toEqual([
       "$match",
-      "$addFields",
       "$match",
       "$lookup",
       "$match",
       "$unset",
+      "$addFields", // the relevance score (since 0.1.185; before, right after $text)
       "$sort",
       "$limit",
+      "$project", // drops the relevance score (since 0.1.185)
     ]);
   });
 

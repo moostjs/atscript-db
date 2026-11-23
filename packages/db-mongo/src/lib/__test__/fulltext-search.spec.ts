@@ -65,8 +65,8 @@ describe("[mongo] @db.index.fulltext executes classic $text (not Atlas $search)"
     await adapter.search("hello", EMPTY_QUERY);
 
     const pipeline = lastPipeline();
-    expect(pipeline).toContainEqual({ $addFields: { _score: { $meta: "textScore" } } });
-    expect(pipeline).toContainEqual({ $sort: { _score: -1, _id: 1 } });
+    expect(pipeline).toContainEqual({ $addFields: { __atscript_score: { $meta: "textScore" } } });
+    expect(pipeline).toContainEqual({ $sort: { __atscript_score: -1, _id: 1 } });
   });
 
   it("search() honors a caller-supplied $sort instead of the relevance default", async () => {
@@ -74,10 +74,11 @@ describe("[mongo] @db.index.fulltext executes classic $text (not Atlas $search)"
 
     const pipeline = lastPipeline();
     expect(pipeline).toContainEqual({ $sort: { title: 1 } });
-    expect(pipeline).not.toContainEqual({ $sort: { _score: -1, _id: 1 } });
+    // nothing reads a score, so none is added (since 0.1.185)
+    expect(JSON.stringify(pipeline)).not.toMatch(/textScore|_score/);
   });
 
-  it("searchWithCount() uses $text + $facet and projects textScore BEFORE the facet", async () => {
+  it("searchWithCount() uses $text + $facet and reads textScore in the page's stages", async () => {
     aggregate = vi.fn(() => ({ toArray: async () => [{ data: [], meta: [] }] }));
     vi.spyOn(adapter, "collection", "get").mockReturnValue({ aggregate } as never);
 
@@ -85,14 +86,12 @@ describe("[mongo] @db.index.fulltext executes classic $text (not Atlas $search)"
 
     const pipeline = lastPipeline();
     expect(pipeline[0]).toEqual({ $match: { $text: { $search: "hello" } } });
-    // textScore is not accessible inside $facet sub-pipelines — must be projected first.
-    const facetIdx = pipeline.findIndex((s) => "$facet" in s);
-    const scoreIdx = pipeline.findIndex(
-      (s) =>
-        JSON.stringify(s) === JSON.stringify({ $addFields: { _score: { $meta: "textScore" } } }),
-    );
-    expect(scoreIdx).toBeGreaterThanOrEqual(0);
-    expect(scoreIdx).toBeLessThan(facetIdx);
+    // textScore is readable inside $facet; the count's meta pipeline never computes it.
+    const facet = pipeline.find((s) => "$facet" in s) as any;
+    expect(facet.$facet.data[0]).toEqual({
+      $addFields: { __atscript_score: { $meta: "textScore" } },
+    });
+    expect(facet.$facet.meta).toEqual([{ $count: "count" }]);
   });
 });
 

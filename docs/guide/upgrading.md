@@ -6,6 +6,12 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.185 {#v0-1-185}
+
+### Changes
+
+- **MongoDB: classic text search rows no longer carry `_score`.** `search()`, `searchWithCount()` and HTTP `$search` reads (`/query`, `/pages`) on a `@db.index.fulltext` index return the row without a score field, as every other adapter and an Atlas `$search` do. The order is unchanged: relevance (`textScore`), `_id` breaking ties. A stored field named `_score` is now returned as stored, and a `$sort` on it sorts by the stored value; before, the `textScore` replaced it. **Affected:** code that reads `_score` from these rows; the score is no longer returned. `_score` in a `$sort` (alone or with other keys) no longer sorts by relevance and `_score` in a `$select` no longer returns the score: drop it from `$sort` / `$select`, and omit `$sort` to get relevance order. See [Ranking](/search/#ranking).
+
 ## 0.1.184 {#v0-1-184}
 
 ### Changes

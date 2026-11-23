@@ -444,7 +444,7 @@ describe("buildCountPipeline", () => {
 // the surviving groups.
 //
 // Two things the leaf `search()` runner adds and this path must NOT: a
-// relevance `$sort: { _score: -1 }` (no per-document score survives `$group`)
+// relevance `$sort` (no per-document score survives `$group`)
 // and a default `$limit: 1000` (a row cap before `$group` truncates counts).
 describe("buildAggregatePipeline / buildCountPipeline — with a search stage", () => {
   const TEXT_STAGE = { $match: { $text: { $search: "widget" } } };
@@ -530,7 +530,6 @@ describe("buildAggregatePipeline / buildCountPipeline — with a search stage", 
       const rows = buildAggregatePipeline(makeQuery(OPTS), stage);
       const count = buildCountPipeline(makeQuery({ ...OPTS, count: true }), stage);
       for (const pipeline of [rows, count]) {
-        expect(pipeline).not.toContainEqual({ $sort: { _score: -1 } });
         expect(pipeline).not.toContainEqual({ $limit: 1000 });
         expect(pipeline.some((s: any) => "$limit" in s)).toBe(false);
         expect(pipeline.some((s: any) => "$sort" in s)).toBe(false);

@@ -23,7 +23,7 @@ export interface TSortSpec {
 export interface TSortStages {
   /** `[$addFields(flags)?, $sort]` — empty when there is no `$sort`. */
   stages: Document[];
-  /** The `$project` dropping the flags (after `$skip` / `$limit`); `undefined` when none were added. */
+  /** The `$project` dropping the temporary fields (after `$skip` / `$limit`); `undefined` when none were added. */
   cleanup?: Document;
 }
 

@@ -29,7 +29,7 @@ import {
   type TMongoFilterOptions,
 } from "./mongo-filter";
 import { dedupeProjection } from "./projection-dedupe";
-import { sortStages } from "./mongo-sort";
+import { sortStages, type TSortStages } from "./mongo-sort";
 import { wrapInvalidQuery } from "./mongo-errors";
 import { joinPath } from "./path-utils";
 
@@ -81,11 +81,6 @@ function filterOptionsOf(host: TMongoSearchHost | TMongoGeoHost): TMongoFilterOp
  * name of its own (a dynamic Atlas mapping) is listed as `DEFAULT`. The vector
  * default is the first vector index.
  */
-/** Classic `$text` relevance order: `textScore` descending, `_id` breaking ties (since 0.1.165). */
-const RELEVANCE_SORT: Document = { $sort: { _score: -1, _id: 1 } };
-/** The order of an unranked search (`$rank: false`, since 0.1.175): the primary key. */
-const UNRANKED_SORT: Document = { $sort: { _id: 1 } };
-
 export function getSearchIndexesImpl(host: TMongoSearchHost): TSearchIndexInfo[] {
   const result: TSearchIndexInfo[] = [];
   const indexes = host.getMongoSearchIndexes();
@@ -160,7 +155,7 @@ function requireSearchStage(
  * an unresolvable one throws exactly as the leaf path does.
  *
  * `classicText` is deliberately dropped: it only drives the leaf runner's
- * `_score` projection and relevance `$sort`, and no per-document score
+ * relevance order (the `textScore` it sorts by), and no per-document score
  * survives `$group`. See `resolveAggregateSearch` in `@atscript/db/agg` for
  * the normative cross-adapter contract.
  */
@@ -209,15 +204,31 @@ export async function searchWithCountImpl(
  * orders by `_id` instead (an Atlas `$search` included).
  */
 function textRunOptions(plan: { classicText: boolean }, query: DbQuery): TSearchRunOptions {
-  if (query.controls?.$rank === false) return { defaultSort: UNRANKED_SORT };
-  return plan.classicText ? { classicText: true, defaultSort: RELEVANCE_SORT } : {};
+  if (query.controls?.$rank === false) return { defaultOrder: UNRANKED_ORDER };
+  return plan.classicText ? { defaultOrder: RELEVANCE_ORDER } : {};
 }
 
 /**
- * Field the `vectorSearchScore` rides in through the pipeline. Renamed to the
- * public `$score` after fetch — a field name cannot start with `$`.
+ * Field a search score rides in through the pipeline: the `vectorSearchScore`
+ * (renamed to the public `$score` after fetch — a field name cannot start
+ * with `$`) or the `textScore` of a relevance order (dropped from the rows).
  */
 const SCORE_FIELD = "__atscript_score";
+
+/**
+ * Classic `$text` relevance order: `textScore` descending, `_id` breaking ties
+ * (since 0.1.165). The score is dropped after `$skip` / `$limit`, so a row
+ * carries no score field (since 0.1.185; before, rows carried `_score`).
+ */
+const RELEVANCE_ORDER: TSortStages = {
+  stages: [
+    { $addFields: { [SCORE_FIELD]: { $meta: "textScore" } } },
+    { $sort: { [SCORE_FIELD]: -1, _id: 1 } },
+  ],
+  cleanup: { $project: { [SCORE_FIELD]: 0 } },
+};
+/** The order of an unranked search (`$rank: false`, since 0.1.175): the primary key. */
+const UNRANKED_ORDER: TSortStages = { stages: [{ $sort: { _id: 1 } }] };
 
 /** Vector search via $vectorSearch aggregation stage. */
 export async function vectorSearchImpl(
@@ -863,15 +874,19 @@ interface TSearchRunOptions {
    * renames it to `$score`); `threshold` keeps the rows whose score reaches it.
    */
   vector?: { threshold?: number };
-  /** A classic `$text` match (relevance from `textScore`). */
-  classicText?: boolean;
   /**
    * The order without a `$sort`: relevance for a classic `$text` match, `_id`
    * under `$rank: false` (since 0.1.175); none keeps the leading stage's order.
    */
-  defaultSort?: Document;
+  defaultOrder?: TSortStages;
   /** The filter stages after the leading stage (default: the whole request filter). */
   filterStages?: Document[];
+}
+
+/** The order of a search: an explicit `$sort` (with its `$nulls` placement flags) replaces the default. */
+function searchOrder(controls: DbControls, defaultOrder: TSortStages | undefined): TSortStages {
+  const explicit = sortStages(controls);
+  return explicit.stages.length > 0 || !defaultOrder ? explicit : defaultOrder;
 }
 
 /** Runs a search/vector pipeline and returns results. Shared by search + vectorSearch. */
@@ -880,25 +895,16 @@ async function runSearchPipeline(
   stage: Document,
   query: DbQuery,
   label: string,
-  { vector, classicText = false, defaultSort, filterStages }: TSearchRunOptions = {},
+  { vector, defaultOrder, filterStages }: TSearchRunOptions = {},
 ): Promise<Array<Record<string, unknown>>> {
   const controls = query.controls || {};
   const pipeline: Document[] = [stage];
   if (vector) {
     pipeline.push(...vectorScoreStages(vector.threshold));
-  } else if (classicText) {
-    pipeline.push({ $addFields: { _score: { $meta: "textScore" } } });
   }
   pipeline.push(...(filterStages ?? mongoFilterStages(query.filter, filterOptionsOf(host))));
-  // An explicit `$sort` (with its `$nulls` placement flags) replaces relevance order.
-  const { stages: sorted, cleanup } = sortStages(controls);
-  if (sorted.length > 0) {
-    pipeline.push(...sorted);
-  } else if (defaultSort) {
-    // Classic `$text`: relevance order, mirroring Atlas $search's implicit
-    // ordering; `_id` breaks ties so pages never overlap (since 0.1.165).
-    pipeline.push(defaultSort);
-  }
+  const { stages: sorted, cleanup } = searchOrder(controls, defaultOrder);
+  pipeline.push(...sorted);
   if (controls.$skip) {
     pipeline.push({ $skip: controls.$skip });
   }
@@ -931,23 +937,14 @@ async function runSearchWithCountPipeline(
   stage: Document,
   query: DbQuery,
   label: string,
-  { vector, classicText = false, defaultSort, filterStages }: TSearchRunOptions = {},
+  { vector, defaultOrder, filterStages }: TSearchRunOptions = {},
 ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
   const controls = query.controls || {};
 
-  const preStages: Document[] = [];
-  if (vector) {
-    preStages.push(...vectorScoreStages(vector.threshold));
-  } else if (classicText) {
-    // textScore meta is NOT accessible inside $facet sub-pipelines, so project
-    // it into a field BEFORE the $facet stage.
-    preStages.push({ $addFields: { _score: { $meta: "textScore" } } });
-  }
+  const preStages = vector ? vectorScoreStages(vector.threshold) : [];
 
-  const { stages: dataStages, cleanup } = sortStages(controls);
-  if (dataStages.length === 0 && defaultSort) {
-    dataStages.push(defaultSort);
-  }
+  const { stages: sorted, cleanup } = searchOrder(controls, defaultOrder);
+  const dataStages: Document[] = [...sorted];
   if (controls.$skip) {
     dataStages.push({ $skip: controls.$skip });
   }
