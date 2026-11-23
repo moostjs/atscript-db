@@ -154,7 +154,7 @@ Field operations require that the target field maps to its own database column (
 | Inside an embedded-array item (any array operator or plain set)                                      | **Validation error**                 | The array is written whole — an operator inside an item would be stored as data (since 0.1.153)       |
 | Inside a tuple element, a union member, or a `T \| null` object without `@db.patch.strategy 'merge'` | **Validation error** (since 0.1.184) | Written as one value, like a replaced object — see [Where Merge Applies](#where-merge-applies)        |
 
-The error is a `FIELD_OP_CONTEXT` entry at the field's path. Under a `T | null` object or a union member, the validator reports the union instead: one entry at the field, whose `details` hold the `FIELD_OP_CONTEXT` entry. Through a relation, the path starts with the relation field (`author.stats.views`).
+The error is a `FIELD_OP_CONTEXT` entry at the field's path — under a `T | null` object too (since 0.1.185; before, it sat in the `details` of a union entry at the object's field). Under a member of a union of objects, the validator reports the union instead: one entry at the field, whose `details` hold the `FIELD_OP_CONTEXT` entry. Through a relation, the path starts with the relation field (`author.stats.views`).
 
 ```typescript
 import { $inc } from "@atscript/db/ops";
