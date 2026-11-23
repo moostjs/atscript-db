@@ -71,6 +71,23 @@ describe("SqliteAdapter — integer fulltext members", () => {
     expect(ids(await table.search("29461277", {} as any))).toEqual([1]);
   });
 
+  // Relevance order: the exact-number rows first, and among them the text
+  // relevance still orders — a row the number AND the text matched comes before
+  // a row only the number matched (before 0.1.186 its NULL rank sorted first).
+  it("a whole-number term: exact-number rows first, a row matched by number and text leading them", async () => {
+    const { table } = await seedItems();
+    const order = (rows: unknown[]) => (rows as Array<{ id: number }>).map((r) => r.id);
+    expect(order(await table.search("2946", {} as any))).toEqual([3, 6, 2]);
+    await table.insertOne({ id: 8, title: "refund 2946", ref_no: 2946 } as any);
+    expect(order(await table.search("2946", {} as any))).toEqual([8, 3, 6, 2]);
+    const page = await table.searchWithCount("2946", {
+      filter: {},
+      controls: { $skip: 2, $limit: 2 },
+    } as any);
+    expect(order(page.data)).toEqual([6, 2]);
+    expect(page.count).toBe(4);
+  });
+
   it("a term of 0 does not match every row (no `.0` artifact)", async () => {
     const { table } = await seedItems();
     expect(ids(await table.search("0", {} as any))).toEqual([5]);

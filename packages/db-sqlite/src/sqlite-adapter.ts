@@ -1560,7 +1560,8 @@ export class SqliteAdapter extends BaseDbAdapter {
         ...eqs.map(() => plan.exact.n),
         ...where.params,
       ];
-      textRank = { sql: "m.__atscript_s ASC", params: [] };
+      // A row matched by number only has no bm25 (NULL): after the text matches.
+      textRank = { sql: "m.__atscript_s IS NULL, m.__atscript_s ASC", params: [] };
     }
     const order = sorted
       ? { sql: sorted, params: [] as unknown[] }
