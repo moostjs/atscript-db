@@ -21,7 +21,7 @@ export interface TSortSpec {
 
 /** The ordering stages of one read — see {@link sortStages}. */
 export interface TSortStages {
-  /** `[$addFields(flags)?, $sort]` — empty when there is no `$sort`. */
+  /** `[$addFields(flags)?, $sort]` — empty when `$sort` is absent or names no key. */
   stages: Document[];
   /** The `$project` dropping the temporary fields (after `$skip` / `$limit`); `undefined` when none were added. */
   cleanup?: Document;
@@ -65,7 +65,8 @@ function placedKey(placement: unknown, dir: unknown): NullsPlacement | undefined
  */
 export function sortStages(controls: object | undefined): TSortStages {
   const { $sort: sort, $nulls: nulls } = (controls ?? {}) as TSortSpec;
-  if (!sort) return { stages: [] };
+  // An empty `$sort` is no sort (the server refuses a `$sort` stage without keys).
+  if (!sort || Object.keys(sort).length === 0) return { stages: [] };
   if (!hasNullsPlacement(controls)) return { stages: [{ $sort: sort }] };
 
   const flags: Document = {};

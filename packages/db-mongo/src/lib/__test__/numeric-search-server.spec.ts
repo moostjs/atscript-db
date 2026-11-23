@@ -84,9 +84,22 @@ describe("[mongo] integer fulltext members (real server)", () => {
     expect(ids(await t(fx.NsItem).search("-2946", {}))).toEqual([4]);
   });
 
-  it("text hits come before equality-only rows", async () => {
-    const rows = await t(fx.NsItem).search("2946", {});
-    expect(rows[0].id).toBe(2);
+  // Since 0.1.186, as on the SQL adapters (before, the text hit came first).
+  it("exact-number rows come before the text hits; among them text relevance, then _id", async () => {
+    const order = (rows: Array<Record<string, unknown>>) => rows.map((r) => r.id);
+    expect(order(await t(fx.NsItem).search("2946", {}))).toEqual([3, 6, 2]);
+    // a row the number AND the text matched leads the exact-number group
+    await t(fx.NsItem).insertOne({ id: 8, title: "refund 2946", ref_no: 2946 });
+    try {
+      expect(order(await t(fx.NsItem).search("2946", {}))).toEqual([8, 3, 6, 2]);
+      const paged = await t(fx.NsItem).searchWithCount("2946", {
+        controls: { $skip: 2, $limit: 2 },
+      });
+      expect(order(paged.data)).toEqual([6, 2]);
+      expect(paged.count).toBe(4);
+    } finally {
+      await t(fx.NsItem).deleteOne(8);
+    }
   });
 
   it("searchWithCount and a grouped $count agree", async () => {
@@ -111,6 +124,22 @@ describe("[mongo] integer fulltext members (real server)", () => {
     expect(stored).toHaveLength(3);
     expect(byId(await t(fx.NsItem).search("2946", { controls }))).toEqual(stored);
     expect(byId((await t(fx.NsItem).searchWithCount("2946", { controls })).data)).toEqual(stored);
+  });
+
+  // An empty `$sort` is no sort, as on the SQL adapters: the relevance order
+  // stays (before 0.1.186 the server refused the empty `$sort` stage, error 15976).
+  it("an empty $sort keeps the relevance order", async () => {
+    const ranked = await t(fx.NsItem).search("2946", {});
+    const controls = { $sort: {} };
+    expect(await t(fx.NsItem).search("2946", { controls })).toEqual(ranked);
+    const counted = await t(fx.NsItem).searchWithCount("2946", { controls });
+    expect(counted).toEqual({ data: ranked, count: 3 });
+    // a grouped read runs as a pipeline too
+    const grouped = await t(fx.NsItem).aggregate({
+      filter: {},
+      controls: { $groupBy: ["title"], $select: ["title"], $sort: {} },
+    });
+    expect(grouped).toHaveLength(7);
   });
 
   it("an integer-only index matches by number and nothing else", async () => {

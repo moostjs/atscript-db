@@ -49,15 +49,30 @@ describe("[mongo] classic text index with integer members", () => {
         ],
       },
     });
-    // textScore stays valid; equality-only rows have no score and sort last
-    expect(pipeline()).toContainEqual({
-      $addFields: { __atscript_score: { $meta: "textScore" } },
-    });
+    // exact-number rows first (since 0.1.186, as on the SQL adapters), then textScore, then _id
+    const score = {
+      exact: { $or: [{ $eq: ["$ref_no", 2946] }, { $eq: ["$alt_no", 2946] }] },
+      text: { $meta: "textScore" },
+    };
+    expect(pipeline().slice(2)).toEqual([
+      { $addFields: { __atscript_score: score } },
+      { $sort: { "__atscript_score.exact": -1, "__atscript_score.text": -1, _id: 1 } },
+      { $limit: 1000 },
+      { $project: { __atscript_score: 0 } },
+    ]);
+  });
+
+  it("an explicit $sort or $rank: false computes no exact-number order", async () => {
+    await adapter.search("2946", { filter: {}, controls: { $sort: { title: 1 } } });
+    expect(pipeline().slice(2)).toEqual([{ $sort: { title: 1 } }, { $limit: 1000 }]);
+    await adapter.search("2946", { filter: {}, controls: { $rank: false } });
+    expect(pipeline().slice(2)).toEqual([{ $sort: { _id: 1 } }, { $limit: 1000 }]);
   });
 
   it("a non-integer term is the plain $text match", async () => {
     await adapter.search("quokka", EMPTY_QUERY);
     expect(firstStage()).toEqual({ $match: { $text: { $search: "quokka" } } });
+    expect(pipeline()).toContainEqual({ $sort: { __atscript_score: -1, _id: 1 } });
     await adapter.search("02946", EMPTY_QUERY);
     expect(firstStage()).toEqual({ $match: { $text: { $search: "02946" } } });
   });
@@ -107,11 +122,13 @@ describe("[mongo] integer-only fulltext index", () => {
     mockAggregate(adapter);
   });
 
-  it("matches by number without $text (no textScore), and nothing for other terms", async () => {
+  it("matches by number without $text (no textScore), in _id order, and nothing for other terms", async () => {
     expect(adapter.isSearchable()).toBe(true);
     await adapter.search("4", EMPTY_QUERY);
     expect(firstStage()).toEqual({ $match: { id: { $eq: 4, $type: "number" } } });
     expect(JSON.stringify(pipeline())).not.toContain("textScore");
+    // the primary key orders the rows, as on the SQL adapters (since 0.1.186; before, no order)
+    expect(pipeline()).toContainEqual({ $sort: { _id: 1 } });
     await adapter.search("abc", EMPTY_QUERY);
     expect(firstStage()).toEqual({ $match: { _id: { $in: [] } } });
   });

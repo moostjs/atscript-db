@@ -6,6 +6,18 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.186 {#v0-1-186}
+
+### Changes
+
+- **MongoDB: a whole-number search puts exact-number matches first.** On a `@db.index.fulltext` index with an [integer member](/search/#integer-fields-exact-number-match), a search without a `$sort` returns the rows whose integer member equals the term first, then the text hits by relevance, as SQLite, PostgreSQL and MySQL have done since 0.1.165. Before, MongoDB's classic text index returned a row matched only by number after the text hits. **Affected:** apps on MongoDB that rely on the old order of a whole-number search; nothing changes for other terms, under an explicit `$sort`, with `$rank: false`, or on an Atlas `$search` index. See [Ranking](/search/#ranking).
+
+### Fixes
+
+- **MongoDB: an empty `$sort` is no sort.** A read whose controls carry `$sort: {}` is ordered as if `$sort` were absent, as on SQLite, PostgreSQL, MySQL and the in-memory adapter — a text search keeps its relevance order. Before, every read MongoDB runs as a pipeline (a text or vector search, a grouped query, a read with relation predicates or `$with`) failed on it with the server error `$sort stage must have at least one sort key`.
+- **MongoDB: a search of an integer-only fulltext index returns rows in `_id` order.** Before, such a search had no order at all, so offset pages were not stable; the SQL adapters already ordered it by the primary key.
+- **SQLite: in a whole-number search, a row matched by both the number and the text comes before the rows matched by the number only.** Among the exact-number matches the text relevance orders the rows, then the primary key, as on PostgreSQL, MySQL and MongoDB. Before, SQLite put the number-only rows first.
+
 ## 0.1.185 {#v0-1-185}
 
 ### Changes

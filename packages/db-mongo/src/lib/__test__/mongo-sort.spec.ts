@@ -16,6 +16,9 @@ describe("sortStages", () => {
   it("no $sort → no stage; no placement → the plain $sort", () => {
     expect(sortStages(undefined)).toEqual({ stages: [] });
     expect(sortStages({ $nulls: { a: "last" } })).toEqual({ stages: [] });
+    // an empty `$sort` is no sort — MongoDB refuses a `$sort` stage without keys (error 15976)
+    expect(sortStages({ $sort: {} })).toEqual({ stages: [] });
+    expect(sortStages({ $sort: {}, $nulls: { a: "last" } })).toEqual({ stages: [] });
     const sort = { a: 1, id: -1 };
     expect(sortStages({ $sort: sort })).toEqual({ stages: [{ $sort: sort }] });
     // entries for keys that are not sorted by, or not a placement, change nothing

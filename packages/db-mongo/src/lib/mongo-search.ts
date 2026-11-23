@@ -140,7 +140,7 @@ function requireSearchStage(
   text: string,
   indexName: string | undefined,
   controls: DbControls | undefined,
-): { stage: Document; classicText: boolean } {
+): TSearchPlan {
   const plan = buildSearchStage(host, text, indexName, controls);
   if (!plan) {
     throw new Error(searchIndexNotFoundMessage(indexName));
@@ -154,9 +154,9 @@ function requireSearchStage(
  * path). `$index` picks the search index by the same rules as `search()`, and
  * an unresolvable one throws exactly as the leaf path does.
  *
- * `classicText` is deliberately dropped: it only drives the leaf runner's
- * relevance order (the `textScore` it sorts by), and no per-document score
- * survives `$group`. See `resolveAggregateSearch` in `@atscript/db/agg` for
+ * The plan's `relevance` order is deliberately dropped: it only orders the
+ * leaf runner's rows, and no per-document score survives `$group`. See
+ * `resolveAggregateSearch` in `@atscript/db/agg` for
  * the normative cross-adapter contract.
  */
 export function buildAggregateSearchStage(
@@ -198,36 +198,52 @@ export async function searchWithCountImpl(
   );
 }
 
+/** The leading stage of a text search and the order of its rows without a `$sort`. */
+interface TSearchPlan {
+  stage: Document;
+  /** The relevance order of a classic `$text` match; none keeps the stage's own order. */
+  relevance?: TSortStages;
+}
+
 /**
- * The runner options of a text search: relevance from `textScore` for a
- * classic `$text` match — none under `$rank: false` (since 0.1.175), which
- * orders by `_id` instead (an Atlas `$search` included).
+ * The runner options of a text search: the plan's relevance order — none
+ * under `$rank: false` (since 0.1.175), which orders by `_id` instead (an
+ * Atlas `$search` included).
  */
-function textRunOptions(plan: { classicText: boolean }, query: DbQuery): TSearchRunOptions {
+function textRunOptions(plan: TSearchPlan, query: DbQuery): TSearchRunOptions {
   if (query.controls?.$rank === false) return { defaultOrder: UNRANKED_ORDER };
-  return plan.classicText ? { defaultOrder: RELEVANCE_ORDER } : {};
+  return { defaultOrder: plan.relevance };
 }
 
 /**
  * Field a search score rides in through the pipeline: the `vectorSearchScore`
  * (renamed to the public `$score` after fetch — a field name cannot start
- * with `$`) or the `textScore` of a relevance order (dropped from the rows).
+ * with `$`) or the score of a relevance order (dropped from the rows).
  */
 const SCORE_FIELD = "__atscript_score";
 
 /**
- * Classic `$text` relevance order: `textScore` descending, `_id` breaking ties
- * (since 0.1.165). The score is dropped after `$skip` / `$limit`, so a row
- * carries no score field (since 0.1.185; before, rows carried `_score`).
+ * Classic `$text` relevance order: the rows an integer member matched by
+ * exact number first (`exact`: one `$eq` expression per member of a
+ * whole-number search, since 0.1.186 — as the SQL adapters order them), then
+ * `textScore` descending, `_id` breaking ties (since 0.1.165). The score is
+ * dropped after `$skip` / `$limit`, so a row carries no score field (since
+ * 0.1.185; before, rows carried `_score`).
  */
-const RELEVANCE_ORDER: TSortStages = {
-  stages: [
-    { $addFields: { [SCORE_FIELD]: { $meta: "textScore" } } },
-    { $sort: { [SCORE_FIELD]: -1, _id: 1 } },
-  ],
-  cleanup: { $project: { [SCORE_FIELD]: 0 } },
-};
-/** The order of an unranked search (`$rank: false`, since 0.1.175): the primary key. */
+function relevanceOrder(exact: Document[]): TSortStages {
+  const text = { $meta: "textScore" };
+  return {
+    stages:
+      exact.length === 0
+        ? [{ $addFields: { [SCORE_FIELD]: text } }, { $sort: { [SCORE_FIELD]: -1, _id: 1 } }]
+        : [
+            { $addFields: { [SCORE_FIELD]: { exact: { $or: exact }, text } } },
+            { $sort: { [`${SCORE_FIELD}.exact`]: -1, [`${SCORE_FIELD}.text`]: -1, _id: 1 } },
+          ],
+    cleanup: { $project: { [SCORE_FIELD]: 0 } },
+  };
+}
+/** The order of a search without a text rank (`$rank: false`, since 0.1.175; an integer-only index): the primary key. */
 const UNRANKED_ORDER: TSortStages = { stages: [{ $sort: { _id: 1 } }] };
 
 /** Vector search via $vectorSearch aggregation stage. */
@@ -455,8 +471,8 @@ function resolveThreshold(
 // ── Stage builders ───────────────────────────────────────────────────────────
 
 /**
- * Builds the first pipeline stage for a text search and reports whether it is a
- * classic `$text` query (vs. an Atlas `$search`).
+ * Builds the first pipeline stage for a text search and the order of its rows
+ * without a `$sort` (a classic index; an Atlas `$search` keeps its own).
  *
  * Two distinct execution paths share the `search()` API:
  *  - **Classic text** (`@db.index.fulltext`, or an adapter-scanned `text`
@@ -475,7 +491,7 @@ function buildSearchStage(
   text: string,
   indexName?: string,
   controls?: DbControls,
-): { stage: Document; classicText: boolean } | undefined {
+): TSearchPlan | undefined {
   const index = host.getMongoSearchIndex(indexName);
   if (!index) {
     return undefined;
@@ -493,22 +509,22 @@ function buildSearchStage(
     // optional member; every `$or` branch next to `$text` must be index-backed.
     const equalities = keys.map((key) => ({ [key]: { $eq: n, $type: "number" } }));
     if (!hasText) {
-      // Integer members only: no `$text` (so no textScore); a term that is not a
-      // whole number matches nothing.
+      // Integer members only: no `$text` (so no textScore — rows come in `_id`
+      // order); a term that is not a whole number matches nothing.
       const match =
         equalities.length === 0
           ? { _id: { $in: [] } }
           : equalities.length === 1
             ? equalities[0]!
             : { $or: equalities };
-      return { stage: { $match: match }, classicText: false };
+      return { stage: { $match: match }, relevance: UNRANKED_ORDER };
     }
     const textMatch = {
       $text: { $search: index.match === "all" ? mongoRequireEveryTerm(text) : text },
     };
     return {
       stage: { $match: equalities.length > 0 ? { $or: [textMatch, ...equalities] } : textMatch },
-      classicText: true,
+      relevance: relevanceOrder(keys.map((key) => ({ $eq: [`$${key}`, n] }))),
     };
   }
   // Atlas Search (search_text / dynamic_text). The index's declared `strategy`
@@ -585,7 +601,7 @@ function buildSearchStage(
   } else {
     body = { compound: { should: clauses, minimumShouldMatch: 1 } };
   }
-  return { stage: { $search: { index: index.key, ...body } }, classicText: false };
+  return { stage: { $search: { index: index.key, ...body } } };
 }
 
 /**
