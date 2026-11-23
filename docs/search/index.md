@@ -68,7 +68,7 @@ Rules:
 - Floats (`number`, `number.double`), decimals, timestamps and `@db.column.precision` fields are refused with a diagnostic — filter those by range instead.
 - A `weight` on an integer member is ignored (the editor warns).
 - An index of **integer members only** needs no engine artifact (no DDL) but still exists: it is listed by `getSearchIndexes()`, makes the table natively searchable, and a term that is not a whole number matches nothing. Because the table is then natively searchable, `@db.column.searchable` fields are no longer consulted (native search wins).
-- Ordering of a mixed text + number result is adapter-defined (MongoDB ranks text hits first); pass `$sort` for a stable order.
+- Without a `$sort`, the rows matched by exact number come first — among them by text relevance, then the primary key — and the text hits follow, on every adapter (MongoDB since 0.1.186; see [Ranking](#ranking)).
 - Every entry point — `search()`, `searchWithCount()`, `/query`, `/pages`, `$count`, grouped `$search` aggregates, query targets and `resolveQuery` — applies the same predicate, so counts and rows agree.
 
 ### Language and term matching {#language-and-match}
