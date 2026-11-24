@@ -140,6 +140,7 @@ embedding: db.vector
 - Rows carry `$score` (0.1.183) = Atlas `vectorSearchScore` (0–1, higher = closer) on EVERY row, any `$select` (internal alias, renamed after fetch). No `_score` since 0.1.184 (≤ 0.1.183: same value, only with a threshold); a stored `_score` field is returned as stored → [crud.md § Search](crud.md#search).
 - Classic `$text` rows carry NO score field (0.1.185; ≤ 0.1.184 rows had `_score` = textScore, replacing a stored `_score`) → [crud.md § Search](crud.md#search).
 - `$sort: {}` = no sort (0.1.186, as on the SQL adapters; ≤ 0.1.185 every pipeline read — search, vector, grouped, `$with` — failed with it: server error `$sort stage must have at least one sort key`). Integer-only fulltext index: rows in `_id` order (0.1.186; before unordered).
+- Integer `@db.index.fulltext` member inside an ARRAY OF OBJECTS (`items.refNo`): MongoDB only (SQL adapters throw `… inside a JSON value is not supported` at metadata build). Classic text index: a whole-number term matches a document when any array item holds the number, but the document does NOT join the exact-number group — ordered by its text score; matched only through the array → after all text hits, `_id` order. Need exact-first → keep the number top-level / in a nested object, or pass `$sort`.
 - `searchWithCount` on Atlas `$search` with NO filter: page read directly + total from `$searchMeta` (`count: total`); filtered / classic `$text` / vector keep the `$facet`.
 - `findManyWithCount` without predicates: `find` + `countDocuments` (concurrent; sequential in a transaction).
 

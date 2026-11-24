@@ -419,6 +419,8 @@ The term is handed to `$text`, so MongoDB's operators apply natively: a plain li
 
 MongoDB requires **every** `$or` branch next to `$text` to be index-backed (otherwise error 291), so an integer member must be [index-backed](/search/#integer-fields-exact-number-match) — schema validation enforces it. The `$type` guard lets an **optional** unique member's partial index (`{ f: { $type: "number" } }`) serve the equality. Without a `$sort`, the rows matched by exact number come first, then the text hits by score, as on the SQL adapters (since 0.1.186 — before, a row matched only by number came after the text hits). An index of integer members only has no text index; a term that is not a whole number then matches nothing.
 
+<a id="integer-member-in-array"></a>An integer member **inside an array of objects** (`items.refNo`, backed by an index whose first field is `items.refNo`) is accepted on MongoDB; the SQL adapters refuse that schema. A whole-number term matches a document when any item of the array holds the number. Such a document is **not** part of the exact-number group: without a `$sort` it is ordered by its text score like any text hit, and a document matched only through the array comes after all text hits, in `_id` order. Keep the number in a top-level or nested-object field when exact matches must come first, or pass a `$sort`.
+
 `$regex` on an integer field renders `$expr` / `$regexMatch` over `$toString` of `$convert`ed long (so `10^16` prints as `10000000000000000`, not `1e+16`).
 
 See [Text Search](/search/) for the full guide.
