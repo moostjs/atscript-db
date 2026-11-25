@@ -6,6 +6,12 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.191 {#v0-1-191}
+
+### Fixes
+
+- **A table with a base type keeps its field annotations whatever refers to it.** On a `@db.table` interface that `extends` another interface, `@db.rel.to`, `@db.rel.from`, `@db.column.sortable`, `@db.column.filterable` and the other annotations valid only on a table's fields were refused with `… is only valid on fields of a @db.table interface` as soon as another interface extended the table or named one of its fields by a type path (`supplierId?: Supplier.id`). The same schema compiled when nothing referred to the table. The fix is in `@atscript/core` 0.2.18, which this release requires; no schema change is needed.
+
 ## 0.1.190 {#v0-1-190}
 
 ### Changes
