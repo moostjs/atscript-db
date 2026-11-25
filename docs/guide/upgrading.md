@@ -6,6 +6,12 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.192 {#v0-1-192}
+
+### Fixes
+
+- **`/meta` serves what a UI formats a number with.** The served type keeps `@db.amount.currency`, `@db.amount.currency.ref`, `@db.unit`, `@db.unit.ref` and `@db.column.precision`, so a client that builds its tables and forms from `/meta` can show a currency, a unit of measure and the decimal scale. Before, these were stripped with the storage annotations and a controller had to add them back by overriding `getSerializeOptions()`; such an override keeps working and can be removed. Other storage annotations (`@db.column`, indexes, collation) stay on the server. See [GET /meta](/http/crud#get-meta).
+
 ## 0.1.191 {#v0-1-191}
 
 ### Fixes

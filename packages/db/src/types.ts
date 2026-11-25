@@ -215,10 +215,14 @@ export interface TFieldMeta {
   sortable: boolean;
   filterable: boolean;
   /**
-   * Present only when `filterable` is `false` but narrower predicates still
-   * pass the gate: their operators — `$exists` on a relational adapter's JSON
-   * / array column, `$geoWithin` on a geoPoint of a geo-searchable adapter.
-   * Since 0.1.132.
+   * The operators the field accepts, when that is narrower than its
+   * `filterable` verdict says. With `filterable: false`: the predicates that
+   * still pass the gate — `$exists` on a relational adapter's JSON / array
+   * column, `$geoWithin` on a geoPoint of a geo-searchable adapter (what
+   * moost-db reports; since 0.1.132). With `filterable: true`: a server that
+   * accepts only some comparison operators lists them, and a client offers
+   * only the conditions whose operators are all listed. Absent: the
+   * `filterable` verdict alone decides.
    */
   filterOps?: string[];
   /** Present (true) when the field is `@db.encrypted` — stored as ciphertext at rest. */

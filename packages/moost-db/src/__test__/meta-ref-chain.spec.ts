@@ -47,13 +47,14 @@ let Self: any;
 let RefForm: any;
 let VersionedDoc: any;
 let NullableFk: any;
+let PricedItem: any;
 
 const serializedOf = (type: any) =>
   new ExposedController(makeApp(), makeReadable(type)).serialize() as any;
 
 beforeAll(async () => {
   await prepareFixtures();
-  ({ Dict, Issue, IssueView, Deep, Plain, Self, RefForm, VersionedDoc, NullableFk } =
+  ({ Dict, Issue, IssueView, Deep, Plain, Self, RefForm, VersionedDoc, NullableFk, PricedItem } =
     await import("./fixtures/meta-ref-chain.as"));
   // Simulate the dictionary controller having stamped its public path.
   Dict.metadata.set("db.http.path", "/dicts");
@@ -152,6 +153,18 @@ describe("/meta — annotation allow-list", () => {
     expect(s.type.props.slug.metadata["db.index.plain"]).toBeUndefined();
     expect(s.metadata["db.table"]).toBeUndefined();
     expect(s.type.props.id.metadata["meta.id"]).toBe(true);
+  });
+
+  it("keeps what a client formats a quantity with: currency, unit and decimal scale", () => {
+    const props = serializedOf(PricedItem).type.props;
+    expect(props.listPrice.metadata["db.amount.currency"]).toBe("USD");
+    expect(props.listPrice.metadata["db.column.precision"]).toEqual({ precision: 10, scale: 2 });
+    expect(props.paid.metadata["db.amount.currency.ref"]).toBe("currency");
+    expect(props.weight.metadata["db.unit"]).toBe("kg");
+    expect(props.weight.metadata["db.column.precision"]).toEqual({ precision: 6, scale: 3 });
+    expect(props.quantity.metadata["db.unit.ref"]).toBe("unit");
+    // (storage details still stay on the server)
+    expect(props.quantity.metadata["db.column"]).toBeUndefined();
   });
 });
 

@@ -76,6 +76,33 @@ export interface VersionedDoc {
     slug: string
 }
 
+// Quantities: what a client formats a number with (currency, unit, decimal
+// scale) must survive /meta serialization.
+@db.table 'priced_items'
+export interface PricedItem {
+    @meta.id
+    id: number
+
+    currency: string
+
+    @db.amount.currency 'USD'
+    @db.column.precision 10, 2
+    listPrice: decimal
+
+    @db.amount.currency.ref 'currency'
+    paid: decimal
+
+    @db.unit 'kg'
+    @db.column.precision 6, 3
+    weight: decimal
+
+    unit: string
+
+    @db.unit.ref 'unit'
+    @db.column 'qty'
+    quantity: number
+}
+
 // `Dict.code | null` and `Dict.code?` are the same optional FK (since 0.1.165).
 @db.table 'nullable_fk'
 export interface NullableFk {
