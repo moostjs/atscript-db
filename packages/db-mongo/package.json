@@ -1,6 +1,6 @@
 {
   "name": "@atscript/db-mongo",
-  "version": "0.1.187",
+  "version": "0.1.188",
   "description": "Mongodb plugin for atscript.",
   "keywords": [
     "atscript",
