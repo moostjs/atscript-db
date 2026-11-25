@@ -97,7 +97,7 @@ Up to 0.1.131 the PostgreSQL and MySQL adapters built the column list from the *
 
 ### Skip conflicting rows {#insert-ignore}
 
-Pass `onConflict: "ignore"` (since 0.1.148) to skip rows that collide on the primary key or any unique index instead of failing the call with `CONFLICT`. The result has one slot per input row, by index:
+Pass `onConflict: "ignore"` (since 0.1.148) to skip rows that collide on the primary key or any unique index instead of failing the call with `CONFLICT`. To update the stored row instead of skipping it — an upsert — see [Upsert by unique key](#upsert). The result has one slot per input row, by index:
 
 ```typescript
 const result = await users.insertMany(
@@ -126,9 +126,11 @@ const one = await users.insertOne(
 - **A conflict reveals that the value exists**, exactly as the default mode's `409` does: a skipped row tells the caller that a row with that unique value is stored, even one the caller cannot read. An application that scopes uniqueness per tenant should declare per-tenant unique indexes (a composite unique index that includes the tenant column) instead of a global one.
 - An adapter that does not implement conflict-ignoring inserts throws `DbError("ON_CONFLICT_NOT_SUPPORTED")`; the built-in adapters all do. Over HTTP the mode is `POST /?$onConflict=ignore` ([CRUD endpoints](/http/crud)).
 
-#### Ignore, then update the skipped rows: `lockConflicts` {#insert-ignore-lock}
+<a id="upsert"></a>
 
-A common pattern inside a [transaction](/api/transactions) is "insert what is new, then update what was already there". Since 0.1.153 an ignore-insert inside a caller's transaction leaves no lock on the stored rows it skipped (on MySQL it used to, and two such transactions updating the same row deadlocked). Pass `lockConflicts: true` (since 0.1.153) when the skipped rows must also stay untouched by others until you update them:
+#### Upsert by unique key: ignore, then update the skipped rows {#insert-ignore-lock}
+
+There is no single upsert call: to insert a row, or update the stored row that has its primary key or unique value, insert with `onConflict: "ignore"` and then update the rows it skipped. A common pattern inside a [transaction](/api/transactions) is "insert what is new, then update what was already there". Since 0.1.153 an ignore-insert inside a caller's transaction leaves no lock on the stored rows it skipped (on MySQL it used to, and two such transactions updating the same row deadlocked). Pass `lockConflicts: true` (since 0.1.153) when the skipped rows must also stay untouched by others until you update them:
 
 ```typescript
 await adapter.withTransaction(async () => {
@@ -143,6 +145,7 @@ await adapter.withTransaction(async () => {
 - **MySQL / PostgreSQL:** the stored conflicting rows are locked with `SELECT … FOR UPDATE`, in primary-key order, before the rest is inserted. Only rows that exist are locked (no gap locks), so a concurrent transaction doing the same waits for yours to commit instead of deadlocking. A row that a concurrent writer commits while the call runs is still skipped correctly: PostgreSQL locks it after the insert; on MySQL it keeps the shared lock of the failed `INSERT` (a later update can then deadlock — retry, see below).
 - **SQLite, MongoDB, in-memory:** accepted and ignored. SQLite's write lock already serializes writers; MongoDB has no row locks (a concurrent write to the same document aborts one transaction, which the driver retries).
 - Outside a caller's transaction it is a no-op: the call's own transaction ends when it returns. Without `onConflict: "ignore"` it throws `INVALID_QUERY`.
+- `updateOne` finds the row by the primary key when the payload carries it, else by a unique key. For a row that collided on a unique index while carrying a new primary key of its own, leave that key out: `updateOne({ email: rows[i].email, …patch })`.
 
 ::: tip Retry on DEADLOCK / LOCK_TIMEOUT
 Since 0.1.153 a deadlock victim (MySQL errno 1213, PostgreSQL `40P01`) and a lock wait timeout (MySQL 1205, PostgreSQL `55P03`) throw `DbError` with code `DEADLOCK` / `LOCK_TIMEOUT` (PostgreSQL `40001`: `SERIALIZATION_FAILURE`) and `retryable: true` (`isRetryableDbError(error)`), on any write — since 0.1.175 also on reads and at `COMMIT`, with MongoDB's exhausted transient-error retries mapped too. SQLite's `SQLITE_BUSY` is `LOCK_TIMEOUT` wherever it occurs since 0.1.177: at `BEGIN IMMEDIATE`, on every statement, in schema operations and at `COMMIT` (in 0.1.175 and 0.1.176 at `COMMIT` only). Retry the **whole** transaction — see [Transactions](/api/transactions#retrying).
@@ -275,7 +278,7 @@ const { data, count } = await users.findManyWithCount({
 
 ### Update One
 
-Partially update a record. The primary key field(s) must be included to identify the record — only the other provided fields are changed:
+Partially update a record. The record is found by its primary key when the payload carries it, otherwise by a unique key the payload carries — only the other provided fields are changed:
 
 ```typescript
 const result = await users.updateOne({

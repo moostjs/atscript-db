@@ -566,6 +566,8 @@ These annotations require the `@atscript/db-mongo` plugin. See [MongoDB adapter]
 
 When `indexName` is omitted it defaults to `"DEFAULT"` — interface-level and field-level annotations referencing the same name are merged into one Atlas Search index. See [MongoDB adapter — Atlas Search](./mongodb#atlas-search).
 
+`@db.mongo.search.text` and `@db.mongo.search.autocomplete` need a field whose declared type holds only strings (a string, string literals, or an array of them); on any other field they are a compile error (since 0.1.188). See [Fields that hold strings](./mongodb#atlas-string-fields).
+
 ```atscript
 // requires the @atscript/db-mongo plugin in atscript.config
 

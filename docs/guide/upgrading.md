@@ -6,6 +6,17 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.188 {#v0-1-188}
+
+### Changes
+
+- **`@db.mongo.search.text` and `@db.mongo.search.autocomplete` need a field whose declared type holds only strings** — a string, string literals, or an array of them. On a number, a decimal, a boolean, an object, `unknown`, a `mongo.objectId` or a union with a non-string member, either annotation is now a compile error, shown in your editor, also when it is written in an `annotate` block. Before, such a schema compiled. **Affected:** schemas with these annotations on such fields. To match an integer by exact number, list it in `@db.index.fulltext` instead; for text search, annotate a string field. See [Fields that hold strings](/adapters/mongodb#atlas-string-fields).
+
+### Documentation
+
+- **Upsert by unique key.** There is no single upsert call: insert with `onConflict: "ignore"`, then update the rows that were skipped, in one transaction. See [Upsert by unique key](/api/crud#upsert).
+- **Upgrade notes for 0.1.128 – 0.1.135**, which shipped without any: see [0.1.128 – 0.1.135](#v0-1-128).
+
 ## 0.1.186 {#v0-1-186}
 
 ### Changes
@@ -1027,3 +1038,51 @@ For custom adapters and sync tooling:
 - **`AGG_FN_SQL` (`@atscript/db-sql-tools`) is keyed by `Exclude<TDbAggregateFn, "countDistinct">`.** It still maps `sum`, `count`, `avg`, `min` and `max`, but indexing it with a plain `TDbAggregateFn` no longer type-checks. `countDistinct` has no function name to map — render it as `COUNT(DISTINCT x)` yourself.
 - **`resolveCalendarBuckets` is deprecated.** Use `normalizeComputedSelect`, which has the same signature — see [Calendar buckets for adapter authors](/adapters/creating-adapters#calendar-buckets).
 - **Class-level actions can declare an input form.** `@DbActions` / `@DbRowActions` / `@DbRowsActions` entries take `inputForm`: a compiled `.as` type, or `{ name, url }` for a form served by another controller. Any other shape is a type error; JavaScript callers that pass one get the entry dropped with a warning. See [Input forms on class-level entries](/http/actions#class-level-input-form).
+
+## 0.1.128 – 0.1.135 {#v0-1-128}
+
+These releases shipped without upgrade notes. This section lists what code written for 0.1.127 or earlier must check; each entry names the release that changed it.
+
+### Queries
+
+- **Every query path is checked before it reaches the database** (0.1.128). Filter keys, `$sort`, `$select`, `$groupBy`, `$having` keys and aggregate fields must name a field the table declares, by its logical name; anything else throws `DbError("INVALID_QUERY")` (HTTP 400 through moost-db) before any SQL or pipeline is built. Rejected: a field the model does not declare, a physical column name (`contact__email`, a `@db.column` name), a navigation path (`assignee.name` — load it with `$with`), a path inside a `@db.json` or array column on SQL adapters, a filter or sort on a nested object instead of one of its leaves (since [0.1.155](#v0-1-155) a `null` test on an object is allowed), `$sort` on a `@db.json` or array column, and `$nor` (write `$not`). `updateMany` / `deleteMany` filters are checked the same way. A `$having` key must be an aggregate alias or a `$groupBy` field. To reach stored data the model no longer declares, use the adapter's native client (on MongoDB, [the collection](/adapters/mongodb#accessing-the-adapter)). See [Nested Field Filters](/api/queries#nested-field-filters).
+- **`$exists` means "holds a value"** (0.1.132), as on SQL: on MongoDB and the in-memory adapter a stored `null` counts as absent (`$exists: true` matches what `$ne: null` matches). A filter that relied on "the key is present, even if `null`" returns fewer rows with `true` and more with `false`. The operand must be a boolean. See [Existence](/api/queries#existence).
+- **Grouped rows come back shaped like `findMany` rows** (0.1.128): grouping by a leaf of a nested object returns the nested shape (`$groupBy: ['stats.views']` → `{ stats: { views: 1 }, cnt: 2 }`) on every adapter, and grouped booleans, decimals and `@db.json` values are converted as in `findMany` (a grouped boolean is `true` / `false`, not `0` / `1`).
+- **Grouped queries.** On MongoDB a `null` and a missing grouped value form one group (0.1.132), as on SQL. A grouped query with `$search` groups only the rows the search matches (0.1.130); before, a table with native text search grouped every row. A `$select` entry that is not a field, an aggregate or a bucket, and a `$groupBy` entry that is not a string, throw `INVALID_QUERY` instead of being dropped (0.1.132). `$count` on a grouped query counts the groups that pass `$having` (0.1.129). An unknown aggregate function throws `INVALID_QUERY` (HTTP 400) before any SQL is built (0.1.135). `resolveAlias()` from `@atscript/db/agg` names `count(*)` `count_star`, the key rows carry (0.1.132; it returned `count_*`). See [Grouped Queries](/api/aggregation#validation-and-errors).
+- **A table with only vector indexes is not text-searchable** (0.1.131): `search()` and `$search` throw `INVALID_QUERY` (HTTP 400) instead of failing in the adapter, and moost-db's `@db.column.searchable` fallback applies to such tables.
+
+### Writes
+
+- **An `undefined` value counts as omitted** (0.1.128), at every depth: the key gets its default on insert and keeps its stored value in a patch. SQL adapters used to write `NULL`. Send `null` to clear a column.
+- **A replace assigns every column on SQLite, PostgreSQL and MySQL** (0.1.128): an optional column the payload leaves out becomes `NULL`, as on MongoDB and the in-memory adapter. Before, a SQL replace kept the stored value of an omitted column. Send the whole row. See [Replace One](/api/crud#replace-one).
+- **Static `@db.default` values are written by the SDK on every adapter** (0.1.128), before validation, so validators and write guards see the full row.
+- **PostgreSQL and MySQL `insertMany` stored only the columns of the first row** up to 0.1.131 (fixed in 0.1.132). If you inserted batches whose rows carry different fields there, check the columns that later rows set. See [Insert Many](/api/crud#insert-many).
+
+### Versioning
+
+- **An empty `updateMany(filter, {})` writes nothing** (0.1.128): it no longer bumps the versions of the matched rows, so it no longer works as a batch lock. Use [`touchMany`](/api/versioning#touch-many) (0.1.129). A patch with only the key and `$cas` is a real write that bumps the version ([versioned touch](/api/versioning#versioned-touch)); an empty patch without `$cas` writes nothing, and `matchedCount` says whether the row exists.
+
+### HTTP and db-client
+
+- **moost-db throws its built-in write failures** (0.1.128) as `HttpError` instead of returning them; the response is unchanged. A subclass that checked the value `super.insert()` / `super.update()` returned for an error must catch it instead.
+- **An `onWrite` hook that returns an `Error`** is answered with that error (0.1.128); before, the `Error` was passed on as the data to write.
+- **A field your controller's `hasField` hides is refused in every query position** (0.1.133): a filter, `$sort`, `$select`, `$groupBy`, `$having`, aggregate or calendar-bucket field, `$with` reference or search fallback field that names it answers `400`, like an unknown field. From 0.1.128 to 0.1.132 a filter or sort on a hidden stored column still ran. Since 0.1.134 a unique index over a hidden field no longer identifies rows either (`GET /one/<value>`, `DELETE`, a `PATCH` without the primary key, action ids). See [hasField](/http/customization#hasfield).
+- **Excluding a nested object in `$select` drops the whole object** (0.1.134): `$select=-secret` used to return `secret` with every child. Excluding one of its leaves (`$select=-secret.hash`) keeps the object's other leaves.
+- **db-client: a failure without a server answer throws `TransportError`** (0.1.129): a rejected `fetch` (network, CORS, an aborted `AbortSignal`) or a `2xx` response whose body is not JSON. The original error is its `cause` — code that checked `error.name === "AbortError"` reads `error.cause.name`. A `ClientError` always means the server answered. See [`TransportError`](/http/client#transport-error).
+
+### Schema sync
+
+- **Pre-flight refusals** (0.1.128). A run that would lose data or cannot work — the primary key of a populated table changing, a removed table still referenced by a model, a foreign key to a table that exists nowhere, a physical table under a managed view's name — returns `status: "refused"` and changes nothing. A partial inventory that leaves out a table still referenced by a model in it is refused too, instead of dropping that table. Handle the new status where you read the result. See [Pre-flight refusals](/sync/#pre-flight-refusals).
+- **DDL the database refuses is an `error` entry** (0.1.129) instead of rejecting `run()`; the other tables are applied and persisted. Check `entries` for `status: "error"`.
+- **Safe mode no longer drops a table to change a column type** (0.1.128): `@db.sync.method 'drop'` recreates are skipped and listed in `entry.skipped`. A table or view safe mode did not drop stays tracked and is dropped by the next run that executes.
+- **PostgreSQL: sync never drops with `CASCADE`** (0.1.128; `@db.sync.method 'recreate'` too since 0.1.129). A user-created view, or a foreign key from a table sync does not drop first, makes the drop of a table it depends on an `error` entry. See [Drops Never Cascade](/adapters/postgresql#drops-never-cascade).
+
+### Custom adapters
+
+- `collectQueryPaths()` returns `filter` as `TFilterRef[]` — `{ path, predicate }`, one entry per occurrence — instead of a `string[]` plus `geoFilter` (0.1.132).
+- An entry whose only operator is `$exists` reaches your filter translator on any stored, non-encrypted column, JSON and array columns included, whatever `canFilterField` answers (0.1.132). Translate it as "holds a value": `IS [NOT] NULL` on SQL, `$ne: null` / `null` on a document store, not key presence. See [`canFilterField`](/adapters/creating-adapters#canfilterfield-fd-cansortfield-fd).
+
+### First schema sync after upgrading from 0.1.127 or earlier
+
+- **Every managed view is dropped and recreated once**, on every adapter. The stored definition of a view changed in 0.1.128 (join conditions, filter and having), in 0.1.136 (each column's physical source and its aggregate) and, on MongoDB, in 0.1.137; the first sync sees the difference once and reports each view as `alter`. On MongoDB the recreate is metadata-only. On PostgreSQL it discards the views' `GRANT`s (re-grant them), re-materializes materialized views, and a user-created view that depends on a managed view makes the recreate an `error` entry until you drop it. See [0.1.136](#v0-1-136) and [Views](/sync/what-gets-synced#views).
+- **MySQL rebuilds once every index whose key prefix differs from the 0.1.128 rule**: a `VARCHAR(n)` / `CHAR(n)` member within the 3072-byte key limit is indexed in full and a longer one gets the full limit, instead of `(255)`; a `TEXT` member — a plain `string` without `@expect.maxLength` — keeps `(255)`. See [MySQL limitations](/adapters/mysql#limitations).

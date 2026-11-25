@@ -495,6 +495,8 @@ Arguments for `@db.mongo.search.static`:
 
 Each `@db.mongo.search.text` field can use a different analyzer while belonging to the same named index.
 
+<a id="atlas-string-fields"></a>`@db.mongo.search.text` and `@db.mongo.search.autocomplete` need a field whose declared type holds only strings: `string` or a string primitive (`string.email`), string literals (`'low' | 'high'`), `string | null`, an optional string, or an array of those. A string field inside a nested object or an array of objects counts the same way. On any other field — a number, a decimal, a boolean, an object, `unknown`, a `mongo.objectId`, a union with a non-string member — the annotation is a compile error, shown in your editor, also when it is written in an `annotate` block (since 0.1.188). To search an integer by exact number, list it in [`@db.index.fulltext`](#integer-members-in-atlas) instead; for text search, annotate a string field.
+
 ### Autocomplete & Typeahead
 
 A plain search index matches whole words — `"art"` will not match `"Artem"`. For **as-you-type** matching, annotate the field with `@db.mongo.search.autocomplete`:

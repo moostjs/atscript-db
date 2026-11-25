@@ -1,13 +1,26 @@
-import type { TAnnotationsTree, TMessages } from "@atscript/core";
+import type {
+  AtscriptDoc,
+  SemanticNode,
+  TAnnotationsTree,
+  TAnnotationSpecConfig,
+  TMessages,
+} from "@atscript/core";
 import {
   AnnotationSpec,
+  isArray,
+  isGroup,
   isInterface,
   isStructure,
   isRef,
   isPrimitive,
   annotationExample,
 } from "@atscript/core";
-import { findStoredField, refuseCiphertext } from "@atscript/db/shared";
+import {
+  encryptedSearchProblem,
+  findStoredField,
+  primitiveBaseType,
+  searchFieldVerdict,
+} from "@atscript/db/shared";
 
 import { dynamicSearchEncryptedMessage } from "../lib/search-messages";
 
@@ -91,6 +104,108 @@ const fuzzyDescription =
   '- `2` → more typo tolerance (e.g., `"mongodb"` ≈ `"mangodb"`).\n\n' +
   "Atlas only accepts an edit distance of `1` or `2`; `0` simply disables fuzzy. " +
   "Can be overridden per request via the `$fuzzy` query control.";
+
+/**
+ * What a declared type holds besides strings (`"a number"`, `"an object"`),
+ * or `undefined` when it holds strings only — `null` / `undefined` members
+ * aside — or does not resolve (reported elsewhere). The one rule of the
+ * Atlas Search field annotations that map a field as `string`: a string,
+ * string literals, or an array of them.
+ */
+function nonStringValue(
+  node: SemanticNode | undefined,
+  doc: AtscriptDoc,
+  depth = 0,
+): string | undefined {
+  if (!node || depth > 16) return undefined;
+  // (entity checks, not type guards: a const / type node is a plain `SemanticNode` to TypeScript)
+  if (node.entity === "const") {
+    return node.token("identifier")?.type === "text" ? undefined : `the literal ${node.id}`;
+  }
+  if (isPrimitive(node)) {
+    // (an object id is an id, wherever it sits)
+    if (node.tags.has("mongo") && node.tags.has("objectId")) return "a mongo.objectId";
+    const base = primitiveBaseType(node);
+    if (base === undefined || base === "string" || base === "null" || base === "void") {
+      return undefined;
+    }
+    if (base === "any") return "an unknown value";
+    if (base === "number" && node.tags.has("int")) return "an integer";
+    return `${/^[aeiou]/.test(base) ? "an" : "a"} ${base}`;
+  }
+  if (isRef(node)) {
+    if (!node.hasChain && node.id === "null") return undefined;
+    return nonStringValue(doc.unwindType(node.id!, node.chain)?.def, doc, depth + 1);
+  }
+  if (isArray(node)) {
+    const item = nonStringValue(node.getDefinition(), doc, depth + 1);
+    return item && `${item} in an array`;
+  }
+  if (node.entity === "type") return nonStringValue(node.getDefinition(), doc, depth + 1);
+  // (before groups: a structure is a group of its props too)
+  if (isInterface(node) || isStructure(node)) return "an object";
+  // (a union, an intersection, parentheses, a tuple: every item)
+  if (isGroup(node)) {
+    for (const member of node.unwrap()) {
+      const found = nonStringValue(member, doc, depth + 1);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The prop an annotation on `field` describes: the prop itself, or — for an
+ * `annotate` block entry — the prop the entry names (`undefined` when it names
+ * several, through a union).
+ */
+function describedProp(
+  field: SemanticNode,
+  doc: AtscriptDoc,
+): { prop: SemanticNode; doc: AtscriptDoc } | undefined {
+  if (!isRef(field)) return { prop: field, doc };
+  const at = field.token("identifier")?.range.start;
+  const block = at && doc.annotateBlockAt(at.line, at.character);
+  const found =
+    block && doc.unwindType(block.targetName, [field.id!, ...field.chain.map((c) => c.text)]);
+  return found?.node ? { prop: found.node, doc: found.doc } : undefined;
+}
+
+/**
+ * `validate` of a field annotation that maps the field as an Atlas Search
+ * `string`: the ciphertext refusal, then the rule that the field's declared
+ * type holds strings only.
+ */
+function stringMappingValidate(annotation: string): TAnnotationSpecConfig["validate"] {
+  return (token, _args, doc) => {
+    const messages: TMessages = [];
+    const ciphertext = encryptedSearchProblem(token, doc, annotation);
+    if (ciphertext) messages.push(ciphertext);
+    const field = token.parentNode!;
+    // (the prop's type — or, in an `annotate` block, the type of the prop the entry names)
+    const target = doc.annotatedDefinition(field);
+    const held = target && nonStringValue(target.def, target.doc);
+    if (held) {
+      // (an integer — `number.int`, `@expect.int`, `@db.default.increment` — can join a
+      // fulltext index instead)
+      const described = describedProp(field, doc);
+      const verdict = described && searchFieldVerdict(described.prop, described.doc);
+      const instead =
+        verdict && "kind" in verdict && verdict.kind === "integer"
+          ? "to match it by exact number, list it in @db.index.fulltext; for text search, annotate a string field"
+          : "annotate a string field instead";
+      const name = isRef(field)
+        ? [field.id, ...field.chain.map((c) => c.text)].join(".")
+        : field.id;
+      messages.push({
+        message: `${annotation} on "${name}" needs a field whose declared type holds only strings (a string, string literals, or an array of them), and this field holds ${held}; ${instead}`,
+        severity: 1,
+        range: token.range,
+      });
+    }
+    return messages;
+  };
+}
 
 /**
  * MongoDB-specific annotations.
@@ -307,12 +422,13 @@ export const annotations: TAnnotationsTree = {
       description: annotationExample(
         "Marks a field to be **included in a MongoDB Atlas Search Index** defined by `@db.mongo.search.static`.\n\n" +
           "- **The field has to reference an existing search index name**.\n" +
-          "- If index name is not defined, a new search index with default attributes will be created.",
+          "- If index name is not defined, a new search index with default attributes will be created.\n" +
+          "- The field's declared type must hold only **strings** (a string, string literals, or an array of them); any other type is a compile error. To search an integer by exact number, use `@db.index.fulltext`.",
         '@db.mongo.search.text "lucene.english", "mySearchIndex"',
         "firstName: string",
       ),
       nodeType: ["prop"],
-      validate: refuseCiphertext("@db.mongo.search.text"),
+      validate: stringMappingValidate("@db.mongo.search.text"),
       passedWhenReferred: false,
       multiple: true,
       argument: [
@@ -342,12 +458,13 @@ export const annotations: TAnnotationsTree = {
           "- Indexes the field as the Atlas **`autocomplete`** type, **and** double-maps it as `string` so exact-word hits still rank.\n" +
           '- Lets `search()` match partial words: with the default `edgeGram` tokenization, `"art"` matches `"Artem"` **as you type** (no whole word required).\n' +
           "- Use `nGram` tokenization for true mid-word (infix/substring) matching at higher index cost.\n" +
-          "- Like `@db.mongo.search.text`, the field joins the index named by `indexName` (or the default index).",
+          "- Like `@db.mongo.search.text`, the field joins the index named by `indexName` (or the default index).\n" +
+          "- The field's declared type must hold only **strings** (a string, string literals, or an array of them); any other type is a compile error.",
         '@db.mongo.search.autocomplete "users"',
         "username: string",
       ),
       nodeType: ["prop"],
-      validate: refuseCiphertext("@db.mongo.search.autocomplete"),
+      validate: stringMappingValidate("@db.mongo.search.autocomplete"),
       passedWhenReferred: false,
       multiple: true,
       argument: [
