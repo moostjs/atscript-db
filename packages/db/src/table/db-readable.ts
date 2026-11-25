@@ -325,7 +325,8 @@ function withInnerKeys(query: AggregateQuery): AggregateQuery {
 /**
  * Checks whether an id value is type-compatible with a field's design type.
  * Used by `findById` to skip primary-key lookup when the id clearly can't match,
- * falling through to unique-property search instead.
+ * falling through to unique-property search instead. Takes the value after
+ * {@link idValue} (a boolean field's `"true"` / `"false"` already a boolean).
  */
 function isIdCompatible(id: unknown, fieldType: TAtscriptAnnotatedType): boolean {
   const dt = resolveDesignType(fieldType);
@@ -2538,7 +2539,17 @@ export class AtscriptDbReadable<
   }
 }
 
-/** An id value as the field stores it (`@normalize.*` applied), like a filter's equality. */
+/**
+ * An id value as the field stores it (`@normalize.*` applied), like a
+ * filter's equality. For a boolean field the text `true` / `false` — what a
+ * URL carries (`GET /one?id=…&active=true`) — is the boolean it names (since
+ * 0.1.192), so the filter compares a boolean; any other text stays text and
+ * {@link isIdCompatible} refuses it.
+ */
 function idValue(fieldType: TAtscriptAnnotatedType | undefined, value: unknown): unknown {
-  return fieldType && typeof value === "string" ? normalizeForType(fieldType, value) : value;
+  if (!fieldType || typeof value !== "string") return value;
+  if (resolveDesignType(fieldType) === "boolean") {
+    return value === "true" ? true : value === "false" ? false : value;
+  }
+  return normalizeForType(fieldType, value);
 }

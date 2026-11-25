@@ -42,6 +42,7 @@ import {
   computeInsights,
   defaultFulltextIndex,
   containsRelationFilter,
+  resolveDesignType,
   type AtscriptDbView,
   type TReadColumnsKind,
 } from "@atscript/db";
@@ -481,6 +482,11 @@ export class MongoAdapter extends BaseDbAdapter {
     const tags = fieldType.type.tags;
     if ((tags as Set<string>)?.has("objectId") && (tags as Set<string>)?.has("mongo")) {
       return id instanceof ObjectId ? id : new ObjectId(id as string);
+    }
+    // a boolean key part (`boolean | null` included) compares as the boolean
+    // the framework hands over
+    if (resolveDesignType(fieldType) === "boolean") {
+      return id;
     }
     if (fieldType.type.kind === "") {
       const dt = (fieldType.type as any).designType;

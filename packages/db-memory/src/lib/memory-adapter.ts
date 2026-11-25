@@ -13,6 +13,7 @@ import {
   containsRelationFilter,
   isAtscriptDbView,
   isPlainObject,
+  resolveDesignType,
 } from "@atscript/db";
 import type {
   DbQuery,
@@ -227,11 +228,16 @@ export class MemoryAdapter extends BaseDbAdapter {
    * coerce the bound parameter; memory cannot, so it MUST coerce here.
    *
    * Mirrors the Mongo adapter's `prepareId` MINUS its `objectId` branch (an
-   * in-memory store has no ObjectId ids): a leaf `designType` of `"number"`
+   * in-memory store has no ObjectId ids): a boolean field — `boolean | null`
+   * included — keeps the boolean the framework hands over (a key part
+   * `active: boolean`, since 0.1.192), a leaf `designType` of `"number"`
    * coerces via `Number(id)`, everything else via `String(id)`.
    */
   override prepareId(id: unknown, _fieldType: unknown): unknown {
     const fieldType = _fieldType as TAtscriptAnnotatedType;
+    if (resolveDesignType(fieldType) === "boolean") {
+      return id;
+    }
     if (fieldType.type.kind === "") {
       const dt = (fieldType.type as any).designType;
       if (dt === "number") {

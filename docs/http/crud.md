@@ -148,6 +148,8 @@ curl "http://localhost:3000/task-tags/one?taskId=1&tagId=2"    # composite prima
 
 The controller walks every registered identification (primary key + every unique index, single-field and compound) in declaration order and picks the first whose fields are all present in the query.
 
+A boolean key field takes exactly `true` or `false` (`/drafts/one?id=42&active=true`, what `@atscript/db-client` sends for `client.one({ id: 42, active: true })`, since 0.1.192); any other value matches no row (`404`).
+
 ### GET /meta {#get-meta}
 
 Returns table or view metadata for use by UI tooling or client libraries.

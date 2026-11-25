@@ -76,3 +76,75 @@ describe("MemoryAdapter.prepareId (type coercion for by-id filters)", () => {
     expect(await sequences.findById("999")).toBeNull();
   });
 });
+
+// A boolean part of a composite primary key (since 0.1.192): the framework
+// hands over a real boolean (the text `true` / `false` of a URL included) and
+// `prepareId` must keep it — `String(true)` never equals a stored `true`.
+describe("MemoryAdapter — a boolean part of a composite primary key", () => {
+  let space: DbSpace;
+  let drafts: AtscriptDbTable;
+
+  beforeAll(async () => {
+    await prepareFixtures();
+  });
+
+  beforeEach(async () => {
+    const { BkDraft } = await import("./fixtures/boolean-key.as");
+    space = createTestSpace();
+    drafts = space.getTable(BkDraft);
+    await bootstrapStoredTables(space, [BkDraft]);
+    await drafts.insertMany([
+      { id: "a", active: true, title: "live" },
+      { id: "a", active: false, title: "draft" },
+    ] as never);
+  });
+
+  it("keeps the boolean", () => {
+    const adapter = drafts.getAdapter() as MemoryAdapter;
+    expect(adapter.prepareId(true, drafts.flatMap.get("active")!)).toBe(true);
+  });
+
+  it.each([
+    [true, "live"],
+    [false, "draft"],
+    ["true", "live"],
+    ["false", "draft"],
+  ])("findById with active %j finds the %s row", async (active, title) => {
+    expect(await drafts.findById({ id: "a", active } as never)).toMatchObject({ title });
+  });
+
+  it("updates and deletes the row by its key", async () => {
+    await drafts.updateOne({ id: "a", active: false, title: "edited" } as never);
+    expect(await drafts.findById({ id: "a", active: false } as never)).toMatchObject({
+      title: "edited",
+    });
+    expect((await drafts.deleteOne({ id: "a", active: true } as never)).deletedCount).toBe(1);
+  });
+});
+
+describe("MemoryAdapter — a nullable boolean part of a compound unique index", () => {
+  let flags: AtscriptDbTable;
+
+  beforeAll(async () => {
+    await prepareFixtures();
+  });
+
+  beforeEach(async () => {
+    const { BkFlag } = await import("./fixtures/boolean-key.as");
+    const space = createTestSpace();
+    flags = space.getTable(BkFlag);
+    await bootstrapStoredTables(space, [BkFlag]);
+    await flags.insertMany([
+      { id: "1", code: "x", flag: true, title: "on" },
+      { id: "2", code: "x", flag: false, title: "off" },
+    ] as never);
+  });
+
+  it.each([
+    ["true", "on"],
+    ["false", "off"],
+    [true, "on"],
+  ])("findById with flag %j finds the %s row", async (flag, title) => {
+    expect(await flags.findById({ code: "x", flag } as never)).toMatchObject({ title });
+  });
+});
