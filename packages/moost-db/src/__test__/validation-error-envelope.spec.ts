@@ -465,6 +465,61 @@ describe("Finding 3c — Identifier strict-mode ValidatorError surfaces as HTTP 
   });
 });
 
+// Why: a caller who writes the request by hand often sends the identifier at
+// the body root (`{ "id": 1 }`). The body is an object, so only an error that
+// names the missing `ids` key tells them where the identifier belongs.
+describe("an action request without `ids` names the key in its 400", () => {
+  async function post(level: "row" | "rows", body: unknown) {
+    const table = makeMockTable();
+
+    @TableController(table)
+    class ItemsControllerNoIds extends AsDbController {
+      @Post("actions/one")
+      @DbAction("one", { label: "One" })
+      async one(@DbActionID() _id: Record<string, unknown>): Promise<unknown> {
+        return { ok: true };
+      }
+
+      @Post("actions/many")
+      @DbAction("many", { label: "Many" })
+      async many(@DbActionIDs() _ids: Array<Record<string, unknown>>): Promise<unknown> {
+        return { ok: true };
+      }
+    }
+
+    const { http } = await buildApp(ItemsControllerNoIds);
+    const res = await http.request(
+      `/${table.tableName}/actions/${level === "row" ? "one" : "many"}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    return readJson(res);
+  }
+
+  it.each([{ id: "1" }, { id: { id: "1" } }, {}])("row action, body %j", async (sent) => {
+    const { status, body } = await post("row", sent);
+    expect(status).toBe(400);
+    expect((body as any).errors[0].message).toMatch(/^Expected "ids": the row's identifier object/);
+  });
+
+  it("rows action", async () => {
+    const { status, body } = await post("rows", { id: "1" });
+    expect(status).toBe(400);
+    expect((body as any).errors[0].message).toMatch(
+      /^Expected "ids": an array of identifier objects/,
+    );
+  });
+
+  it("a present but malformed `ids` keeps its own error", async () => {
+    const { status, body } = await post("row", { ids: "1" });
+    expect(status).toBe(400);
+    expect((body as any).errors[0].message).toBe("Expected JSON object for row identifier");
+  });
+});
+
 /**
  * Finding 3c — gate-interceptor before-time throw. With `disabled: fn` +
  * `@DbActionRow*`, `buildGateInterceptor` runs at AFTER_GUARD=3 and its

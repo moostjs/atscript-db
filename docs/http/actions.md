@@ -141,7 +141,7 @@ The validator is **strict** — unknown fields are rejected with HTTP 400. Prece
 { "ids": [{ "id": 1 }, { "email": "x@y" }] }                   // rows, mixed identifier shapes
 ```
 
-Even single-field PK tables MUST send `{ "ids": { "id": "abc" } }`, never bare `"abc"`. `Content-Type: application/json` only.
+Even single-field PK tables MUST send `{ "ids": { "id": "abc" } }`, never bare `"abc"`. `Content-Type: application/json` only. A body without the `ids` key, such as `{ "id": "abc" }`, answers `400` with `Expected "ids": the row's identifier object, as in { "ids": { "id": 1 } }` (since 0.1.190; the array form for a `'rows'` action).
 
 Field names are **logical** (the `.as` prop names) — never physical column names from `@db.column "..."`. The matcher always operates in logical-name space.
 

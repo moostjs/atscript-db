@@ -6,6 +6,18 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.190 {#v0-1-190}
+
+### Changes
+
+- **An action request without `ids` says so.** A `'row'` or `'rows'` action called with a body that has no `ids` key (the identifier at the body root, say: `{ "id": 1 }`) answers `400` with `Expected "ids": the row's identifier object, as in { "ids": { "id": 1 } }` (or the array form for a `'rows'` action). Before, the message was `Expected JSON object for row identifier` / `Expected JSON array of identifier objects`, which a present but malformed `ids` still gets. Only the message text changes; code that compares it must be updated. See [the action envelope](/http/actions).
+
+## 0.1.189 {#v0-1-189}
+
+### Documentation
+
+- **A rule across fields of one row** (a field required only when another has some value, keys that must name entries of the row's own array) is checked in `checkWrite`, where the stored row already has the patch applied. See [Recipe — a rule across fields](/http/customization#cross-field-rule).
+
 ## 0.1.188 {#v0-1-188}
 
 ### Changes

@@ -1,3 +1,4 @@
+import { ValidatorError } from "@atscript/typescript/utils";
 import { cached, defineWook, key, type EventContext } from "@wooksjs/event-core";
 
 import { boundTableKey, controllerOf, noTableError } from "./controller-access";
@@ -89,6 +90,11 @@ export function requestIdOf(
   return echoRequests(ctx, [{ id }])[0]!.id;
 }
 
+const MISSING_IDS = {
+  row: 'Expected "ids": the row\'s identifier object, as in { "ids": { "id": 1 } }',
+  rows: 'Expected "ids": an array of identifier objects, as in { "ids": [{ "id": 1 }, { "id": 2 }] }',
+} as const;
+
 /**
  * Validates the body's `ids` against the action table's identifications. For
  * the controller's own table that is its `idSource` (since 0.1.134): a unique
@@ -116,6 +122,11 @@ async function resolveValidatedId(
     throw noTableError(ctx);
   }
   const env = await ctx.get(dbActionBodySlot);
+  if (env.ids === undefined) {
+    // Name the key: a body such as `{ "id": 1 }` is an object, so the shape
+    // error below would not tell the caller where the identifier belongs.
+    throw new ValidatorError([{ path: "", message: MISSING_IDS[level] }]);
+  }
   validate(env.ids, source);
   const scoped = ctx.get(scopedControllerSlot);
   const resolve = scoped?.[ROW_RESOLVES] ? scoped[ROW_RESOLVE_IDS] : undefined;
