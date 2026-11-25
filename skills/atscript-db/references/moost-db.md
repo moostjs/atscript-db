@@ -218,6 +218,16 @@ export class UsersController extends AsDbController<typeof User> {
     const n = await ctx.count({ $and: [{ $or: [...ctx.filters] }, { tenantId: useTenant() }] });
     if (n !== ctx.filters.length) throw new HttpError(403);
   }
+  // Rule across fields (conditional required, key references inside one row): ALSO checkWrite —
+  // the post-image IS the merged row (never merge stored row + patch by hand in onWrite: no tx,
+  // wrong for patch strategies / array ops). Count the broken state
+  // (`{ kind: "group", groupName: { $exists: false } }` AND-ed with `{ $or: ctx.filters }`) or read
+  // `this.table.findMany({ filter: { $or: [...ctx.filters] }, controls: {} })` and check in code;
+  // throw `new ValidatorError([{ path, message }])` (`@atscript/typescript/utils`) → the usual 400 at the
+  // field. Encrypted field / inside a JSON or array column on SQL → the read form (a filter on it is refused).
+  // Only the written row: a rule reading other rows races → lock first (row-cap recipe). `ctx.transactional
+  // === false` (standalone Mongo, memory) → no rollback; refuse in guardWrite instead, merging
+  // `ctx.current(i)` + `ctx.rows[i]` by hand (whole row on insert/replace, patch on update).
   // Row cap per parent/scope (no built-in option) → § Recipes below: lock the parent in
   // guardWrite, THEN count. A bare count (guardWrite or checkWrite) races on PG/MySQL/Mongo.
   protected authorizeForm(name: string, actionNames: readonly string[]) {

@@ -723,6 +723,48 @@ protected override async checkWrite(ctx: TDbWriteCheckContext) {
 - **Don't** rely on the rollback when `ctx.transactional` is `false` (standalone MongoDB, the memory adapter): validate before the write in [`guardWrite`](#guardwrite) there.
 - Nested writes a deep payload performs on related tables do not re-run it.
 
+#### Recipe — a rule across fields {#cross-field-rule}
+
+An annotation constrains one field. A rule over several fields of one row ("`groupName` is required when `kind` is `'group'`", "every `locationKeys` entry names an entry of the row's own `locations` array") has to hold for the **stored row**, not for the request body: a `PATCH` may carry one of the fields while the other is already stored. `checkWrite` runs after the write, so the row it sees is the stored row with the patch applied. Nothing is merged by hand, and the read shares the write's transaction.
+
+When the broken state can be written as a filter, count it. `$exists: false` matches a field that holds no value (missing or `null`); an empty string is a value, so add `{ groupName: "" }` under an `$or` if it should count as missing:
+
+```typescript
+import { ValidatorError } from "@atscript/typescript/utils";
+
+protected override async checkWrite(ctx: TDbWriteCheckContext) {
+  const broken = await ctx.count({
+    $and: [{ $or: [...ctx.filters] }, { kind: "group", groupName: { $exists: false } }],
+  });
+  if (broken > 0) {
+    throw new ValidatorError([{ path: "groupName", message: "Required for a group" }]);
+  }
+}
+```
+
+Otherwise read the written rows and check them in code. Use this form too when the rule involves an [encrypted](/api/encryption) field (a filter on one is refused; the read returns it decrypted) or looks inside a JSON or array column on an SQL adapter:
+
+```typescript
+protected override async checkWrite(ctx: TDbWriteCheckContext) {
+  const rows = await this.table.findMany({ filter: { $or: [...ctx.filters] }, controls: {} });
+  for (const row of rows) {
+    const known = new Set(row.locations.map((l) => l.key));
+    const i = row.licenses.findIndex((l) => l.locationKeys.some((k) => !known.has(k)));
+    if (i >= 0) {
+      throw new ValidatorError([
+        { path: `licenses.${i}.locationKeys`, message: "Names a location that does not exist" },
+      ]);
+    }
+  }
+}
+```
+
+- A thrown `ValidatorError` is answered as the usual `400` with `errors: [{ path, message }]`, so a form shows the message at the field.
+- **Don't** put such a rule in [`onWrite`](#onwrite). It sees the request body before validation and outside the transaction, so it needs a read and a merge of its own, and the merge has to repeat what each [patch strategy](/api/update-patch) and array operator does. Two requests that each pass alone can also break the rule together.
+- The rule may read only the written row. A rule that reads other rows or tables ("at most one default per account") can be broken by two requests running at the same time, each seeing only its own write; lock first, as in the [row cap recipe](#row-cap).
+- When `ctx.transactional` is `false` (standalone MongoDB, the memory adapter) the write is already stored when the check runs, and a throw does not undo it. The only place to refuse the write there is [`guardWrite`](#guardwrite), before the write: `ctx.current(i)` is the stored row and `ctx.rows[i]` what the request sends (the whole row on insert and replace, the patch on update), and applying the patch to the stored row is then your code's job, with no protection against a concurrent write.
+- A direct table write skips the controller; pass the same function as the [`check` write option](/api/crud#write-check) there.
+
 #### Recipe — at most N rows per parent or scope {#row-cap}
 
 There is no built-in row-cap option. Count the rows in the write's own transaction, but count in a way concurrent writes cannot slip past.

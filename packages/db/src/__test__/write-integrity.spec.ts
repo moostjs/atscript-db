@@ -811,6 +811,26 @@ describe("post-write check", () => {
     expect(h.log.at(-1)).toBe("rollback");
   });
 
+  // Why: a rule across fields ("archived" only without an owner) must hold for the
+  // stored row, not for the patch. A sparse patch carries one of the two fields, so
+  // only the post-image can be judged; the check reads it inside the transaction.
+  it("a rule across fields holds for a sparse patch (the check reads the written rows)", async () => {
+    const broken = new Error("an archived project has no owner");
+    const projects = h.table(WiProject);
+    const check = async (ctx: TDbWriteCheckContext) => {
+      const query = { filter: { $or: ctx.filters }, controls: {} };
+      const rows = (await projects.findMany(query as never)) as Row[];
+      if (rows.some((r) => r.title === "archived" && r.ownerId != null)) throw broken;
+    };
+    // each patch alone is harmless; with the stored field it breaks the rule
+    await expect(projects.updateOne({ id: 1, title: "archived" }, { check })).rejects.toBe(broken);
+    expect(h.rows("wi_projects").find((p) => p.id === 1)).toMatchObject({ title: "p1" });
+    await projects.insertOne({ id: 9, title: "archived" }, { check });
+    await expect(projects.updateOne({ id: 9, ownerId: 1 }, { check })).rejects.toBe(broken);
+    expect(h.rows("wi_projects").find((p) => p.id === 9)?.ownerId ?? null).toBeNull();
+    await projects.updateOne({ id: 9, title: "renamed" }, { check });
+  });
+
   it("transactional is false on a pass-through adapter", async () => {
     const pass = createSpace(false);
     const { check, calls } = capture();

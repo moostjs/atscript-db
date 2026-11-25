@@ -232,6 +232,50 @@ describe("Finding 3a — @db.json column inner-shape ValidatorError surfaces as 
   });
 });
 
+// Why: a rule across fields is checked in `checkWrite` and reported with a
+// `ValidatorError`, so a form can show the message at the field. The error must
+// leave the table call unchanged and be answered like the table's own validation.
+describe("a ValidatorError thrown from checkWrite surfaces as HTTP 400 with its paths", () => {
+  it("PATCH answers 400 with the field path", async () => {
+    const table = makeMockTable();
+    // the table runs the `check` write option after the write
+    table.updateOne.mockImplementation(async (_patch: unknown, opts: any) => {
+      await opts.check({
+        action: "update",
+        filters: [{ id: "1" }],
+        transactional: true,
+        count: async () => 1,
+      });
+      return { matchedCount: 1, modifiedCount: 1 };
+    });
+
+    @TableController(table)
+    class ItemsControllerCheck extends AsDbController {
+      protected override async checkWrite(ctx: {
+        count(f: Record<string, unknown>): Promise<number>;
+      }) {
+        if ((await ctx.count({ kind: "group", groupName: { $exists: false } })) > 0) {
+          throw new ValidatorError([{ path: "groupName", message: "Required for a group" }]);
+        }
+      }
+    }
+
+    const { http } = await buildApp(ItemsControllerCheck);
+    const res = await http.request(`/${table.tableName}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "1", name: "x" }),
+    });
+    const { status, body } = await readJson(res);
+
+    expect(status).toBe(400);
+    expect(body).toMatchObject({
+      statusCode: 400,
+      errors: [{ path: "groupName", message: "Required for a group" }],
+    });
+  });
+});
+
 describe("Finding 3b — Action @InputForm payload ValidatorError surfaces as HTTP 400", () => {
   // Stub `.as`-compiled form type: validator throws `ValidatorError` when
   // `value.reason` isn't a string. Mirrors what `@InputForm(SuspendInput)` +

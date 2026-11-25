@@ -182,6 +182,22 @@ describe("single-statement writes skip the wrapping transaction", () => {
     expect((await profiles.findById(3)).tags).toEqual(["a", "b"]);
   });
 
+  // Why: a rule across fields is judged on the stored row. The check must see the
+  // row as the sparse patch left it, and its throw must undo the patch.
+  it("a check reads the post-image of a sparse patch; its throw rolls the patch back", async () => {
+    await profiles.insertOne(profile(1));
+    const broken = new Error("rule across fields");
+    let seen: unknown;
+    const check = async (ctx: { filters: ReadonlyArray<Record<string, unknown>> }) => {
+      const [row] = await profiles.findMany({ filter: { $or: [...ctx.filters] }, controls: {} });
+      seen = { name: row.name, tags: row.tags };
+      if (row.name === "locked" && row.tags.length > 0) throw broken;
+    };
+    await expect(profiles.updateOne({ id: 1, name: "locked" }, { check })).rejects.toBe(broken);
+    expect(seen).toEqual({ name: "locked", tags: ["a"] }); // patched name, stored tags
+    expect((await profiles.findById(1)).name).toBe(profile(1).name);
+  });
+
   it("inside an outer transaction the write joins it", async () => {
     const adapter = profiles.dbAdapter as SqliteAdapter;
     await adapter.withTransaction(async () => {
