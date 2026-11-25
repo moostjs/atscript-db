@@ -3,8 +3,8 @@ packages:
   - docs
 
 catalog:
-  "@atscript/core": ^0.2.16
-  "@atscript/typescript": ^0.2.16
+  "@atscript/core": ^0.2.17
+  "@atscript/typescript": ^0.2.17
   "@moostjs/event-http": ^0.7.8
   "@types/node": ^24
   "@uniqu/core": ^0.2.2
@@ -15,7 +15,7 @@ catalog:
   moost: ^0.7.8
   sqlite-vec: ^0.1.9
   typescript: ^5
-  unplugin-atscript: ^0.2.16
+  unplugin-atscript: ^0.2.17
   vite: npm:@voidzero-dev/vite-plus-core@0.1.12
   vite-plus: latest
   vitest: npm:@voidzero-dev/vite-plus-test@latest
