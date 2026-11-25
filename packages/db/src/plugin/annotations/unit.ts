@@ -5,6 +5,7 @@ import {
   validateFieldBaseType,
   validateSiblingStringField,
 } from "../../shared/annotation-utils";
+import { siblingFieldValues } from "../lsp-scopes";
 
 const UNIT_HOST_TYPES = ["decimal", "number"];
 
@@ -65,6 +66,7 @@ export const dbUnitAnnotations: TAnnotationsTree = {
         name: "fieldName",
         type: "string",
         description: "Name of the sibling property holding the unit code.",
+        valueScope: siblingFieldValues,
       },
       validate(token, args, doc) {
         const errors: TMessages = [];

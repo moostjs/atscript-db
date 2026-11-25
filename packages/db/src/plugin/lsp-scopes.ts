@@ -1,16 +1,19 @@
 import { isRef } from "@atscript/core";
 import type {
+  AtscriptDoc,
   SemanticNode,
   TAnnotationArgument,
   TAnnotationTokens,
   Token,
   TQueryScope,
+  TValueCandidate,
 } from "@atscript/core";
 
 import {
   getAnnotationAlias,
   getDbTableOwner,
   getNavTargetTypeName,
+  siblingStringFields,
 } from "../shared/annotation-utils";
 import {
   earlierJoinTargets,
@@ -25,6 +28,9 @@ import {
  * filters of the ref arguments — one function per rule. The validators in
  * `annotations/*` derive their in-scope types from these SAME functions, so a
  * diagnostic and what the editor completes, hovers and jumps to never diverge.
+ * One exception: the sibling-field argument of `@db.amount.currency.ref` /
+ * `@db.unit.ref` offers the string-valued fields, while its validator also
+ * lets through a field whose type it cannot classify.
  * @since 0.1.141
  */
 
@@ -104,6 +110,26 @@ export function aggFieldScope(propToken: Token): TQueryScope | undefined {
   const view = refType ? undefined : getDbTableOwner(propToken);
   const target = refType ?? (view ? viewEntry(view) : undefined);
   return target ? { allowedTypes: [], unqualifiedTarget: target } : undefined;
+}
+
+/**
+ * The `valueScope` of the `@db.amount.currency.ref` / `@db.unit.ref`
+ * argument: the string-valued fields of the type the annotated field belongs
+ * to, declared or inherited through `extends` ({@link siblingStringFields}:
+ * a string, an alias of one, `db.currencyCode`, optional or `| null`, a union
+ * of string literals — never the field itself, an object, a number or a
+ * dotted path). The validator also lets through a field whose type it cannot
+ * classify. Go-to-definition jumps to the field in the file that declares it.
+ * @since 0.1.192
+ */
+export function siblingFieldValues(annotationToken: Token, doc: AtscriptDoc): TValueCandidate[] {
+  return siblingStringFields(annotationToken, doc).map((prop) => {
+    const token = prop.token("identifier");
+    return {
+      value: prop.id ?? "",
+      definition: token && { doc: doc.declaringDoc(prop, doc), token },
+    };
+  });
 }
 
 /**

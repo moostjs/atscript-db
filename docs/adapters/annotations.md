@@ -419,7 +419,7 @@ Bind a numeric field to its **dimension** (currency code, unit of measure) so th
 | `@db.unit`                | Field (`decimal\|number`) | `code` (string)      | Hard-coded unit of measure (`'kg'`, `'rpm'`, `'qps'`, `'requests/sec'`). Free-form string — no shape validation. Schema-wide constant.                                                    |
 | `@db.unit.ref`            | Field (`decimal\|number`) | `fieldName` (string) | Bind this quantity to a sibling field holding the per-row unit. Sibling must exist and resolve to a `string`.                                                                             |
 
-The two forms (literal vs `.ref`) are mutually exclusive on the same field. Money-bearing fields must be `decimal` — floats lose cents. Quantity fields accept both `decimal` (weights, lengths) and `number` (counts, rates).
+The sibling a `.ref` names is a field of the same interface, declared there or inherited through `extends` (since 0.1.192). The two forms (literal vs `.ref`) are mutually exclusive on the same field. Money-bearing fields must be `decimal` — floats lose cents. Quantity fields accept both `decimal` (weights, lengths) and `number` (counts, rates).
 
 ### `db.currencyCode` primitive
 

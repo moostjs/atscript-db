@@ -41,7 +41,7 @@ interface Task {
 
 Constraints (enforced at compile time):
 
-- **At most one** version column per table — composite versioning makes no semantic sense.
+- **At most one** version column per table — composite versioning makes no semantic sense. A version column inherited through `extends` counts.
 - The field must resolve to a SQL `INTEGER` (or Mongo `Number`). String / timestamp versioning is not supported.
 - The annotation takes no arguments. To store the field under another column name, add [`@db.column`](/api/tables#custom-column-names) as for any field (`@db.column 'row_version'`). The rename changes only the storage column: `$cas`, write bodies, rows read back and `/meta`'s `versionColumn` keep using the field name (`version`). Renamed version fields are supported since 0.1.141.
 - The field is **server-managed**: the adapter sets it to `0` on insert and increments it by `1` on every successful update that writes a non-exempt field (see [Version-exempt fields](#version-exempt)). See [defaults](./defaults#version-defaults).
@@ -213,7 +213,7 @@ Where it applies:
 - **Objects.** Marking an object field covers every nested field. An object whose fields are _all_ exempt counts as exempt itself, so a [replace-strategy](./update-patch) write of that object stays exempt. In a [`merge`-strategy](./update-patch) object, only the supplied children count: `{ mixed: { cached: 1 } }` is exempt when `cached` is, `{ mixed: { label: "x" } }` is not. A replace-strategy object that is only partly exempt bumps, because the write null-fills its optional siblings.
 - **Allowed on** scalars, `@db.encrypted` fields, `@db.json` fields (the whole JSON column), array fields (the whole array), foreign-key columns, fields with `@db.default*` and nested object fields.
 - **Rejected** (compile error, mirrored at runtime): on the `@db.column.version` field itself, on a `@meta.id` field, on a navigation field (`@db.rel.*`), below a `@db.json` field or inside an array of objects (mark the JSON / array field itself), and together with `@db.column.derived`.
-- **Warned** (compile time): the annotation on a table that declares no `@db.column.version`, or on a `@db.ignore` field — it has no effect there.
+- **Warned** (compile time): the annotation on a table that has no `@db.column.version` (declared or inherited through `extends`), or on a `@db.ignore` field — it has no effect there.
 - Nested writes through `@db.rel.*` follow the **related table's** own schema; the parent is bumped only by its own non-exempt columns.
 - It is not part of the schema snapshot or hash: adding or removing the annotation causes no sync.
 - `table.versionExemptFields` lists the exempt logical paths, including objects covered by the all-children rule.

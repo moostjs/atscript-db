@@ -137,6 +137,13 @@ describe("index metadata", () => {
     expect(idx.get("ft_tags")).toMatchObject({ language: "none" });
   });
 
+  it("applies to an index on a field the table inherits from its base type", () => {
+    expect(indexesOf(fx.FtoInherited).get("ft_body")).toMatchObject({
+      type: "fulltext",
+      language: "russian",
+    });
+  });
+
   it("no option, no keys — and the table snapshot stays as before", () => {
     const idx = indexesOf(fx.FtoPlain).get("ft_body")!;
     expect("language" in idx).toBe(false);

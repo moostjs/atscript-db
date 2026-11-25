@@ -182,6 +182,7 @@ embedding: db.vector
 MongoDB always uses `_id` as the document primary key. The adapter enforces this regardless of your schema:
 
 - **Auto-injection** — `@db.mongo.collection` adds `_id: mongo.objectId` if not declared. The `_id` field is always non-optional.
+- **`_id` on the collection's own interface** — declare `_id` on the interface that carries `@db.mongo.collection`, not on a base type it `extends`: a base type that declares `_id` is refused with `Property "_id" already exists in parent "…" — override in extends is not allowed`.
 - **Custom `@meta.id` fields** — Marking a non-`_id` field with `@meta.id` does not make it a MongoDB primary key. Instead, the adapter creates a unique index on it and registers it for fallback lookups.
 - **`findById` resolution** — First tries `_id`, then falls back to fields marked with `@meta.id`. So `findById(42)` works when `42` is an auto-incremented `id` field rather than an ObjectId.
 - **`prepareId()` conversion** — Automatically converts string IDs to `ObjectId` instances (for `mongo.objectId` fields) or to numbers (for numeric `_id` fields), so you can pass string values from URL parameters directly.

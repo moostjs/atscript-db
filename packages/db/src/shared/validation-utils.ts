@@ -21,7 +21,7 @@ import {
   isStructure,
 } from "@atscript/core";
 
-import { getAnnotationAlias, isNullMember } from "./annotation-utils";
+import { getAnnotationAlias, getTypeFields, isNullMember } from "./annotation-utils";
 import { DB_ENTITY_ANNOTATIONS } from "./derived-rules";
 
 /** Options of {@link validateRefArgument}. */
@@ -186,7 +186,8 @@ export function fkChainRef(def: SemanticNode | undefined): SemanticRefNode | und
 
 /**
  * Find all `@db.rel.FK` fields on a type that reference `targetTypeName`.
- * Resolves `extends` to include inherited fields.
+ * Inherited fields included ({@link getTypeFields}) — also when `iface` is
+ * the structure an interface with `extends` declares (since 0.1.192).
  */
 export function findFKFieldsPointingTo(
   doc: AtscriptDoc,
@@ -195,27 +196,12 @@ export function findFKFieldsPointingTo(
   alias?: string,
 ): TFKFieldMatch[] {
   const results: TFKFieldMatch[] = [];
-
-  // Resolve extends if it's an interface with parents
-  let struct: SemanticStructureNode | undefined;
-  if (isInterface(iface) && iface.hasExtends) {
-    const resolved = doc.resolveInterfaceExtends(iface);
-    if (resolved && isStructure(resolved)) {
-      struct = resolved;
-    }
-  }
-  if (!struct) {
-    struct = isStructure(iface)
-      ? iface
-      : isInterface(iface) && isStructure(iface.getDefinition())
-        ? (iface.getDefinition() as SemanticStructureNode)
-        : undefined;
-  }
-  if (!struct) {
+  const fields = getTypeFields(iface, doc);
+  if (!fields) {
     return results;
   }
 
-  for (const [name, prop] of struct.props) {
+  for (const [name, prop] of fields) {
     if (prop.countAnnotations("db.rel.FK") === 0) {
       continue;
     }

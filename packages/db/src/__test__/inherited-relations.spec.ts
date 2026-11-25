@@ -74,12 +74,12 @@ export interface IrSpecial extends IrParent {
       {
         severity: 2,
         message:
-          'Inherited relation "kids" (@db.rel.from) is linked to "ir_parents", not to "ir_special" — here its nested writes are refused and it loads nothing; redeclare "kids" with a @db.rel.FK referencing IrSpecial',
+          'Inherited relation "kids" (@db.rel.from) is linked to "ir_parents", not to "ir_special" — here its nested writes are refused and it loads nothing; declare it on each table instead of inheriting it (an inherited field cannot be redeclared)',
       },
       {
         severity: 2,
         message:
-          'Inherited relation "tags" (@db.rel.via) is linked to "ir_parents", not to "ir_special" — here its nested writes are refused and it loads nothing; redeclare "tags" with a @db.rel.FK referencing IrSpecial',
+          'Inherited relation "tags" (@db.rel.via) is linked to "ir_parents", not to "ir_special" — here its nested writes are refused and it loads nothing; declare it on each table instead of inheriting it (an inherited field cannot be redeclared)',
       },
     ]);
   });

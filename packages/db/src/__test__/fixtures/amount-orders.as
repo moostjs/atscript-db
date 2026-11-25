@@ -30,3 +30,22 @@ export interface SingleCurrencyOrder {
     @db.amount.currency 'EUR'
     amount: decimal
 }
+
+export interface CurrencyOrderBase {
+    @meta.id
+    @db.default.increment
+    id: number
+
+    @db.column.dimension
+    currency: db.currencyCode
+}
+
+@db.table "inherited_currency_orders"
+export interface InheritedCurrencyOrder extends CurrencyOrderBase {
+    @db.column.dimension
+    status: string
+
+    @db.column.measure
+    @db.amount.currency.ref 'currency'
+    amount: decimal
+}

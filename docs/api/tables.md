@@ -217,8 +217,8 @@ await table.updateOne({ email: "a@x.test", name: "X" }, { isFieldVisible: visibl
 
 Primary-key, `preferredId` and `@meta.id` fields always count as visible. `updateOne` / `replaceOne` apply the predicate only when the payload lacks its primary key (the unique-index fallback). The moost-db controllers pass it automatically from [`hasField`](/http/customization#hasfield).
 
-::: warning Same-interface constraint
-The `@db.index.unique` group MUST be declared on a property of **this** interface, not inherited. `asc` walks the local property list only; if the only matching unique index lives on an `extends`-parent you get `@db.table.preferredId.uniqueIndex requires at least one @db.index.unique on a prop of this interface.` Declare both annotations on the same interface (the one carrying `@db.table`), or keep the PK as the preferred id for action addressing.
+::: tip Inherited unique indexes
+The `@db.index.unique` group may sit on a field the table inherits through `extends` (since 0.1.192; before, the compiler refused it with `@db.table.preferredId.uniqueIndex requires at least one @db.index.unique on a prop of this interface.`). `@db.table.preferredId.uniqueIndex` itself goes on the interface that carries `@db.table`: annotations on an interface are not inherited.
 :::
 
 ## Filter & Sort Gating

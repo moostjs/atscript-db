@@ -17,12 +17,14 @@ import { MockAdapter, prepareFixtures } from "./test-utils";
 
 let VxRecord: any;
 let VxPlain: any;
+let VxInherited: any;
 
 beforeAll(async () => {
   await prepareFixtures();
   const v = await import("./fixtures/version-exempt.as");
   VxRecord = v.VxRecord;
   VxPlain = v.VxPlain;
+  VxInherited = v.VxInherited;
 });
 
 class NativeMock extends MockAdapter {
@@ -156,6 +158,17 @@ describe("adapter hand-off (generic path)", () => {
   it("table without a version column never hands off keepVersion", async () => {
     const { table, adapter } = makeTable(VxPlain);
     await table.updateOne({ id: 1, score: 5 } as any);
+    expect(lastCall(adapter, "updateOne").args[4]).toBeUndefined();
+  });
+
+  it("a version column inherited from the base type: exempt-only keeps it, mixed bumps", async () => {
+    const { table, adapter } = makeTable(VxInherited);
+    expect(table.versionExemptFields.has("score")).toBe(true);
+    await table.updateOne({ id: 1, score: 5 } as any);
+    const [, , , expectedVersion, opts] = lastCall(adapter, "updateOne").args;
+    expect(expectedVersion).toBeUndefined();
+    expect(opts).toEqual({ keepVersion: true });
+    await table.updateOne({ id: 1, score: 5, title: "t" } as any);
     expect(lastCall(adapter, "updateOne").args[4]).toBeUndefined();
   });
 

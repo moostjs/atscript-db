@@ -1,9 +1,13 @@
 import { AnnotationSpec, annotationExample, isInterface, isStructure } from "@atscript/core";
-import type { SemanticNode, TAnnotationsTree, TMessages, Token } from "@atscript/core";
+import type { AtscriptDoc, SemanticNode, TAnnotationsTree, TMessages, Token } from "@atscript/core";
 
 import { DB_FULLTEXT_LANGUAGES, DB_FULLTEXT_MATCH_MODES } from "../../shared/fulltext-options";
 
-import { integerMemberIndexProblem, searchFieldVerdict } from "../../shared/annotation-utils";
+import {
+  getTypeFields,
+  integerMemberIndexProblem,
+  searchFieldVerdict,
+} from "../../shared/annotation-utils";
 import { refuseCiphertext, sealedSearchProblem } from "../../shared/view-validation";
 
 export const dbIndexAnnotations: TAnnotationsTree = {
@@ -105,7 +109,7 @@ export const dbIndexAnnotations: TAnnotationsTree = {
           }
           if (verdict.kind !== "integer") return [];
           const errors = [] as TMessages;
-          const missing = integerMemberIndexProblem(token);
+          const missing = integerMemberIndexProblem(token, doc);
           if (missing) errors.push({ message: missing, severity: 1, range: token.range });
           if (args[1]) {
             errors.push({
@@ -181,7 +185,7 @@ export const dbIndexAnnotations: TAnnotationsTree = {
               "The `@db.index.fulltext` index it applies to. Omit to apply to every full-text index of the interface.",
           },
         ],
-        validate: (token, args) => validateFulltextOption(token, args, "language"),
+        validate: (token, args, doc) => validateFulltextOption(token, args, doc, "language"),
       }),
 
       match: new AnnotationSpec({
@@ -224,7 +228,7 @@ export const dbIndexAnnotations: TAnnotationsTree = {
               "The `@db.index.fulltext` index it applies to. Omit to apply to every full-text index of the interface.",
           },
         ],
-        validate: (token, args) => validateFulltextOption(token, args, "match"),
+        validate: (token, args, doc) => validateFulltextOption(token, args, doc, "match"),
       }),
     },
 
@@ -249,36 +253,46 @@ export const dbIndexAnnotations: TAnnotationsTree = {
   },
 };
 
-/** Every `@db.index.fulltext` index name declared on the props of `owner` (nested props included). */
-function collectFulltextIndexNames(owner: SemanticNode | undefined): Set<string> {
+/**
+ * Every `@db.index.fulltext` index name on the props of `owner` — its
+ * inherited fields included — nested props included.
+ */
+function collectFulltextIndexNames(owner: SemanticNode | undefined, doc: AtscriptDoc): Set<string> {
   const names = new Set<string>();
   if (!isInterface(owner)) return names;
-  const walk = (node: SemanticNode | undefined, prefix: string, depth: number) => {
-    if (!isStructure(node) || depth > 8) return;
-    for (const [propName, prop] of node.props) {
+  const walk = (
+    props: ReadonlyMap<string, SemanticNode> | undefined,
+    prefix: string,
+    depth: number,
+  ) => {
+    if (!props || depth > 8) return;
+    for (const [propName, prop] of props) {
       const path = prefix ? `${prefix}.${propName}` : propName;
       for (const ann of prop.annotations ?? []) {
         if (ann.name === "db.index.fulltext") names.add(ann.args[0]?.text ?? path);
       }
-      walk(prop.getDefinition(), path, depth + 1);
+      const def = prop.getDefinition();
+      walk(isStructure(def) ? def.props : undefined, path, depth + 1);
     }
   };
-  walk(owner.getDefinition(), "", 0);
+  walk(getTypeFields(owner, doc), "", 0);
   return names;
 }
 
 /**
- * `@db.index.fulltext.language` / `.match`: the interface declares full-text
- * indexes, a named index exists, and no index gets the option twice.
+ * `@db.index.fulltext.language` / `.match`: the interface has full-text
+ * indexes (declared or inherited), a named index exists, and no index gets
+ * the option twice.
  */
 function validateFulltextOption(
   token: Token,
   args: Token[],
+  doc: AtscriptDoc,
   option: "language" | "match",
 ): TMessages {
   const label = `@db.index.fulltext.${option}`;
   const owner = token.parentNode;
-  const names = collectFulltextIndexNames(owner);
+  const names = collectFulltextIndexNames(owner, doc);
   if (names.size === 0) {
     return [
       {

@@ -37,6 +37,12 @@ describe("preferred-id resolution", () => {
     const table = new AtscriptDbTable(PhysicalSlugPreferredUser, new MockAdapter());
     expect(table.preferredId).toEqual(["slug"]);
   });
+
+  it("resolves a unique index on a field the table inherits from its base type", async () => {
+    const { InheritedSlugPreferredUser } = await import("./fixtures/preferred-id.as");
+    const table = new AtscriptDbTable(InheritedSlugPreferredUser, new MockAdapter());
+    expect(table.preferredId).toEqual(["slug"]);
+  });
 });
 
 describe("findById — preferred-id wins over PK for scalar lookup", () => {

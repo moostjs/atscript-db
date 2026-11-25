@@ -166,7 +166,7 @@ export const dbViewAnnotations: TAnnotationsTree = {
           });
         }
         // VW7 (left-joined fields optional) / VW8 (JSON chains end at a primitive)
-        errors.push(...validateViewInterface(owner, doc));
+        errors.push(...validateViewInterface(owner, doc, token));
         return errors;
       },
     }),

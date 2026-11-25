@@ -50,6 +50,26 @@ export interface Secret {
     );
   });
 
+  it("refuses @db.mongo.search.dynamic when the encrypted field is inherited from a base type", async () => {
+    const found = await errorsFor(`
+export interface SecretBase {
+    @db.encrypted
+    ssn?: string
+}
+
+@db.table 'inherited_secrets'
+@db.mongo.collection
+@db.mongo.search.dynamic
+export interface InheritedSecret extends SecretBase {
+    title: string
+}
+`);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatch(
+      /@db\.mongo\.search\.dynamic indexes every field, including the @db\.encrypted field "ssn"/,
+    );
+  });
+
   it("accepts @db.mongo.search.dynamic without encrypted fields", async () => {
     expect(
       await errorsFor(`

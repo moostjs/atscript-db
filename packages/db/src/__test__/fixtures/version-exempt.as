@@ -45,3 +45,20 @@ export interface VxPlain {
     @db.column.version.exempt
     score: number
 }
+
+export interface VxVersioned {
+    @meta.id
+    @db.default.increment
+    id: number
+
+    @db.column.version
+    version: number.int
+}
+
+@db.table "vx_inherited"
+export interface VxInherited extends VxVersioned {
+    title: string
+
+    @db.column.version.exempt
+    score: number
+}

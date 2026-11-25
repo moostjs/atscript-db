@@ -26,3 +26,17 @@ export interface FtoPlain {
     @db.index.fulltext "ft_body"
     body: string
 }
+
+export interface FtoBase {
+    @meta.id
+    id: number
+
+    @db.index.fulltext "ft_body"
+    body: string
+}
+
+@db.table 'fto_inherited'
+@db.index.fulltext.language "russian"
+export interface FtoInherited extends FtoBase {
+    note?: string
+}

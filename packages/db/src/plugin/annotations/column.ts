@@ -22,6 +22,7 @@ import {
   getDbTableOwner,
   getParentStruct,
   getParentTypeName,
+  getTypeFields,
   isNullMember,
   primitiveBaseType,
   searchFieldVerdict,
@@ -64,13 +65,19 @@ function walkFieldAncestors(field: SemanticNode, wholeValue: readonly string[]) 
   return { whole };
 }
 
+/** How many fields of a type — declared or inherited — carry `@db.column.version`. */
+function versionFieldCount(node: SemanticNode | undefined, doc: AtscriptDoc): number {
+  const fields = getTypeFields(node, doc)?.values() ?? [];
+  return [...fields].filter((prop) => prop.countAnnotations("db.column.version") > 0).length;
+}
+
 /**
  * Compile-time placement rules of `@db.column.version.exempt` (E1–E5, W1, W2).
  * E6 (derived) lives in `DERIVED_INCOMPATIBLE`. The runtime mirror is
  * `TableMetadata._finalizeVersionExempt`.
  * @since 0.1.150
  */
-function validateVersionExempt(token: Token): TMessages {
+function validateVersionExempt(token: Token, doc: AtscriptDoc): TMessages {
   const errors = [] as TMessages;
   const field = token.parentNode!;
   const fail = (message: string, severity: 1 | 2 = 1) => {
@@ -102,16 +109,9 @@ function validateVersionExempt(token: Token): TMessages {
     );
   }
 
-  // W1: the enclosing top-level table declares no version column
+  // W1: the enclosing top-level table has no version column (declared or inherited)
   if (tableOwner && tableOwner.countAnnotations("db.table") > 0) {
-    const struct = tableOwner.getDefinition();
-    let hasVersion = false;
-    if (struct && isStructure(struct)) {
-      for (const [, prop] of struct.props) {
-        if (prop.countAnnotations("db.column.version") > 0) hasVersion = true;
-      }
-    }
-    if (!hasVersion) {
+    if (versionFieldCount(tableOwner, doc) === 0) {
       fail(
         `${tag} has no effect — table '${tableOwner.id ?? ""}' declares no @db.column.version`,
         2,
@@ -580,20 +580,14 @@ export const dbColumnAnnotations: TAnnotationsTree = {
             });
           }
 
-          // Cross-field uniqueness: at most one @db.column.version per struct.
-          const struct = getParentStruct(token);
-          if (struct) {
-            let count = 0;
-            for (const [, prop] of struct.props) {
-              if (prop.countAnnotations("db.column.version") > 0) count++;
-            }
-            if (count > 1) {
-              errors.push({
-                message: "At most one @db.column.version per table",
-                severity: 1,
-                range: token.range,
-              });
-            }
+          // Cross-field uniqueness: at most one @db.column.version per struct,
+          // inherited fields included
+          if (versionFieldCount(getParentStruct(token), doc) > 1) {
+            errors.push({
+              message: "At most one @db.column.version per table",
+              severity: 1,
+              range: token.range,
+            });
           }
           return errors;
         },
@@ -615,8 +609,8 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         nodeType: ["prop"],
         passedWhenReferred: false,
         multiple: false,
-        validate(token) {
-          return validateVersionExempt(token);
+        validate(token, _args, doc) {
+          return validateVersionExempt(token, doc);
         },
       }),
     },

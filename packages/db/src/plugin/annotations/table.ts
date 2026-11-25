@@ -1,9 +1,9 @@
 import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { TAnnotationsTree } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
-import type { SemanticNode } from "@atscript/core";
-import { isInterface, isStructure } from "@atscript/core";
-import { inheritedForeignRelations } from "../../shared/annotation-utils";
+import type { AtscriptDoc, SemanticNode } from "@atscript/core";
+import { isInterface } from "@atscript/core";
+import { getTypeFields, inheritedForeignRelations } from "../../shared/annotation-utils";
 import { hasAnyViewAnnotation } from "../../shared/validation-utils";
 
 export const dbTableAnnotations: TAnnotationsTree = {
@@ -93,7 +93,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
           type: "string",
           description: "Unique-index group name. If omitted, the first declared group is used.",
         },
-        validate(token, args, _doc) {
+        validate(token, args, doc) {
           const errors = [] as TMessages;
           const owner = token.parentNode!;
 
@@ -114,7 +114,7 @@ export const dbTableAnnotations: TAnnotationsTree = {
             });
           }
 
-          const groups = collectUniqueIndexGroups(owner);
+          const groups = collectUniqueIndexGroups(owner, doc);
           if (groups.length === 0) {
             errors.push({
               message:
@@ -300,18 +300,16 @@ export const dbTableAnnotations: TAnnotationsTree = {
   },
 };
 
-function collectUniqueIndexGroups(owner: SemanticNode | undefined): string[] {
-  if (!isInterface(owner)) {
-    return [];
-  }
-  const definition = owner.getDefinition();
-  if (!isStructure(definition)) {
+/** The `@db.index.unique` groups of an interface's fields, inherited ones included, in order. */
+function collectUniqueIndexGroups(owner: SemanticNode | undefined, doc: AtscriptDoc): string[] {
+  const fields = isInterface(owner) ? getTypeFields(owner, doc) : undefined;
+  if (!fields) {
     return [];
   }
 
   const groups: string[] = [];
   const seen = new Set<string>();
-  for (const [propName, prop] of definition.props) {
+  for (const [propName, prop] of fields) {
     const annotations = prop.annotations?.filter((ann) => ann.name === "db.index.unique") ?? [];
     for (const ann of annotations) {
       const groupName = ann.args[0]?.text ?? propName;

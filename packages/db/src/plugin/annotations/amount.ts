@@ -5,6 +5,7 @@ import {
   validateFieldBaseType,
   validateSiblingStringField,
 } from "../../shared/annotation-utils";
+import { siblingFieldValues } from "../lsp-scopes";
 
 const CURRENCY_CODE_PATTERN = /^[A-Z0-9]{2,10}$/;
 
@@ -70,6 +71,7 @@ export const dbAmountAnnotations: TAnnotationsTree = {
           name: "fieldName",
           type: "string",
           description: "Name of the sibling property holding the currency code.",
+          valueScope: siblingFieldValues,
         },
         validate(token, args, doc) {
           const errors: TMessages = [];

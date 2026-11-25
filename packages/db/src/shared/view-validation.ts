@@ -13,7 +13,12 @@ import {
   SUPPORTED_AGGREGATE_FNS,
   NULL_WHEN_EMPTY_AGGREGATE_FNS,
 } from "../query/aggregate-fns";
-import { getAnnotationAlias, isViewField, primitiveBaseType } from "./annotation-utils";
+import {
+  getAnnotationAlias,
+  getTypeFields,
+  isViewField,
+  primitiveBaseType,
+} from "./annotation-utils";
 import { JSON_LEAF_TYPES } from "./derived-rules";
 import { ENCRYPTED_SEARCH_FEATURES } from "./search-fields";
 import { viewJoins } from "./validation-utils";
@@ -153,14 +158,19 @@ interface TPathStep {
   def: SemanticNode;
 }
 
-/** The step to the `name` prop of `step`'s object definition — its type ref resolved. */
+/**
+ * The step to the `name` prop of `step`'s object definition — an inherited
+ * field included ({@link getTypeFields}) — its type ref resolved where it is
+ * written.
+ */
 function propStep(step: TPathStep, name: string): TPathStep | undefined {
   const def = step.def;
-  const prop = isInterface(def) || isStructure(def) ? def.props.get(name) : undefined;
+  const prop =
+    isInterface(def) || isStructure(def) ? getTypeFields(def, step.doc)?.get(name) : undefined;
   const propDef = prop?.getDefinition();
   if (!prop || !propDef) return undefined;
   if (!isRef(propDef)) return { doc: step.doc, node: prop, def: propDef };
-  const unwound = step.doc.unwindType(propDef.id!, (propDef as SemanticRefNode).chain);
+  const unwound = step.doc.unwindRef(propDef as SemanticRefNode);
   return unwound && { doc: unwound.doc, node: prop, def: unwound.def };
 }
 
@@ -274,8 +284,9 @@ export function isNavProp(prop: SemanticNode): boolean {
 
 /**
  * Walks the fields stored in `root` (an interface, a structure or a type ref)
- * depth-first — nested objects and type refs included, navigation fields and
- * arrays skipped — and returns the first non-`undefined` result of `visit`.
+ * depth-first — nested objects, type refs and the fields an interface
+ * inherits (since 0.1.192) included, navigation fields and arrays skipped —
+ * and returns the first non-`undefined` result of `visit`.
  * `path` is the field's dotted path below `prefix`; `viaRef` tells whether
  * a type ref was followed to reach it.
  * @since 0.1.162
@@ -296,10 +307,11 @@ export function findStoredField<T>(
     if (!def || seen.has(def)) return undefined;
     seen.add(def);
     if (isRef(def)) {
-      const unwound = defDoc.unwindType(def.id!, (def as SemanticRefNode).chain);
+      // resolved where it is written — an inherited field's ref may be another file
+      const unwound = defDoc.unwindRef(def as SemanticRefNode);
       return unwound ? walk(unwound.def, unwound.doc, true, prefix) : undefined;
     }
-    const props = isInterface(def) || isStructure(def) ? def.props : undefined;
+    const props = isInterface(def) || isStructure(def) ? getTypeFields(def, defDoc) : undefined;
     if (!props) return undefined;
     for (const [name, prop] of props) {
       if (isNavProp(prop)) continue;
@@ -352,15 +364,6 @@ export function encryptedAncestorName(field: SemanticNode): string | undefined {
   return undefined;
 }
 
-/** Props of a view interface (its own structure; views don't use `extends`). */
-export function viewProps(owner: SemanticNode): Map<string, SemanticNode> | undefined {
-  if (isInterface(owner)) {
-    return owner.props as Map<string, SemanticNode>;
-  }
-  const def = owner.getDefinition();
-  return def && isStructure(def) ? (def.props as Map<string, SemanticNode>) : undefined;
-}
-
 /**
  * VW8: a chain ref that passes through a `@db.json` or array node reads a
  * JSON leaf, which views can only extract as a string / number / boolean.
@@ -399,11 +402,19 @@ function validateJsonChain(
  *   fields are exempt (they count 0, never NULL).
  * - VW8 — a chain ref through a `@db.json` or array node must end at a
  *   primitive string / number / boolean leaf.
+ *
+ * The view's fields include the ones it inherits (`extends`); those are
+ * written in the base, so their problems are reported on `token` (the
+ * view's `@db.view.for`).
  * @since 0.1.136
  */
-export function validateViewInterface(owner: SemanticNode, doc: AtscriptDoc): TMessages {
+export function validateViewInterface(
+  owner: SemanticNode,
+  doc: AtscriptDoc,
+  token: Token,
+): TMessages {
   const errors: TMessages = [];
-  const props = viewProps(owner);
+  const props = getTypeFields(owner, doc);
   if (!props) return errors;
 
   const leftJoined = new Set<string>();
@@ -418,7 +429,10 @@ export function validateViewInterface(owner: SemanticNode, doc: AtscriptDoc): TM
     const def = prop.getDefinition();
     if (!def || !isRef(def)) continue;
     const ref = def as SemanticRefNode;
-    const range = (prop.token("identifier") ?? ref.token("identifier"))?.range;
+    const range =
+      prop.ownerNode?.ownerNode === owner
+        ? (prop.token("identifier") ?? ref.token("identifier"))?.range
+        : token.range;
     if (!range) continue;
 
     if (
@@ -434,7 +448,7 @@ export function validateViewInterface(owner: SemanticNode, doc: AtscriptDoc): TM
       });
     }
 
-    errors.push(...validateJsonChain(fieldName, ref, doc, range));
+    errors.push(...validateJsonChain(fieldName, ref, doc.refOrigin(ref), range));
   }
 
   return errors;

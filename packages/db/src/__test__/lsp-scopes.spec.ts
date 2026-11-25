@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   build,
+  getDeclaredValue,
   getFieldPathCompletionScope,
   getQueryCompletionScope,
   getQueryScope,
+  getValueCandidates,
   resolveFieldRefAt,
 } from "@atscript/core";
 import type { AtscriptDoc, SemanticNode, Token } from "@atscript/core";
@@ -17,8 +19,11 @@ import dbPlugin from "../plugin";
 // Editor scopes the db plugin declares on its annotation arguments (since
 // 0.1.141): what the VSCode extension completes, hovers and jumps to inside
 // `@db.view.filter` / `.joins` / `.having`, `@db.agg.*` conditions and field
-// names, `@db.rel.filter`, and which types a ref argument offers. Every
-// scope is the one the validators check — see plugin/lsp-scopes.ts.
+// names, `@db.rel.filter`, the sibling field of `@db.amount.currency.ref` /
+// `@db.unit.ref` (since 0.1.192), and which types a ref argument offers. Every
+// scope is the one the validators check — except the sibling field, where the
+// editor offers the string-valued fields and the validator also lets through
+// a field whose type it cannot classify — see plugin/lsp-scopes.ts.
 
 const SOURCE = `
 @db.table 'ls_orders'
@@ -138,6 +143,42 @@ export interface LsRanked {
 
     @db.compute \`coalesce(firstAmount, 0) * 2\`
     score: number
+}
+
+export interface LsPricedBase {
+    @meta.id
+    id: number
+    currency: string
+    unit: string
+}
+
+export type LsZone = 'eu' | 'us'
+
+@db.table 'ls_prices'
+export interface LsPrice extends LsPricedBase {
+    @db.amount.currency.ref 'currency'
+    amount: decimal
+
+    @db.unit.ref 'unit'
+    weight: number
+
+    label: string
+
+    note?: string
+
+    status: string | null
+
+    zone: LsZone
+
+    kind: 'retail' | 'bulk'
+
+    iso: db.currencyCode
+
+    active: boolean
+
+    details: {
+        code: string
+    }
 }
 `;
 
@@ -419,6 +460,34 @@ describe("db plugin editor scopes", () => {
       ).toBe("weight");
       expect(resolveFieldRefAt(tokenAt("label != ''"), doc)?.prop.id).toBe("label");
     });
+  });
+
+  describe("@db.amount.currency.ref / @db.unit.ref", () => {
+    it.each([
+      ["db.amount.currency.ref", "currency"],
+      ["db.unit.ref", "unit"],
+    ])(
+      "@%s offers the string-valued fields of its table, inherited ones included, and goes to the one it names",
+      (name, sibling) => {
+        const annotation = doc.annotations.find((a) => a.name === name)!;
+        // every string-valued field — not the annotated field, a number, a
+        // boolean, an object or a nested path
+        expect(getValueCandidates(annotation.token, 0, doc)?.map((c) => c.value)).toEqual([
+          "currency",
+          "unit",
+          "label",
+          "note",
+          "status",
+          "zone",
+          "kind",
+          "iso",
+        ]);
+        const declared = getDeclaredValue(annotation.args[0], doc);
+        expect(declared?.value).toBe(sibling);
+        // the field the base declares
+        expect(declared?.definition?.token.range.start).toEqual(posOf(`${sibling}: string`));
+      },
+    );
   });
 
   describe("ref argument completion filters", () => {

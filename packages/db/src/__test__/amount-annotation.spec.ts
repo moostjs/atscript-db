@@ -13,12 +13,14 @@ import { MockAdapter, prepareFixtures } from "./test-utils";
 
 let MultiCurrencyOrder: any;
 let SingleCurrencyOrder: any;
+let InheritedCurrencyOrder: any;
 
 beforeAll(async () => {
   await prepareFixtures();
   const mod = await import("./fixtures/amount-orders.as");
   MultiCurrencyOrder = mod.MultiCurrencyOrder;
   SingleCurrencyOrder = mod.SingleCurrencyOrder;
+  InheritedCurrencyOrder = mod.InheritedCurrencyOrder;
 });
 
 // ── Metadata stamping ────────────────────────────────────────────────────────
@@ -132,6 +134,41 @@ describe("aggregate(): @db.amount.currency.ref enforces $groupBy", () => {
     };
     const result = await single.aggregate(query);
     expect(result).toBeDefined();
+  });
+});
+
+// ── A currency field inherited from the table's base type ───────────────────
+
+describe("@db.amount.currency.ref to a field the table inherits", () => {
+  it("binds the amount to the inherited field", () => {
+    const table = new AtscriptDbTable(InheritedCurrencyOrder, new MockAdapter());
+    expect(table.getMetadata().quantityRefByField.get("amount")).toBe("currency");
+    expect(table.fieldDescriptors.find((f) => f.path === "amount")?.currencyRefField).toBe(
+      "currency",
+    );
+    expect(table.fieldDescriptors.some((f) => f.path === "currency")).toBe(true);
+  });
+
+  it("aggregating the amount requires the inherited currency in $groupBy", async () => {
+    const adapter = new MockAdapter();
+    adapter.aggregateResult = [{ currency: "EUR", total: 100 }];
+    const table = new AtscriptDbTable(InheritedCurrencyOrder, adapter);
+    const sum = { $fn: "sum", $field: "amount", $as: "total" };
+    await expect(
+      table.aggregate({
+        filter: {},
+        controls: { $groupBy: ["status"], $select: ["status", sum] as any },
+      }),
+    ).rejects.toMatchObject({
+      code: "INVALID_QUERY",
+      errors: [{ path: "$select", message: expect.stringContaining("currency") }],
+    });
+    await expect(
+      table.aggregate({
+        filter: {},
+        controls: { $groupBy: ["currency"], $select: ["currency", sum] as any },
+      }),
+    ).resolves.toEqual([{ currency: "EUR", total: 100 }]);
   });
 });
 

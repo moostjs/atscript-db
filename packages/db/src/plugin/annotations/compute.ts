@@ -10,13 +10,13 @@ import type {
 
 import {
   getDbTableOwner,
+  getTypeFields,
   primitiveBaseType,
   validateExclusiveWith,
 } from "../../shared/annotation-utils";
 import { AGG_ANNOTATIONS } from "../../query/aggregate-fns";
 import { numericTypeProblem } from "../../shared/numeric-operand";
 import { validateQueryScope } from "../../shared/validation-utils";
-import { viewProps } from "../../shared/view-validation";
 import { fieldScopes, viewHavingScope } from "../lsp-scopes";
 
 /** What a `@db.compute` field cannot also carry (VC1). */
@@ -46,7 +46,8 @@ function operandProblem(prop: SemanticNode, doc: AtscriptDoc): string | undefine
   if (prop.countAnnotations("db.ignore") > 0) return "is @db.ignore'd";
   if (computeArg(prop)) return undefined; // typed `number` by its own @db.compute
   const def = prop.getDefinition();
-  const leaf = def && isRef(def) ? doc.unwindType(def.id!, def.chain)?.def : def;
+  // resolved where it is written — an inherited operand may be another file
+  const leaf = def && isRef(def) ? doc.unwindRef(def)?.def : def;
   const base = primitiveBaseType(leaf);
   if (base === undefined) return undefined; // unresolved — sync reports it
   return numericTypeProblem({ base, tags: isPrimitive(leaf) ? leaf.tags : undefined });
@@ -115,7 +116,8 @@ function validateCompute(token: Token, args: Token[], doc: AtscriptDoc): TMessag
   const expr = args[0]?.exprNode;
   if (!expr) return errors;
   const refs = expr.fieldRefs();
-  const props = viewProps(view) ?? new Map<string, SemanticNode>();
+  // the view's fields, inherited ones included
+  const props = getTypeFields(view, doc) ?? new Map<string, SemanticNode>();
 
   // VC5: at least one field
   if (refs.length === 0) {

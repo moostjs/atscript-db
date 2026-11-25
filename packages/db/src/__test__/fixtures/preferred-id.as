@@ -55,3 +55,17 @@ export interface PhysicalSlugPreferredUser {
     @db.index.unique
     slug: string
 }
+
+export interface SlugUserBase {
+    @meta.id
+    id: string
+
+    @db.index.unique 'by_slug'
+    slug: string
+}
+
+@db.table 'inherited_slug_users'
+@db.table.preferredId.uniqueIndex 'by_slug'
+export interface InheritedSlugPreferredUser extends SlugUserBase {
+    email: string
+}

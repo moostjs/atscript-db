@@ -3,12 +3,15 @@ import {
   annotationExample,
   type AtscriptDoc,
   isArray,
+  isConst,
+  isGroup,
   isInterface,
   isPrimitive,
   isRef,
   isStructure,
   type SemanticInterfaceNode,
   type SemanticNode,
+  type SemanticPropNode,
   type SemanticStructureNode,
   type Token,
   type TMessages,
@@ -133,11 +136,15 @@ export function isNullableUnion(
   return group.unwrap!().some((member) => isNullableUnion(member, doc, depth + 1));
 }
 
-/** Resolves a field/prop's primitive base type, or `undefined` if it isn't a ref-to-primitive. */
+/**
+ * Resolves a field/prop's primitive base type, or `undefined` if it isn't a
+ * ref-to-primitive. The ref resolves in the document it is written in — an
+ * inherited field's may be another file.
+ */
 function getPrimitiveBaseType(node: SemanticNode, doc: AtscriptDoc): string | undefined {
   const def = node.getDefinition();
   if (!def || !isRef(def)) return undefined;
-  return primitiveBaseType(doc.unwindType(def.id!, def.chain)?.def);
+  return primitiveBaseType(doc.unwindRef(def)?.def);
 }
 
 /**
@@ -180,15 +187,17 @@ export function searchFieldVerdict(
 /**
  * Why an integer fulltext member is not index-backed (its exact-number match
  * would scan — or fail on MongoDB next to `$text`), or `undefined`. Backed:
- * `_id` or the first `@meta.id` of an interface's own fields (an inline
- * nested object's are no key of the row, like at runtime), or the first field
- * (in declaration order) of a `@db.index.plain` / `@db.index.unique` group.
+ * `_id` or the first `@meta.id` of an interface's fields (an inline nested
+ * object's are no key of the row, like at runtime), or the first field (in
+ * declaration order) of a `@db.index.plain` / `@db.index.unique` group. The
+ * fields include the inherited ones ({@link getTypeFields}; `doc` since 0.1.192).
  */
-export function integerMemberIndexProblem(token: Token): string | undefined {
+export function integerMemberIndexProblem(token: Token, doc: AtscriptDoc): string | undefined {
   const field = token.parentNode!;
   const struct = getParentStruct(token);
-  if (!struct) return undefined;
-  const props = [...struct.props.values()];
+  const fields = getTypeFields(struct, doc);
+  if (!struct || !fields) return undefined;
+  const props = [...fields.values()];
   const topLevel = !!struct.ownerNode && isInterface(struct.ownerNode);
   if (topLevel && field.id === "_id") return undefined;
   if (
@@ -210,7 +219,13 @@ export function integerMemberIndexProblem(token: Token): string | undefined {
   return `@db.index.fulltext on the integer field "${field.id}" needs an index for its exact-number match — make it the primary key (first @meta.id) or the first field of a @db.index.plain / @db.index.unique`;
 }
 
-/** Asserts `args[0]` names a sibling property whose primitive base type is `string`. */
+/**
+ * Asserts `args[0]` names a sibling property — declared or inherited
+ * ({@link getTypeFields}) — that is no primitive of another base type than
+ * `string`. A sibling whose type it cannot classify (a union, an object, an
+ * unresolved ref) is let through; the editor offers only the string-valued
+ * ones ({@link siblingStringFields}).
+ */
 export function validateSiblingStringField(
   token: Token,
   args: Token[],
@@ -221,10 +236,10 @@ export function validateSiblingStringField(
   const fieldName = args[0]?.text;
   if (!fieldName) return errors;
 
-  const struct = getParentStruct(token);
-  if (!struct) return errors;
+  const fields = getTypeFields(getParentStruct(token), doc);
+  if (!fields) return errors;
 
-  const sibling = struct.props.get(fieldName);
+  const sibling = fields.get(fieldName);
   if (!sibling) {
     errors.push({
       message: `${selfName} '${fieldName}': no sibling field named '${fieldName}' on this type`,
@@ -247,6 +262,43 @@ export function validateSiblingStringField(
 }
 
 /**
+ * What the editor offers for a sibling-field argument on the field carrying
+ * `token`: the other fields of its type, declared or inherited
+ * ({@link getTypeFields}), that hold string values — a `string` (or an alias
+ * of one, or a string primitive such as `db.currencyCode`), optional or
+ * `| null`, or a union of string literals. Never the field itself, an
+ * object, a number or a dotted path. {@link validateSiblingStringField}
+ * accepts each of them, and also lets through a field whose type it cannot
+ * classify.
+ * @since 0.1.192
+ */
+export function siblingStringFields(token: Token, doc: AtscriptDoc): SemanticPropNode[] {
+  const field = token.parentNode;
+  const fields = getTypeFields(getParentStruct(token), doc)?.values() ?? [];
+  return [...fields].filter((prop) => prop !== field && isStringValued(prop.getDefinition(), doc));
+}
+
+/**
+ * Whether a type holds only string values: a string primitive, a string
+ * literal, a ref to one (resolved where it is written), or a union of those
+ * with `null`.
+ */
+function isStringValued(def: SemanticNode | undefined, doc: AtscriptDoc, depth = 0): boolean {
+  if (!def || depth > 8) return false;
+  if (isRef(def)) {
+    const unwound = doc.unwindRef(def);
+    return isStringValued(unwound?.def, unwound?.doc ?? doc, depth + 1);
+  }
+  if (isGroup(def)) {
+    if (def.op !== "|") return false;
+    const values = def.unwrap().filter((member) => !isNullMember(member));
+    return values.length > 0 && values.every((member) => isStringValued(member, doc, depth + 1));
+  }
+  if (isPrimitive(def)) return primitiveBaseType(def) === "string";
+  return isConst(def) && def.token("identifier")?.type === "text";
+}
+
+/**
  * Traverse from annotation token → prop → structure → interface
  * to check if the parent interface has @db.table.
  */
@@ -261,12 +313,41 @@ export function getDbTableOwner(token: Token): SemanticNode | undefined {
 }
 
 /**
- * Get the parent structure node from an annotation token.
+ * Get the parent structure node from an annotation token — the structure
+ * that DECLARES the annotated field (see {@link getTypeFields} for the fields
+ * of the type, inherited ones included).
  */
 export function getParentStruct(token: Token): SemanticStructureNode | undefined {
   const field = token.parentNode!;
   const struct = field.ownerNode;
   return struct && isStructure(struct) ? (struct as SemanticStructureNode) : undefined;
+}
+
+/**
+ * The fields of a type by name: the ones it declares and, for an interface
+ * with `extends` (or the structure such an interface declares), the ones it
+ * inherits — `AtscriptDoc.resolveInterfaceExtends`; an inherited field keeps
+ * the structure that declares it as its `ownerNode`. A table has them all at
+ * run time, so a check that looks across the fields of a table (the sibling
+ * an argument names, the version column, foreign keys, index groups) reads
+ * these; a rule about where an annotation is written reads the declaring
+ * interface ({@link getDbTableOwner}). The `extends` names resolve in the
+ * document that declares the interface (`AtscriptDoc.declaringDoc`); `doc`
+ * stands in only where that document is not known. `undefined` when `node`
+ * is neither an interface nor a structure.
+ * @since 0.1.192
+ */
+export function getTypeFields(
+  node: SemanticNode | undefined,
+  doc: AtscriptDoc,
+): ReadonlyMap<string, SemanticPropNode> | undefined {
+  const owner = isStructure(node) && isInterface(node.ownerNode) ? node.ownerNode : node;
+  if (!isInterface(owner)) return isStructure(node) ? node.props : undefined;
+  const merged = owner.hasExtends
+    ? doc.declaringDoc(owner, doc).resolveInterfaceExtends(owner)
+    : undefined;
+  const def = isStructure(merged) ? merged : owner.getDefinition();
+  return isStructure(def) ? def.props : undefined;
 }
 
 /**
@@ -331,7 +412,10 @@ function declaredTableName(iface: SemanticNode): string | undefined {
  * inherits (`extends`) from a table with ANOTHER name: the child's (or
  * junction's) foreign key references that table, not this one, so this table
  * cannot load or write them — a warning on the `@db.table` annotation (writes
- * of them are refused at run time). A relation redeclared here is its own.
+ * of them are refused at run time). The fix is to declare the relation on
+ * each table instead of inheriting it: an inherited field cannot be
+ * redeclared (the compiler refuses an override in `extends`), and a second
+ * relation under another name leaves the inherited one in place.
  */
 export function inheritedForeignRelations(token: Token, doc: AtscriptDoc): TMessages {
   const owner = token.parentNode;
@@ -364,7 +448,7 @@ export function inheritedForeignRelations(token: Token, doc: AtscriptDoc): TMess
           messages.push({
             message:
               `Inherited relation "${name}" (@db.rel.${kind}) is linked to "${baseTable}", not to "${thisTable}" — ` +
-              `here its nested writes are refused and it loads nothing; redeclare "${name}" with a @db.rel.FK referencing ${owner.id}`,
+              `here its nested writes are refused and it loads nothing; declare it on each table instead of inheriting it (an inherited field cannot be redeclared)`,
             severity: 2,
             range: token.range,
           });
@@ -409,7 +493,7 @@ export function refActionAnnotation(name: "onDelete" | "onUpdate"): AnnotationSp
       description:
         'Referential action: "cascade", "restrict", "noAction", "setNull", or "setDefault".',
     },
-    validate(token, args, _doc) {
+    validate(token, args, doc) {
       const errors = [] as TMessages;
       const field = token.parentNode!;
 
@@ -450,11 +534,11 @@ export function refActionAnnotation(name: "onDelete" | "onUpdate"): AnnotationSp
       // D5: Multiple onDelete/onUpdate in same composite FK group
       const fkAlias = getAnnotationAlias(field, "db.rel.FK");
       if (fkAlias) {
-        const struct = getParentStruct(token);
-        if (struct) {
+        const fields = getTypeFields(getParentStruct(token), doc);
+        if (fields) {
           const annotationName = `db.rel.${name}`;
           let count = 0;
-          for (const [, prop] of struct.props) {
+          for (const [, prop] of fields) {
             if (prop.countAnnotations("db.rel.FK") === 0) {
               continue;
             }

@@ -2036,3 +2036,56 @@ describe("ensureSelectIncludesFields", () => {
     expect((result!.$select as Record<string, unknown>).fk).toBe(1);
   });
 });
+
+// A table whose foreign keys are inherited from its base type (since 0.1.192
+// the compiler accepts relations declared over them): they load at run time.
+describe("relations over foreign keys inherited from a base type", () => {
+  let RiCustomer: any;
+  let RiBoard: any;
+  let RiOrder: any;
+  let db: DbSpace;
+
+  beforeAll(async () => {
+    await prepareFixtures();
+    ({ RiCustomer, RiBoard, RiOrder } = await import("./fixtures/rel-inherited-fk.as"));
+  });
+
+  beforeEach(() => {
+    db = new DbSpace(() => new InMemoryAdapter());
+    const adapterOf = (type: any) => (db.getTable(type) as any).adapter as InMemoryAdapter;
+    adapterOf(RiCustomer).seed([{ id: 1, name: "Alice" }]);
+    adapterOf(RiBoard).seed([{ org: "acme", code: "b1", title: "Roadmap" }]);
+    adapterOf(RiOrder).seed([
+      { id: 1, title: "First", customerId: 1, boardOrg: "acme", boardCode: "b1" },
+    ]);
+  });
+
+  it("the table's metadata carries the inherited foreign keys", () => {
+    const fks = [...db.getTable(RiOrder).foreignKeys.values()];
+    expect(fks.find((fk) => fk.fields.includes("customerId"))).toMatchObject({
+      targetTable: "ri_customers",
+      targetFields: ["id"],
+    });
+    expect(fks.find((fk) => fk.fields.includes("boardOrg"))).toMatchObject({
+      fields: ["boardOrg", "boardCode"],
+      targetTable: "ri_boards",
+      targetFields: ["org", "code"],
+    });
+  });
+
+  it("$with loads a @db.rel.to whose @db.rel.FK is inherited", async () => {
+    const [order] = (await db.getTable(RiOrder).findMany({
+      filter: {},
+      controls: { $with: [withRel("customer")] },
+    })) as any[];
+    expect(order.customer).toEqual({ id: 1, name: "Alice" });
+  });
+
+  it("$with loads a composite @db.rel.to whose first key column is inherited", async () => {
+    const [order] = (await db.getTable(RiOrder).findMany({
+      filter: {},
+      controls: { $with: [withRel("board")] },
+    })) as any[];
+    expect(order.board).toEqual({ org: "acme", code: "b1", title: "Roadmap" });
+  });
+});

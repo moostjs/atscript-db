@@ -32,7 +32,7 @@ interface User {
 Constraints:
 
 - Field type MUST resolve to `int` (SQL `INTEGER`, Mongo `Number`).
-- At most one version column per table.
+- At most one version column per table (an inherited one counts, 0.1.192).
 - Field must be non-optional. Schema sync emits `NOT NULL DEFAULT 0`; existing rows backfill to `0` automatically on `ALTER TABLE`.
 - `@db.column 'row_version'` renames ONLY the stored column (supported since 0.1.141). `$cas` key, write bodies, rows read back, `table.versionColumn` and `/meta.versionColumn` all use the FIELD name (`version`). ≤ 0.1.140 `versionColumn` returned the column name → renamed version fields had no working OCC; don't key anything on the column name.
 
@@ -62,7 +62,7 @@ Rule (decided in core from the schema + the payload keys, never per call): a pat
 | empty patch, no `$cas`                                         | no statement (unchanged)      |
 
 - Field ops (`{ hits: $inc(1) }`) and array ops on an exempt array are exempt writes. Marking an object covers every nested field; an object whose fields are all exempt counts as exempt (keeps a replace-strategy write exempt). In a `merge` object only the supplied children count; a partly exempt replace-strategy object bumps (null-fill of siblings).
-- Allowed on scalars, `@db.encrypted`, `@db.json` (whole column), arrays (whole array), FK columns, `@db.default*`, objects. Compile errors (mirrored at runtime): on the version field, `@meta.id`, nav fields, below `@db.json` / inside an array of objects, with `@db.column.derived`. Warnings: table without `@db.column.version`, `@db.ignore` field.
+- Allowed on scalars, `@db.encrypted`, `@db.json` (whole column), arrays (whole array), FK columns, `@db.default*`, objects. Compile errors (mirrored at runtime): on the version field, `@meta.id`, nav fields, below `@db.json` / inside an array of objects, with `@db.column.derived`. Warnings: table without `@db.column.version` (declared or inherited), `@db.ignore` field.
 - HTTP: PATCH without `version` and only exempt fields → no bump; with `version` → `$cas` (check + bump); PUT always bumps. Not exposed in `/meta`.
 - The version is then NOT a whole-row change token (exempt-only refreshes keep it) — do not use it as a whole-row cache key / ETag.
 - `modifiedCount` can be `0` (MySQL / Mongo) for an exempt write of unchanged values; use `matchedCount` to see whether the row was found.

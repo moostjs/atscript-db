@@ -1,5 +1,5 @@
 import { AnnotationSpec, annotationExample } from "@atscript/core";
-import type { TAnnotationsTree } from "@atscript/core";
+import type { AtscriptDoc, SemanticNode, TAnnotationsTree, Token } from "@atscript/core";
 import {
   isArray,
   isInterface,
@@ -10,7 +10,6 @@ import {
   isStructure,
   type SemanticQueryComparisonNode,
   type SemanticQueryExprNode,
-  type SemanticStructureNode,
 } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
 import {
@@ -19,6 +18,7 @@ import {
   getNavTargetTypeName,
   getParentStruct,
   getParentTypeName,
+  getTypeFields,
   refActionAnnotation,
 } from "../../shared/annotation-utils";
 import {
@@ -36,24 +36,26 @@ import { fieldScopes, isDbTable, relFilterScope } from "../lsp-scopes";
  * the whole key (same alias, same target, each naming a top-level key column)
  * are a valid composite foreign key. Returns whether `token`'s FK is covered
  * (or the rule does not apply). Cheap checks run before the sibling scan.
+ * The target's key and the covering columns count inherited fields.
  */
 function checkCompositeFkCoverage(
-  token: Parameters<typeof getDbTableOwner>[0],
+  token: Token,
+  doc: AtscriptDoc,
   alias: string | undefined,
   refTypeName: string,
-  targetStruct: SemanticStructureNode,
-  targetProp: ReturnType<SemanticStructureNode["props"]["get"]> & object,
+  targetFields: ReadonlyMap<string, SemanticNode>,
+  targetProp: SemanticNode,
 ): boolean {
   if (targetProp.countAnnotations("db.index.unique") > 0) return true;
-  const pk = [...targetStruct.props.entries()]
+  const pk = [...targetFields.entries()]
     .filter(([, p]) => p.countAnnotations("meta.id") > 0)
     .map(([name]) => name);
   if (pk.length <= 1) return true;
-  const hostStruct = getParentStruct(token);
+  const hostFields = getTypeFields(getParentStruct(token), doc);
   const owner = getDbTableOwner(token);
-  if (!hostStruct || owner === undefined || !isDbTable(owner)) return true;
+  if (!hostFields || owner === undefined || !isDbTable(owner)) return true;
   const covered = new Set<string>();
-  for (const [, sibling] of hostStruct.props) {
+  for (const [, sibling] of hostFields) {
     if (sibling.countAnnotations("db.rel.FK") === 0) continue;
     if (getAnnotationAlias(sibling, "db.rel.FK") !== alias) continue;
     const siblingDef = fkChainRef(sibling.getDefinition());
@@ -133,15 +135,14 @@ export const dbRelAnnotations: TAnnotationsTree = {
 
         // X2: FK target field must be @meta.id or @db.index.unique
         // F3: FK must resolve to a scalar type
+        // (the target's fields include the ones it inherits)
         const targetUnwound = doc.unwindType(refTypeName);
         if (targetUnwound) {
           const targetDef = targetUnwound.def;
           if (isInterface(targetDef) || isStructure(targetDef)) {
-            const struct = isInterface(targetDef)
-              ? (targetDef.getDefinition() as SemanticStructureNode | undefined)
-              : targetDef;
-            if (struct && isStructure(struct) && chainFields.length > 0) {
-              const targetProp = struct.props.get(chainFields[0]);
+            const targetFields = getTypeFields(targetDef, targetUnwound.doc);
+            if (targetFields && chainFields.length > 0) {
+              const targetProp = targetFields.get(chainFields[0]);
               if (targetProp) {
                 // X2: Check that target field is @meta.id or @db.index.unique
                 if (
@@ -156,7 +157,16 @@ export const dbRelAnnotations: TAnnotationsTree = {
                 }
 
                 // X2b: a column of a composite primary key is not unique on its own
-                if (!checkCompositeFkCoverage(token, alias, refTypeName, struct, targetProp)) {
+                if (
+                  !checkCompositeFkCoverage(
+                    token,
+                    doc,
+                    alias,
+                    refTypeName,
+                    targetFields,
+                    targetProp,
+                  )
+                ) {
                   errors.push({
                     message: `@db.rel.FK target '${refTypeName}.${chainFields.join(".")}' is one column of a composite primary key — a foreign key must reference a unique column; for value help without a constraint use @ui.valueHelp`,
                     severity: 1,
@@ -167,7 +177,8 @@ export const dbRelAnnotations: TAnnotationsTree = {
                 // F3: Check that FK resolves to a scalar type
                 const propDef = targetProp.getDefinition();
                 if (propDef && isRef(propDef)) {
-                  const propUnwound = targetUnwound.doc.unwindType(propDef.id!, propDef.chain);
+                  // resolved where it is written — an inherited key may be another file
+                  const propUnwound = targetUnwound.doc.unwindRef(propDef);
                   if (propUnwound && !isPrimitive(propUnwound.def)) {
                     errors.push({
                       message: `Foreign key field must resolve to a scalar type (number, string, etc.), got '${propDef.id}'`,
@@ -187,12 +198,12 @@ export const dbRelAnnotations: TAnnotationsTree = {
           }
         }
 
-        // F4: Multiple unaliased FKs to same target type
+        // F4: Multiple unaliased FKs to same target type (inherited FKs included)
         if (!alias) {
-          const struct = getParentStruct(token);
-          if (struct) {
+          const fields = getTypeFields(getParentStruct(token), doc);
+          if (fields) {
             let sameTargetCount = 0;
-            for (const [, prop] of struct.props) {
+            for (const [, prop] of fields) {
               if (prop.countAnnotations("db.rel.FK") === 0) {
                 continue;
               }
@@ -222,7 +233,7 @@ export const dbRelAnnotations: TAnnotationsTree = {
 
     to: new AnnotationSpec({
       description: annotationExample(
-        "Forward navigational property — the FK is on **this** interface. " +
+        "Forward navigational property — the FK is on **this** interface (declared or inherited through `extends`). " +
           "The compiler resolves the matching @db.rel.FK by target type or alias.",
         "@db.rel.to",
         "author?: User",
@@ -292,12 +303,12 @@ export const dbRelAnnotations: TAnnotationsTree = {
           });
         }
 
-        // T3/T4/T5/T6: Find matching FK on this interface
+        // T3/T4/T5/T6: Find matching FK on this interface (inherited fields included)
         const struct = getParentStruct(token);
         if (struct) {
           // T6: Duplicate .to with same alias/target
           const fieldName = field.id;
-          for (const [name, prop] of struct.props) {
+          for (const [name, prop] of getTypeFields(struct, doc) ?? []) {
             if (name === fieldName) {
               continue;
             }
@@ -414,11 +425,11 @@ export const dbRelAnnotations: TAnnotationsTree = {
           return errors;
         }
 
-        // R6: Duplicate .from with same alias/target
-        const struct = getParentStruct(token);
-        if (struct) {
+        // R6: Duplicate .from with same alias/target (inherited fields included)
+        const fields = getTypeFields(getParentStruct(token), doc);
+        if (fields) {
           const fieldName = field.id;
-          for (const [name, prop] of struct.props) {
+          for (const [name, prop] of fields) {
             if (name === fieldName) {
               continue;
             }

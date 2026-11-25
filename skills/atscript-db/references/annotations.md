@@ -70,7 +70,7 @@ interface User {
 Rules:
 
 - Field type MUST be `int` (non-optional). String / timestamp / hash versioning is not supported.
-- At most one version column per table.
+- At most one version column per table (an inherited one counts, 0.1.192).
 - Schema sync emits `NOT NULL DEFAULT 0`; existing rows backfill to `0` automatically.
 - Writes that target this column (plain SET, `$inc`, `$mul`) throw `DbError("VERSION_COLUMN_WRITE")`.
 - Pair with the `$cas` operator on `updateOne` / `replaceOne` / `bulkUpdate` to enable conflict detection.
@@ -176,6 +176,8 @@ Bind a numeric field to its dimension. Mutually exclusive within a pair (literal
 | `@db.unit`                | `decimal \| number` | `code: string`      | Schema-wide literal unit (`'kg'`, `'rpm'`, `'qps'`, …). Free-form, no shape check.                                |
 | `@db.unit.ref`            | `decimal \| number` | `fieldName: string` | Per-row unit in named sibling. Sibling must be `string`.                                                          |
 
+The `.ref` sibling is a field of the same interface, declared or inherited via `extends` (0.1.192; ≤ 0.1.191 an inherited sibling was refused).
+
 Runtime: `aggregate()` rejects `sum/avg/min/max` on a `.ref`-tagged field unless `$groupBy` includes the ref field (`COUNT(*)` exempt; literal forms impose nothing). `moost-db` `AsDbReadableController` auto-adds the ref sibling to `$select` when its tagged value is requested. Both `.ref` annotations feed one shared map (`TableMetadata.quantityRefByField`); descriptors keep separate `currencyCode` / `currencyRefField` / `unitCode` / `unitRefField`.
 
 ```atscript
@@ -242,11 +244,7 @@ interface User {
 
 `meta.preferredId` ships `["slug"]` instead of `["id"]`; UI URLs, list keys, and action invocations route by `slug`. PK still works for action addressing (precedence: PK first), but the UI default is the slug.
 
-> **The `@db.index.unique` group MUST be declared on a prop of _this_ interface, not inherited.** `asc` walks only the local prop list (`collectUniqueIndexGroups` in `@atscript/db/plugin`). If the unique index lives on a `extends`-parent, you get:
->
-> > `@db.table.preferredId.uniqueIndex requires at least one @db.index.unique on a prop of this interface.`
->
-> Declare both the unique index AND the `@db.table.preferredId.uniqueIndex` on the same interface — the one that carries `@db.table`. For shipped base interfaces whose unique-index field you want as the preferred id, fall back to the default PK (`@meta.id`) for action addressing; the inherited field is still queryable, just not the preferredId.
+> **The `@db.index.unique` group may live on a field inherited via `extends` (0.1.192)** — the table's own and inherited fields both count, and the preferred id resolves to the inherited field. ≤ 0.1.191 the compiler refused it with `@db.table.preferredId.uniqueIndex requires at least one @db.index.unique on a prop of this interface.` The `@db.table.preferredId.uniqueIndex` annotation itself goes on the interface that carries `@db.table` (interface-level annotations are not inherited).
 
 ## Array helpers for patches
 
