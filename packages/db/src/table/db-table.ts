@@ -1299,6 +1299,22 @@ export class AtscriptDbTable<
         // are stripped from the SET below, so they never change).
         const rowFilters = this._rowFilters(cloned, opts);
 
+        // A version token (since 0.1.196) has no touch: refused for every item
+        // before any write (a passthrough `withTransaction` would keep earlier ones).
+        if (this._meta.versionToken) {
+          cloned.forEach((payload, i) => {
+            if (
+              expectedVersions[i] !== undefined &&
+              this._writesNoColumn(payload, rowFilters[i]!)
+            ) {
+              throw notSupported(
+                `A patch that writes no column of its row (key, $cas and relation data only) is a versioned touch, which increments a counter; "${versionColumn!}" is a version token issued by the store`,
+                "$cas",
+              );
+            }
+          });
+        }
+
         // Each item's stored row, read once — for its check filter, its nested
         // TO patch, and the primary key of an item addressed by a unique field
         // that carries nested FROM / VIA data (written by the parent's key).
@@ -1385,14 +1401,7 @@ export class AtscriptDbTable<
           //     other clients' versions), but `matchedCount` is honest: one
           //     PK-indexed count tells whether the row exists.
           //  3. non-empty          → unchanged below.
-          // A version token (since 0.1.196) has no touch: the store moves it
-          // on a write, and a touch writes nothing but a counter.
-          if (isEmptyObject(data) && expectedVersion !== undefined && this._meta.versionToken) {
-            throw notSupported(
-              `A versioned touch (key and $cas only) increments a counter; "${versionColumn!}" is a version token issued by the store`,
-              "$cas",
-            );
-          }
+          // (A version-token table refused case 1 before any write, above.)
           if (isEmptyObject(data) && expectedVersion === undefined) {
             matched[i] = (await this.adapter.count({ filter: translatedFilter, controls: {} })) > 0;
             if (!matched[i] && _ownedBy?.strict?.[i]) throw concurrentChange();
@@ -2609,6 +2618,19 @@ export class AtscriptDbTable<
       }
       return this._pkFilterFrom(key)!;
     });
+  }
+
+  /**
+   * Whether a patch writes no column of its row: nothing is left once its
+   * navigation fields, the keys of its row filter and derived fields are
+   * taken out (Phase 2 of `bulkUpdate` strips the same).
+   */
+  private _writesNoColumn(payload: Record<string, unknown>, filter: FilterExpr): boolean {
+    const data = { ...payload };
+    for (const navField of this._meta.navFields) delete data[navField];
+    for (const key of Object.keys(filter)) delete data[key];
+    this._meta.stripDerived(data);
+    return isEmptyObject(data);
   }
 
   /** `separateCas`'s token flag: the version column is a store-issued token (since 0.1.196). */

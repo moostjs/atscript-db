@@ -78,16 +78,16 @@ For a store that issues its own row version (e.g. an HTTP entity tag): the versi
 etag: string
 ```
 
-| #   | Rule                                                                                                                                                                                                               |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1   | Needs an adapter with `supportsVersionTokens()` → `true`. Bundled adapters return `false` → the table throws on every use (`… is a @db.column.version.token; the … adapter does not support version tokens`).      |
-| 2   | The STORE moves the token on every successful write (adapter contract). Core: no `0` default, no bump; insert leaves it out.                                                                                       |
-| 3   | `$cas: { etag: '<token>' }` — non-empty string; else `INVALID_QUERY` (`must be a non-empty string (a version token)`). `bulkUpdate`, `replaceOne`, `withOptimisticRetry`, HTTP auto-lift, db-client lift all work. |
-| 4   | An INTEGER version column still refuses a string `$cas` at run time (`TDbCas` is typed `number \| string`).                                                                                                        |
-| 5   | Mismatch = `matchedCount: 0`; HTTP 409 with `currentVersion` = current token (string). A write returns no new token — re-read the row.                                                                             |
-| 6   | Versioned touch (key + `$cas` only) and `touchMany` → `DbError("NOT_SUPPORTED")` (400).                                                                                                                            |
-| 7   | Compile errors (mirrored at build): modifier without `@db.column.version`, non-string field, any `@db.default*` on it, any `@db.column.version.exempt` on the table.                                               |
-| 8   | Not in the schema snapshot (no hash change). No conditional delete; writes without `$cas` / deletes are the adapter's business.                                                                                    |
+| #   | Rule                                                                                                                                                                                                                                                                                     |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Needs an adapter with `supportsVersionTokens()` → `true`. Bundled adapters return `false` → the table throws on every use (`… is a @db.column.version.token; the … adapter does not support version tokens`).                                                                            |
+| 2   | The STORE moves the token on every successful write (adapter contract). Core: no `0` default, no bump; insert leaves it out.                                                                                                                                                             |
+| 3   | `$cas: { etag: '<token>' }` — non-empty string; else `INVALID_QUERY` (`must be a non-empty string (a version token)`). `bulkUpdate`, `replaceOne`, `withOptimisticRetry`, HTTP auto-lift, db-client lift all work.                                                                       |
+| 4   | An INTEGER version column still refuses a string `$cas` at run time (`TDbCas` is typed `number \| string`).                                                                                                                                                                              |
+| 5   | Mismatch = `matchedCount: 0`; HTTP 409 with `currentVersion` = current token (string). A write returns no new token — re-read the row.                                                                                                                                                   |
+| 6   | A patch writing no column of its row (key, `$cas`, relation data only) and `touchMany` → `DbError("NOT_SUPPORTED")` (400); in `bulkUpdate` before any item is written. Send relation-only edits WITHOUT the parent `$cas` (children carry their own tokens) or replace with nested data. |
+| 7   | Compile errors (mirrored at build): modifier without `@db.column.version`, non-string field, any `@db.default*` on it, any `@db.column.version.exempt` on the table.                                                                                                                     |
+| 8   | Not in the schema snapshot (no hash change). No conditional delete; writes without `$cas` / deletes are the adapter's business.                                                                                                                                                          |
 
 ## SDK — `$cas` operator
 

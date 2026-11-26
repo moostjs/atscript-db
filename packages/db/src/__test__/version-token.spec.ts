@@ -260,13 +260,37 @@ describe("a token table on an adapter that supports version tokens", () => {
     }
   });
 
-  it("a versioned touch (key and $cas only) is refused with NOT_SUPPORTED", async () => {
+  it("a patch that writes no column of its row (key and $cas only) is refused with NOT_SUPPORTED", async () => {
     const { table, adapter } = tokenTable();
     await table.insertOne({ id: 1, title: "first" } as any);
     const error = await rejection(() => table.updateOne({ id: 1, $cas: { etag: 'W/"1"' } }));
     expect(error.code).toBe("NOT_SUPPORTED");
-    expect(error.errors[0]!.path).toBe("$cas");
+    expect(error.errors).toEqual([
+      {
+        path: "$cas",
+        message:
+          'A patch that writes no column of its row (key, $cas and relation data only) is a versioned touch, which increments a counter; "etag" is a version token issued by the store',
+      },
+    ]);
     expect(adapter.calls.some((c) => c.method === "updateOne")).toBe(false);
+  });
+
+  it("bulkUpdate: a refused touch item stops the batch before any item is written", async () => {
+    const { table, adapter } = tokenTable();
+    await table.insertMany([
+      { id: 1, title: "a" },
+      { id: 2, title: "b" },
+    ] as any);
+    const error = await rejection(() =>
+      table.bulkUpdate([
+        { id: 1, title: "a2", $cas: { etag: 'W/"1"' } },
+        { id: 2, $cas: { etag: 'W/"2"' } },
+      ]),
+    );
+    expect(error.code).toBe("NOT_SUPPORTED");
+    // the memory-style adapter's withTransaction is a passthrough: nothing ran
+    expect(adapter.calls.some((c) => c.method === "updateOne")).toBe(false);
+    expect(((await table.findById(1)) as TRow).title).toBe("a");
   });
 
   it("touchMany is refused with NOT_SUPPORTED", async () => {

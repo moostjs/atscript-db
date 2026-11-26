@@ -767,8 +767,9 @@ export const dbColumnAnnotations: TAnnotationsTree = {
             "table whose adapter supports version tokens (`supportsVersionTokens()`); the bundled " +
             "adapters do not." +
             "\n\n**Constraints:** on the `@db.column.version` field, a non-optional string; no " +
-            "`@db.default*` on it and no `@db.column.version.exempt` on the table. A versioned touch " +
-            "(key and `$cas` only) and `touchMany` are refused: a touch increments a counter.",
+            "`@db.default*` on it and no `@db.column.version.exempt` on the table. A patch that " +
+            "writes no column of its row (key, `$cas` and relation data only) and `touchMany` are " +
+            "refused: a touch increments a counter.",
           "@db.column.version",
           "@db.column.version.token",
           "etag: string",
