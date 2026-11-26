@@ -451,10 +451,11 @@ For providers that require self-signed certs (e.g., RDS with the bundled CA), pa
 
 The adapter maps PostgreSQL constraint errors to structured `DbError` instances:
 
-| PG SQLSTATE | Error Type     | Description                                                                  |
-| ----------- | -------------- | ---------------------------------------------------------------------------- |
-| `23505`     | `CONFLICT`     | Unique constraint violation — includes the field path and constraint detail  |
-| `23503`     | `FK_VIOLATION` | Foreign key violation — extracts the offending column from PG's error detail |
+| PG SQLSTATE | Error Type      | Description                                                                                       |
+| ----------- | --------------- | ------------------------------------------------------------------------------------------------- |
+| `23505`     | `CONFLICT`      | Unique constraint violation — includes the field path and constraint detail                       |
+| `23503`     | `FK_VIOLATION`  | Foreign key violation — extracts the offending column from PG's error detail                      |
+| `22003`     | `INVALID_QUERY` | A value outside its column's range (since 0.1.195); `Arithmetic overflow` in aggregate arithmetic |
 
 These structured errors are the same across all adapters, so error handling code is portable:
 

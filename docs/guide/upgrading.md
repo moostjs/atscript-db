@@ -6,6 +6,13 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.195 {#v0-1-195}
+
+### Fixes
+
+- **PostgreSQL: an integer key outside its column's range matches no row.** `GET /one/3000000000` on an unsized `number.int` (`INTEGER`) key answers `404`, like on the other adapters; a write keyed by such a value fails with `INVALID_QUERY`. Before, both failed with a database error. See [GET /one](/http/crud#get-one).
+- **PostgreSQL: a filter or written value outside its integer column's range is `INVALID_QUERY`** (`Numeric value out of range`, `400` over HTTP). Before, it was a database error (`500`). See [Value types](/api/queries#value-types).
+
 ## 0.1.194 {#v0-1-194}
 
 ### Fixes

@@ -212,13 +212,14 @@ await tasks.findMany({ filter: { priority: { $gte: "high" } } });
 | a union (`number \| boolean`)               | what any member accepts                                                                                               |
 | an array (`string[]`, MongoDB and memory)   | its element type — for an array operand, every element                                                                |
 
-- **Integer fields** are `number.int` and its sizes, `number.timestamp`, a `number` with `@db.default.increment` or `@db.default.now`, and a view's `@db.agg.count` / `@db.agg.countDistinct` column.
+- **Integer fields** are `number.int` and its sizes, `number.timestamp`, a `number` with `@expect.int`, `@db.default.increment` or `@db.default.now`, and a view's `@db.agg.count` / `@db.agg.countDistinct` column.
 - **Non-finite numbers are rejected** (since 0.1.148): `NaN`, `Infinity` and `-Infinity` — bare or inside `$in` / `$nin` — fail with `expected a number, got NaN` on `number` and `decimal` fields. A numeric string such as `"Infinity"` is rejected too.
 - **Always accepted:** `null` (`{ f: null }`, `{ f: { $ne: null } }`) and class instances such as `Date` or a MongoDB `ObjectId`.
 - **Never checked:** `@db.json` fields and their contents, nested-object parents, `db.geoPoint` and `$exists` (a boolean, see [Existence](#existence)).
 - **Literal unions are checked by their primitive type**, not by membership: `{ status: "unknown" }` on `'open' | 'closed'` is valid and matches nothing.
 - **`$regex`** (and a bare `RegExp` value) needs a field that holds strings — or an integer field, which matches the number's decimal text — and a string or `RegExp` pattern. A float, decimal or timestamp field is refused.
 - **Accepted values are passed on unchanged.** A numeric string compares as a number on the SQL adapters but matches nothing on MongoDB and memory, which compare types strictly — pass values of the declared type.
+- **PostgreSQL checks integer ranges.** A whole number outside the range of its `SMALLINT`, `INTEGER` or `BIGINT` column passes this check, and PostgreSQL refuses it with `INVALID_QUERY` (`Numeric value out of range`; since 0.1.195).
 
 The same check covers view columns (aggregates and [computed columns](/views/computed-columns), by their declared type), `$having` (aggregate aliases: numbers, counts: integers; `min` / `max`: the source field's type; [calendar-bucket](/api/calendar-buckets) labels: strings), the operands of [relational filters](#relational-filters) (the path is prefixed with the relation, `issues.severity`) and the filters of `updateMany` / `deleteMany`. An unknown or unfilterable field keeps its own error (see [Nested Field Filters](#nested-field-filters)).
 

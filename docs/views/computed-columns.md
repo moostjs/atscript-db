@@ -72,7 +72,7 @@ Identical on every adapter:
 
 Doubles make equality filters on fractional results fragile — prefer ranges (`avgEstimate>=2.5`) over `avgEstimate=2.5`.
 
-**Overflow.** A result beyond the double range (about ±1.8e308) behaves differently per adapter. PostgreSQL (`value out of range: overflow`) and MySQL (`DOUBLE value is out of range`) raise an error, so a single extreme row fails the whole view read. SQLite and MongoDB return `Infinity` / `-Infinity`. Keep operands in a range where the expression cannot overflow.
+**Overflow.** A result beyond the double range (about ±1.8e308) behaves differently per adapter. PostgreSQL and MySQL (`DOUBLE value is out of range`) raise an error, so a single extreme row fails the whole view read; on PostgreSQL it is `INVALID_QUERY` "Numeric value out of range" (since 0.1.195). SQLite and MongoDB return `Infinity` / `-Infinity`. Keep operands in a range where the expression cannot overflow.
 
 ## Rules
 
