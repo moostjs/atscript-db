@@ -245,7 +245,7 @@ export interface Team {
 }
 ```
 
-- **Loaded with `$with`, never written.** `$with=members` loads it like any relation, per-relation `filter`, `$sort` and `$select` included. A write with any value in it — `null` included, at any depth, on every write path and in `validateRows` — is refused at the field's path with `NAV_STORE_WRITE` (HTTP 400). Leave the field out of the payload.
+- **Loaded with `$with`, never written.** `$with=members` loads it like any relation, per-relation `filter`, `$sort` and `$select` included. A write with any value in it — `null` included, at any depth, in inserts, `updateOne` / `bulkUpdate`, `replaceOne` / `bulkReplace` and `validateRows` — is refused at the field's path with `NAV_STORE_WRITE` (HTTP 400). `updateMany` and `replaceMany` write the table's own fields only and refuse any navigation value first, with `INVALID_QUERY`. Leave the field out of the payload.
 - **Only on an adapter that reads relations in-read** ([`supportsWithInRead()`](/adapters/creating-adapters#with-in-read)). On any other adapter — the bundled ones included — the table refuses every use: `Relation "members" of "teams" has no foreign key; the SqliteAdapter adapter does not read relations in-read`.
 - `@db.rel.filter` and `@db.rel.filterable` work on it; a relational predicate (`members=$some(…)`) needs the adapter's [relation filters](/adapters/creating-adapters#supports-relation-filters).
 - `/meta.relations[]` lists it with `direction: "store"`. It is a navigation, not a column: adding one never triggers a sync.
