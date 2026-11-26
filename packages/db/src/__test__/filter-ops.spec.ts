@@ -105,6 +105,19 @@ describe("filterOps — the list narrows what a field accepts", () => {
     );
   });
 
+  it("a RegExp is $regex — bare, or as the operand of $eq / $ne", async () => {
+    const posts = space({ ...KEYS, "posts.title": ["$eq", "$ne", "$in"] }).getTable(PostType);
+    for (const filter of [
+      { title: /Post/ },
+      { title: { $eq: /Post/ } },
+      { title: { $ne: /Post/ } },
+    ]) {
+      const entry = await refusal(() => posts.findMany({ filter } as any));
+      expect(entry.message).toContain("does not accept $regex");
+    }
+    expect(await posts.findMany({ filter: { title: { $eq: "Post A" } } })).toHaveLength(1);
+  });
+
   it("every operator of an entry must be listed — inside $or / $not and mutation filters too", async () => {
     const posts = space({ ...KEYS, "posts.title": ["$eq", "$in"] }).getTable(PostType);
     const mixed = await refusal(() =>

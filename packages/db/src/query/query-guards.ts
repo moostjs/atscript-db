@@ -381,9 +381,20 @@ export function filterPredicateOf(value: unknown): TFilterPredicate {
   return keys.length === 1 && keys[0] === "$exists" ? "exists" : "compare";
 }
 
-/** The operators of a filter entry's value: its keys, `$eq` for a bare value. */
+/**
+ * The operators of a filter entry's value: its keys, `$eq` for a bare value.
+ * A RegExp is a pattern match: bare it is `$regex`, as the operand of `$eq` /
+ * `$ne` it adds `$regex`.
+ */
 function entryOpsOf(value: unknown): string[] {
-  return isPlainObject(value) ? Object.keys(value) : ["$eq"];
+  if (value instanceof RegExp) return ["$regex"];
+  if (!isPlainObject(value)) return ["$eq"];
+  const ops = Object.keys(value);
+  const map = value as Record<string, unknown>;
+  if ((map.$eq instanceof RegExp || map.$ne instanceof RegExp) && !ops.includes("$regex")) {
+    ops.push("$regex");
+  }
+  return ops;
 }
 
 /** The `{ op, filter }` list of a `relation` entry's operator map. */
