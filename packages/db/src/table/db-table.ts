@@ -2590,7 +2590,9 @@ export class AtscriptDbTable<
    * the row (SDK defaults applied), else the stored key the adapter wrote into
    * the prepared row (e.g. a driver-assigned `_id`), else the adapter's
    * `insertedIds` — the id itself for a single-field key (auto-increment), the
-   * part of the id object for a composite one (a server-generated part).
+   * part of the id object for a composite one (a server-generated part). A
+   * `@db.default.store` key part comes from `insertedIds` first (since
+   * 0.1.196): the store decides, also over a value the caller sent.
    */
   private _insertedPkFilters(
     items: Array<Record<string, unknown>>,
@@ -2605,7 +2607,12 @@ export class AtscriptDbTable<
       const key: Record<string, unknown> = {};
       const id = insertedIds[i];
       for (const field of pkFields) {
-        let value = item[field];
+        const def = this._meta.defaults.get(field);
+        let value =
+          def?.kind === "fn" && def.fn === "store"
+            ? insertedIdPart(id, field, pkFields)
+            : undefined;
+        if (value === undefined) value = item[field];
         if (value === undefined) value = prepared[i]?.[this._meta.columnMap.get(field) ?? field];
         if (value === undefined) value = insertedIdPart(id, field, pkFields);
         if (value === undefined || value === null) {

@@ -25,7 +25,7 @@ async function diagnosticsFor(source: string): Promise<string[]> {
   // errors only (a primitive `@db.json` field also gets its J1 warning)
   return [...(await repo.diagnostics()).values()]
     .flat()
-    .filter((m) => m.severity === 1)
+    .filter((m) => Number(m.severity) === 1)
     .map((m) => m.message);
 }
 
@@ -146,9 +146,13 @@ class StoreFillsAdapter extends MockAdapter {
       "insertMany",
       data.map((row) => ({ ...row })),
     );
+    // the store decides: a sent `X-…` number is replaced by its own
     const filled = data.map((row) => ({
       ...row,
-      orderNo: row.orderNo ?? `SO-${++this._next}`,
+      orderNo:
+        typeof row.orderNo !== "string" || row.orderNo.startsWith("X-")
+          ? `SO-${++this._next}`
+          : row.orderNo,
       seq: row.seq ?? this._next,
     }));
     this._rows().push(...filled);
@@ -189,9 +193,21 @@ describe("on an adapter that lists 'store'", () => {
 
   it("a value the caller sends is passed to the adapter", async () => {
     const { orders, adapters } = space();
-    await orders.insertOne({ orderNo: "X-9", customer: "C1" } as any);
+    await orders.insertOne({ orderNo: "K-9", customer: "C1" } as any);
     const sent = adapters[0]!.calls.find((c) => c.method === "insertMany")!.args[0];
-    expect(sent).toEqual([{ orderNo: "X-9", customer: "C1" }]);
+    expect(sent).toEqual([{ orderNo: "K-9", customer: "C1" }]);
+  });
+
+  it("the write check reads the key the store filled, also over a sent one", async () => {
+    const { orders } = space();
+    const filters: unknown[] = [];
+    const result = await orders.insertOne({ orderNo: "X-9", customer: "C1" } as any, {
+      check: (ctx) => {
+        filters.push(...ctx.filters);
+      },
+    });
+    expect(result).toEqual({ insertedId: "SO-1" });
+    expect(filters).toEqual([{ orderNo: "SO-1" }]);
   });
 
   it("a filter on a store-filled number is not typed as an integer", () => {
