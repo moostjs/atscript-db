@@ -199,6 +199,19 @@ describe("filterOps — the core's own reads pass the guard", () => {
     await posts.deleteOne(10);
     expect(store.get("comments")).toEqual([]);
   });
+
+  it("a relation read is guarded too: a $with sub-filter on a field with an empty list is refused", async () => {
+    const s = space(narrow);
+    const authors = s.getTable(AuthorType);
+    s.getTable(PostType);
+    const entry = await refusal(() =>
+      authors.findMany({
+        filter: { id: 1 },
+        controls: { $with: [{ name: "posts", filter: { title: "Post A" } }] },
+      } as any),
+    );
+    expect(entry).toMatchObject({ path: "title", code: "FIELD_NOT_PERMITTED" });
+  });
 });
 
 describe("filterOps — a key or foreign-key field needs $eq and $in (table build)", () => {
