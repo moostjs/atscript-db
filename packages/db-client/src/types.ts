@@ -1,3 +1,4 @@
+import type { Client } from "./client";
 import type { MetaStore } from "./meta-store";
 import type {
   FilterExpr,
@@ -362,3 +363,20 @@ export interface TDbQueryTarget<T = AtscriptClientShape> {
   /** Client-side cap (never above the action's `queryTarget.maxRows`). */
   maxRows?: number;
 }
+
+/**
+ * The public surface of `Client`: what atscript-ui and applications call. Any object with these
+ * members stands in for a `Client`; it need not extend the class. Every member is required.
+ * An implementation that cannot perform an operation rejects with a `ClientError` of status 400
+ * and `body.code: "NOT_SUPPORTED"`, as moost-db answers, and leaves the operation out of its
+ * `/meta` (`crud`, `actions`, `aggregateFns`, `geoSearchable`). A read-only implementation needs
+ * working `meta`, `query`, `pages`, `one`, `count`, `getValidator`
+ * (`createClientValidator(await this.meta())`), `invalidateMeta`, `metaEtag` (may return
+ * `undefined`) and `metaStore` (may be `undefined`); answers "none" from `availableActions`,
+ * `getActionForm` (`null`) and `getActionFormTexts` (`undefined`); and rejects the rest.
+ * @since 0.1.196
+ */
+export type ClientLike<
+  T extends AtscriptClientShape = AtscriptClientShape,
+  D extends object = Record<never, never>,
+> = Pick<Client<T, D>, keyof Client<T, D>>;

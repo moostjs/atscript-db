@@ -120,6 +120,22 @@ const rows = await withRefresh(() => users.query({ filter: { active: true } }));
 
 Because `headers` is awaited on every call, the retried request automatically picks up the new token — no need to recreate the `Client`.
 
+### A client without the class — `ClientLike` {#client-like}
+
+Since 0.1.196. `ClientLike<T, D>` is the public surface of `Client<T, D>` — `Pick<Client<T, D>, keyof Client<T, D>>`, so it keeps every method's overloads and documentation. Any object with these members stands in for a `Client`; it need not extend the class. Type a parameter or a factory result as `ClientLike<T>` when the code only calls the client, so another implementation can be passed — for example a client for a remote service that is no moost-db endpoint.
+
+```typescript
+import type { AtscriptClientShape, ClientLike } from "@atscript/db-client";
+
+function renderTable<T extends AtscriptClientShape>(client: ClientLike<T>) {
+  /* calls client.meta(), client.query(), … */
+}
+```
+
+Every member is required: a member added to `Client` is at once required of every implementation. An implementation that cannot perform an operation rejects with a `ClientError` of status 400 and `body.code: "NOT_SUPPORTED"`, as moost-db answers, and leaves the operation out of its `/meta` (`crud`, `actions`, `aggregateFns`, `geoSearchable`). A read-only implementation needs working `meta`, `query`, `pages`, `one`, `count`, `getValidator` (`createClientValidator(await this.meta())`), `invalidateMeta`, `metaEtag` (may return `undefined`) and `metaStore` (may be `undefined`); it answers "none" from `availableActions` (`{ actions: [] }`), `getActionForm` (`null`) and `getActionFormTexts` (`undefined`), and rejects the rest.
+
+The types the methods' signatures name are exported for such implementations: `ReadRow<T, Q, D>` (a `query()` / `pages()` row), `DecoratedRow<T, Q, D>`, `InsertedRow<T, D>` (the row `insert(row, { returning: true })` answers), `SingleInsertOf<T>`, `AggregateCheck<T, Q>` and `AggregateRows<T, Q>`.
+
 ## Querying
 
 All query methods accept a [Uniquery](./query-syntax) object with `filter` and `controls`.

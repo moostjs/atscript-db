@@ -5,6 +5,15 @@ export {
   formatIdentifier,
   formatIdentifierField,
 } from "./client";
+// The types `Client`'s signatures name (since 0.1.196), for `ClientLike` implementers.
+export type {
+  DecoratedRow,
+  ReadRow,
+  InsertedRow,
+  SingleInsertOf,
+  AggregateCheck,
+  AggregateRows,
+} from "./client";
 export { MetaStore, clearMetaStore, defaultMetaStore } from "./meta-store";
 export type { MetaStoreOptions } from "./meta-store";
 export {
@@ -37,6 +46,7 @@ export type {
   TCrudPermissions,
 } from "@atscript/db";
 export type {
+  ClientLike,
   ClientOptions,
   MetaResponse,
   PageResult,

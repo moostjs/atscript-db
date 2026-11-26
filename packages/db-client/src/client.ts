@@ -60,12 +60,12 @@ type Nav<T> = NavOf<T>;
 type Id<T> = IdOf<T>;
 type Response<T, Q> = ClientResponse<T, Q>;
 /** A read row: the response over the own fields plus the declared decorations `D`, each optional. */
-type DecoratedRow<T, Q, D> = Response<T, Q> & Partial<D>;
+export type DecoratedRow<T, Q, D> = Response<T, Q> & Partial<D>;
 /**
  * A `query()` / `pages()` row: {@link DecoratedRow}, plus `$score` on a vector read
  * (`$search` with `$vector`, since 0.1.183): higher = closer, on the scale of `$threshold`.
  */
-type ReadRow<T, Q, D> = DecoratedRow<T, Q, D> &
+export type ReadRow<T, Q, D> = DecoratedRow<T, Q, D> &
   (Q extends { controls: { $search: string; $vector: string } } ? { $score: number } : unknown);
 type THttpMethod = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
 /** Per-request transport options of the private request helpers. */
@@ -79,17 +79,20 @@ type TRequestOptions = {
  * One insert row for `returning`: an untyped client's row is any `object`,
  * which an array would match too — there it is any non-array object.
  */
-type SingleInsertOf<T> = [keyof InsertOf<T>] extends [never]
+export type SingleInsertOf<T> = [keyof InsertOf<T>] extends [never]
   ? Record<string, any> & { readonly [Symbol.iterator]?: never }
   : InsertOf<T>;
 /** The stored row `insert(row, { returning: true })` answers: the `one()` row shape. */
-type InsertedRow<T, D> = DecoratedRow<T, Record<never, never>, D>;
+export type InsertedRow<T, D> = DecoratedRow<T, Record<never, never>, D>;
 /** A two-level aggregate query: one with `controls.$from`. */
 type NestedShape = { controls: { $from: object } };
 /** The compile-time check an aggregate query must pass: two-level or flat. */
-type AggregateCheck<T, Q> = Q extends NestedShape ? ValidNested<T, Q> : ValidGroupBy<T, Q>;
+export type AggregateCheck<T, Q> = Q extends NestedShape ? ValidNested<T, Q> : ValidGroupBy<T, Q>;
 /** The rows `aggregate()` answers for query `Q`. */
-type AggregateRows<T, Q extends AggregateQuery<T> | NestedAggregateQuery<T>> = Q extends NestedShape
+export type AggregateRows<
+  T,
+  Q extends AggregateQuery<T> | NestedAggregateQuery<T>,
+> = Q extends NestedShape
   ? NestedAggregateResult<T, Q>[]
   : Q["controls"]["$select"] extends readonly (string | ComputedExpr)[]
     ? AggregateResult<T, Q["controls"]["$select"]>[]
