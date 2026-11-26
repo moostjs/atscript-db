@@ -230,6 +230,15 @@ describe("computeColumnDiff", () => {
     ).toEqual([]);
   });
 
+  it("a store-filled value (@db.default.store) has no DDL default to miss", () => {
+    const desired = [field({ physicalName: "orderNo", defaultValue: { kind: "fn", fn: "store" } })];
+    const existing = [col("orderNo", "TEXT", true)];
+    const native = new Set(["now", "store"] as const);
+    expect(
+      computeColumnDiff(desired, existing, undefined, { nativeDefaultFns: native }).defaultChanged,
+    ).toEqual([]);
+  });
+
   it("should detect default removed", () => {
     const desired = [field({ physicalName: "status" })];
     const existing = [col("status", "TEXT", false, false, "active")];

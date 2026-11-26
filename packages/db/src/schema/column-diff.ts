@@ -283,12 +283,16 @@ export function computeColumnDiff(
         // (e.g., old DDL without DEFAULT clause) and can't detect changes —
         // except a `now` / `uuid` default the engine applies itself
         // (`nativeDefaultFns`): the table layer leaves such a field out of an
-        // INSERT, so a column without it would reject the row.
+        // INSERT, so a column without it would reject the row. A `store`
+        // value (since 0.1.196) has no DDL default to miss.
         const liveDefault = existingCol.dflt_value;
         const desiredDefault = serializeDefaultValue(field.defaultValue);
         const fn = field.defaultValue?.kind === "fn" ? field.defaultValue.fn : undefined;
         const missingNative =
-          fn !== undefined && fn !== "increment" && opts?.nativeDefaultFns?.has(fn) === true;
+          fn !== undefined &&
+          fn !== "increment" &&
+          fn !== "store" &&
+          opts?.nativeDefaultFns?.has(fn) === true;
         if (
           (liveDefault !== undefined || missingNative) &&
           liveDefault !== desiredDefault &&
