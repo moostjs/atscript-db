@@ -52,7 +52,7 @@ status: string // DEFAULT 'new'
 
 ## Generated Defaults
 
-Some defaults need to be computed at insert time. Atscript provides three portable generated-default annotations:
+Some defaults need to be computed at insert time. Atscript provides three portable generated-default annotations, and [`@db.default.store`](#default-store) for a value the store itself fills:
 
 ### `@db.default.increment` — Auto-Incrementing Integer
 
@@ -86,6 +86,21 @@ createdAt?: number
 ```
 
 Use `number` (epoch ms) for timestamps so they cross HTTP boundaries without any serialization step.
+
+### `@db.default.store` — Filled by the Store {#default-store}
+
+Since 0.1.196. The store fills this value when an insert leaves it out — for a store that assigns keys or other values itself (a remote service, a number range of its own):
+
+```atscript
+@meta.id
+@db.default.store
+orderNo: string
+```
+
+- **Needs an adapter that lists `"store"` in `nativeDefaultFns()`** ([Creating Adapters](/adapters/creating-adapters#nativedefaultfns)). The bundled adapters do not: a table with such a field refuses every use (`Table "orders": field "orderNo" is a @db.default.store; the … adapter does not list "store" in nativeDefaultFns()`). Schema sync therefore never sees it.
+- **The SDK never fills it.** Insert and replace validation (server, `@atscript/db-client`, forms) accept the field missing, as for every `@db.default*`; `/meta` serves the annotation. A value the caller does send is passed to the adapter: the store decides.
+- **A store-filled key comes back in `insertedId`** (`insertedIds` for `insertMany`), as for `@db.default.increment`; `returning`, write checks and nested `@db.rel.from` / `@db.rel.via` children use it. Limitation: when the store names no key, those get none.
+- **Compile rule:** a scalar field outside any `@db.json` value or array element; not together with another `@db.default*`, `@db.column.version` (a store-issued version is a [version token](/api/versioning#version-token)), `@db.onUpdate.inc`, `@db.column.derived` or `@db.encrypted`.
 
 ### Semantic types {#semantic-types}
 
@@ -167,7 +182,7 @@ version: number.int
 // Mongo writers inject version: 0 at insert when the field is missing.
 ```
 
-Every successful write thereafter increments the column by `1`, server-side. See [Optimistic Concurrency (Row Versioning)](/api/versioning) for the full feature.
+Every successful write thereafter increments the column by `1`, server-side. A [version token](/api/versioning#version-token) (`@db.column.version.token`, since 0.1.196) has no default: the store fills it. See [Optimistic Concurrency (Row Versioning)](/api/versioning) for the full feature.
 
 ## How Defaults Interact with Inserts
 
@@ -176,7 +191,7 @@ Understanding when defaults apply:
 - **Omitted fields** — the default value is used. This is the primary use case.
 - **`undefined` values ≡ omitted** (since 0.1.128) — a key whose value is `undefined` is dropped before defaults and validation run, at every nesting depth, so `{ cap: undefined }` gets the default exactly like leaving `cap` out. Before 0.1.128 SQL adapters bound it as `NULL` (a constraint error on `NOT NULL` columns). `null` remains an explicit NULL.
 - **Explicit values** — if you pass a value for a field with a default, your value takes precedence. The default is only a fallback.
-- **Static defaults are filled SDK-side on every adapter** (since 0.1.128) — `@db.default 'x'` is written explicitly into the row before validation, also on SQL adapters whose DDL carries the same `DEFAULT` clause (writing the column's own default is equivalent to leaving it out). Rows therefore reach validators and [write guards](/api/crud#write-guards) complete. Function defaults (`@db.default.now` / `.uuid` / `.increment`) stay adapter-native: they are generated SDK-side only when the adapter does not handle them in the engine (see each adapter's page).
+- **Static defaults are filled SDK-side on every adapter** (since 0.1.128) — `@db.default 'x'` is written explicitly into the row before validation, also on SQL adapters whose DDL carries the same `DEFAULT` clause (writing the column's own default is equivalent to leaving it out). Rows therefore reach validators and [write guards](/api/crud#write-guards) complete. Function defaults (`@db.default.now` / `.uuid` / `.increment`) stay adapter-native (`@db.default.store` is never filled by the SDK): they are generated SDK-side only when the adapter does not handle them in the engine (see each adapter's page).
 - **Optional fields without defaults** — become `NULL` if omitted from the insert.
 - **Fields with `@db.default.increment`** — typically omitted from inserts entirely. The database generates the next value.
 - **Fields of embedded objects** (since 0.1.155) — a default on `audit.at` is set inside `audit` when the row has an `audit` object; an absent or `null` embedded object stays absent: on PostgreSQL and MySQL, where `audit.at` is a column with the default in its DDL, an insert or replace without `audit` writes `NULL` into the object's columns, so the engine default does not make it appear. In an array of objects every item gets it, and inside a `@db.json` value (which has no column default) the SDK fills `now` / `uuid` on every adapter. Below a tuple or a union of several object types (`[A, B]`, `(A | B)[]`) the item a default belongs to is not known, so it is not filled, and the field is required on insert like a field without a default — by the server, by `@atscript/db-client` and by a form that validates against `/meta` with `@atscript/db/validator`.

@@ -6,7 +6,7 @@ outline: deep
 
 <!--@include: ../_experimental-warning.md-->
 
-Atscript DB supports first-class **optimistic concurrency control (OCC)** via a server-managed integer version column. A single annotation makes the column auto-bump on every write that changes a non-exempt column (see [version-exempt fields](#version-exempt)); the inline `$cas` operator turns any write into a conditional one that rejects stale read-modify-write submissions.
+Atscript DB supports first-class **optimistic concurrency control (OCC)** via a server-managed integer version column. A single annotation makes the column auto-bump on every write that changes a non-exempt column (see [version-exempt fields](#version-exempt)); the inline `$cas` operator turns any write into a conditional one that rejects stale read-modify-write submissions. For a store that issues its own row version, the column can instead hold that opaque [version token](#version-token) (since 0.1.196).
 
 ## When You Need This
 
@@ -42,12 +42,12 @@ interface Task {
 Constraints (enforced at compile time):
 
 - **At most one** version column per table — composite versioning makes no semantic sense. A version column inherited through `extends` counts; two inherited from two bases are reported on the table's `@db.table` (since 0.1.194).
-- The field must resolve to a SQL `INTEGER` (or Mongo `Number`). String / timestamp versioning is not supported.
+- The field must resolve to a SQL `INTEGER` (or Mongo `Number`) — or, with [`@db.column.version.token`](#version-token), to a string the store issues (since 0.1.196; before, string versioning was not supported). A bare `@db.column.version` on a string field is a compile error that names the modifier.
 - The annotation takes no arguments. To store the field under another column name, add [`@db.column`](/api/tables#custom-column-names) as for any field (`@db.column 'row_version'`). The rename changes only the storage column: `$cas`, write bodies, rows read back and `/meta`'s `versionColumn` keep using the field name (`version`). Renamed version fields are supported since 0.1.141.
 - The field is **server-managed**: the adapter sets it to `0` on insert and increments it by `1` on every successful update that writes a non-exempt field (see [Version-exempt fields](#version-exempt)). See [defaults](./defaults#version-defaults).
 
 ::: tip Auto-bump is mandatory
-Every successful write to a versioned row increments `version` by 1, whether or not `$cas` was supplied. This is the property that makes OCC actually work — if the version column did not auto-increment, opting in to `$cas` would silently degrade to no protection.
+Every successful write to a versioned row increments `version` by 1, whether or not `$cas` was supplied. This is the property that makes OCC actually work — if the version column did not auto-increment, opting in to `$cas` would silently degrade to no protection. On a [version token](#version-token) table the store, not the adapter's counter, moves the version on every successful write.
 
 The one exception is declarative and schema-level: a patch that writes **only** fields marked [`@db.column.version.exempt`](#version-exempt) (and carries no `$cas`) leaves the version untouched (since 0.1.150). The [update time](./defaults#on-update) such a patch sets (`number.timestamp.updated`) and the [change counter](./defaults#on-update-inc) it increments do not count as a write here — use `@db.onUpdate.inc` when you need a token that every write moves, exempt ones included.
 :::
@@ -234,6 +234,43 @@ Without a bump nothing forces a change. On MySQL and MongoDB, an exempt write th
 
 Array ops on the generic (SQL, memory) path are a read-modify-write. Like any array patch without `$cas`, two concurrent writers of the same exempt array can lose an update.
 
+## Version tokens (`@db.column.version.token`) {#version-token}
+
+Since 0.1.196. Some stores issue their own row version — an opaque value that changes whenever the row does, for example an HTTP entity tag of a remote service. Mark a **string** version field with the modifier, and the column holds that token instead of a counter:
+
+```atscript
+@db.table 'tickets'
+export interface Ticket {
+    @meta.id
+    id: number
+
+    title: string
+
+    @db.column.version
+    @db.column.version.token
+    etag: string
+}
+```
+
+```typescript
+const ticket = await tickets.findById(1); // { id: 1, title: "…", etag: 'W/"7"' }
+const result = await tickets.updateOne({ id: 1, title: "Done", $cas: { etag: ticket.etag } });
+if (result.matchedCount === 0) {
+  // stale token, or the row is gone
+}
+```
+
+This reverses two earlier decisions of this page: string versioning was not supported, and the version always moved by `+1`. A token is compared by equality only, never parsed or incremented.
+
+- **Needs an adapter that declares `supportsVersionTokens()`** (see [Creating Adapters](/adapters/creating-adapters#versioned-tables)). The bundled adapters do not: a token table on them refuses every use (`Table "tickets": version column "etag" is a @db.column.version.token; the … adapter does not support version tokens`).
+- **The store moves the token on every successful write** — that is the adapter's contract, stated in `supportsVersionTokens()`. The core never bumps it and gives it no `0` default; an insert leaves it out and the store fills it.
+- **`$cas` takes the token as a non-empty string**: `$cas: { etag: 'W/"7"' }`, the `$cas("etag", token)` helper, `bulkUpdate` items, `replaceOne`, [`withOptimisticRetry`](#withoptimisticretry-the-retry-helper) and the HTTP auto-lift all work as for a counter. Anything else is `INVALID_QUERY` (`$cas operator: value for "etag" must be a non-empty string (a version token)`). An integer version column still refuses a string at run time, although `TDbCas` now types the value as `number | string`.
+- **A mismatch is `matchedCount: 0`**, and over HTTP a `409` whose `currentVersion` is the current token. A write returns no new token: read it with the row.
+- **No touch.** A [versioned touch](#versioned-touch) (key and `$cas` only) and [`touchMany`](#touch-many) increment a counter, so on a token table both throw `DbError("NOT_SUPPORTED")` (HTTP 400).
+- **Compile errors** (mirrored when the table is built): the modifier without `@db.column.version` on the same field, on a non-string field, with any `@db.default*` on the field, and a [`@db.column.version.exempt`](#version-exempt) field anywhere on the table — a token moves on every write the store accepts. The optional-field and one-per-table rules stay.
+- A write without `$cas`, and a delete, are the adapter's business (for example an unconditional request to the store). Limitation: no conditional delete.
+- The modifier is not part of the schema snapshot: adding it changes no schema hash.
+
 ## `withOptimisticRetry` — The Retry Helper
 
 Raw CAS works, but every consumer writing a retry loop is friction. `withOptimisticRetry` covers the 90% case:
@@ -368,7 +405,7 @@ This is a [locked design decision](#alternatives-considered). A single `expected
 
 ### Version on insert
 
-`@db.column.version` implies a `0` default at insert time — see [Version defaults](./defaults#version-defaults). You do not need to add `@db.default 0` explicitly, and you do not need to send the field: the shared validator treats it as server-managed (like `@db.default*`) on insert and replace, at any nesting depth — so nested inserts of versioned related rows omit it too (since 0.1.128). A `version` value supplied on insert is accepted as a plain number.
+`@db.column.version` implies a `0` default at insert time — see [Version defaults](./defaults#version-defaults); a [version token](#version-token) has none, the store fills it. You do not need to add `@db.default 0` explicitly, and you do not need to send the field: the shared validator treats it as server-managed (like `@db.default*`) on insert and replace, at any nesting depth — so nested inserts of versioned related rows omit it too (since 0.1.128). A `version` value supplied on insert is accepted as a plain number.
 
 ### Empty patches
 
@@ -451,6 +488,7 @@ try {
 } catch (e) {
   if (e instanceof VersionMismatchError) {
     // e.currentVersion is the row's now-stored version — refresh + retry.
+    // (`number | string` since 0.1.196: a string on a version-token table)
   }
 }
 ```
@@ -464,7 +502,7 @@ Since 0.1.128 the client also accepts the SDK shape — `users.update({ id, $cas
 These are intentionally **not** supported in v1 — listed so you know they were considered and rejected:
 
 - **Timestamp-based versioning** — suffers from clock skew on distributed writers and millisecond collision under high load.
-- **Hash-based versioning** — pushes hashing into every read+write; harder to reason about than monotonic integers.
+- **Hash-based versioning computed by the SDK** — pushes hashing into every read+write; harder to reason about than monotonic integers. A token the **store** computes and issues is supported since 0.1.196: see [Version tokens](#version-token).
 - **Per-field versioning** — strictly more granular (concurrent edits to disjoint fields succeed) but significantly more complex; the 80% use case is "this row's state machine moved on," which is row-level by nature.
 - **Pessimistic locking (`SELECT FOR UPDATE`)** — separate concept; could be a future addition but not OCC.
 - **`If-Match` header** — body-embedded `version` is simpler for SPA clients that already round-trip the row.

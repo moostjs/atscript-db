@@ -31,7 +31,7 @@ interface User {
 
 Constraints:
 
-- Field type MUST resolve to `int` (SQL `INTEGER`, Mongo `Number`).
+- Field type MUST resolve to `int` (SQL `INTEGER`, Mongo `Number`) — or a `string` WITH `@db.column.version.token` (§ Version tokens, 0.1.196). A bare `@db.column.version` on a string = compile error naming the modifier.
 - At most one version column per table (an inherited one counts, 0.1.192; two inherited from two bases → error on the table's `@db.table`, 0.1.194).
 - Field must be non-optional. Schema sync emits `NOT NULL DEFAULT 0`; existing rows backfill to `0` automatically on `ALTER TABLE`.
 - `@db.column 'row_version'` renames ONLY the stored column (supported since 0.1.141). `$cas` key, write bodies, rows read back, `table.versionColumn` and `/meta.versionColumn` all use the FIELD name (`version`). ≤ 0.1.140 `versionColumn` returned the column name → renamed version fields had no working OCC; don't key anything on the column name.
@@ -67,6 +67,27 @@ Rule (decided in core from the schema + the payload keys, never per call): a pat
 - The version is then NOT a whole-row change token (exempt-only refreshes keep it) — do not use it as a whole-row cache key / ETag.
 - `modifiedCount` can be `0` (MySQL / Mongo) for an exempt write of unchanged values; use `matchedCount` to see whether the row was found.
 - `table.versionExemptFields` lists exempt paths. Not part of the schema hash (no sync). Concurrent array ops on the generic path are read-modify-write (can lose an update without `$cas`).
+
+## Version tokens (since 0.1.196)
+
+For a store that issues its own row version (e.g. an HTTP entity tag): the version column holds that opaque string. Reverses the earlier "string versioning not supported" / "always +1" rules for such tables.
+
+```atscript
+@db.column.version
+@db.column.version.token
+etag: string
+```
+
+| #   | Rule                                                                                                                                                                                                               |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | Needs an adapter with `supportsVersionTokens()` → `true`. Bundled adapters return `false` → the table throws on every use (`… is a @db.column.version.token; the … adapter does not support version tokens`).      |
+| 2   | The STORE moves the token on every successful write (adapter contract). Core: no `0` default, no bump; insert leaves it out.                                                                                       |
+| 3   | `$cas: { etag: '<token>' }` — non-empty string; else `INVALID_QUERY` (`must be a non-empty string (a version token)`). `bulkUpdate`, `replaceOne`, `withOptimisticRetry`, HTTP auto-lift, db-client lift all work. |
+| 4   | An INTEGER version column still refuses a string `$cas` at run time (`TDbCas` is typed `number \| string`).                                                                                                        |
+| 5   | Mismatch = `matchedCount: 0`; HTTP 409 with `currentVersion` = current token (string). A write returns no new token — re-read the row.                                                                             |
+| 6   | Versioned touch (key + `$cas` only) and `touchMany` → `DbError("NOT_SUPPORTED")` (400).                                                                                                                            |
+| 7   | Compile errors (mirrored at build): modifier without `@db.column.version`, non-string field, any `@db.default*` on it, any `@db.column.version.exempt` on the table.                                               |
+| 8   | Not in the schema snapshot (no hash change). No conditional delete; writes without `$cas` / deletes are the adapter's business.                                                                                    |
 
 ## SDK — `$cas` operator
 
@@ -261,7 +282,7 @@ Documented gaps in v1 — don't rely on these features yet:
 
 1. **Per-item conflict disambiguation in bulk responses.** Bulk PATCH / PUT returns aggregate `{ matchedCount, modifiedCount }`. There is no per-item 207 Multi-Status response. If you need per-row conflict reporting, do the calls one at a time.
 2. **External writers bypass auto-bump.** Anything that writes to a versioned row outside the adapter (raw SQL migrations, ETL pipelines, ops scripts, replication catchup) will NOT increment the version. A subsequent `$cas`-protected caller will then succeed against a stale state. Install per-engine DB triggers if you need defense-in-depth — atscript-db does not install them.
-3. **No timestamp-based, hash-based, or per-field versioning.** Integer row-version only.
+3. **No timestamp-based, SDK-computed hash, or per-field versioning.** Integer row-version, or a store-issued token (0.1.196, § Version tokens).
 4. **No pessimistic locking** (`SELECT FOR UPDATE`). Separate concept; not in scope.
 
 ## See also

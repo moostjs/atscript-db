@@ -122,6 +122,15 @@ When the table declares [`@db.column.version`](/api/versioning), `this._table.ve
 
 Use `versionColumnPhysical`, not `versionColumn`: `versionColumn` is the field name clients use in `$cas` and write bodies, and it differs from the stored column under a `@db.column` rename (since 0.1.141). SQL adapters get the bump and the comparison from `buildUpdate` in `@atscript/db-sql-tools` (pass it `versionColumnPhysical` and `expectedVersion`; for a `keepVersion` update pass `versionColumn: undefined`, which drops both the bump and the version predicate), the insert default from the `DEFAULT 0` that schema sync declares, and should pass `versionColumnPhysical` to `fillReplacePayload` so a full replace never resets the column.
 
+**Version tokens (since 0.1.196).** An adapter whose store issues its own row version returns `true` from [`supportsVersionTokens()`](#supports-version-tokens); a table may then declare a string version field with [`@db.column.version.token`](/api/versioning#version-token), and `this._table.versionToken` is `true` (an adapter-facing getter, like `versionColumnPhysical`). The contract differs from the counter:
+
+- **The store moves the token on every successful write** — `updateOne`, `updateMany`, `replaceOne`, `replaceMany`, `nativePatch` — and fills it on insert. The core never sends a bump: `_versionColumnFor()` returns `undefined`, and `data` never carries the column.
+- **`expectedVersion` is a string** in `replaceOne`, `updateOne` and `nativePatch`: compare it by equality (for example send it as the store's precondition) and report a mismatch as `{ matchedCount: 0, modifiedCount: 0 }`.
+- **Return the token with the row** on every read; a write returns no new token.
+- A write without `expectedVersion`, and a delete, are yours to send as the store requires (for example unconditionally). The core refuses a versioned touch and `touchMany` on such a table (`NOT_SUPPORTED`).
+
+The `expectedVersion` parameters are typed `TDbVersion` (`number | string`) since 0.1.196; an override that keeps `number` still compiles.
+
 #### Change counters (`@db.onUpdate.inc`, since 0.1.162) {#change-counters}
 
 `this._table.onUpdateIncPhysical` lists the stored columns of the table's [`@db.onUpdate.inc`](/api/defaults#on-update-inc) fields (empty when there are none). On patches the core hands you the increment as a regular field op (`ops.inc[col] = 1`), and fills `0` on insert — nothing to do. On **`replaceOne` and `replaceMany`** the core leaves these columns out of `data`, and the adapter must increment them in the same statement: `this._onUpdateIncOps(ops?)` returns `ops` with `inc: { <col>: 1 }` merged in for `buildUpdate`, and SQL adapters pass `onUpdateIncPhysical` as the fourth argument of `fillReplacePayload` so a full replace does not null the column. A document store rebuilding the row (`$replaceWith`) sets each counter to its stored value + 1.
@@ -182,6 +191,10 @@ Return `true` to handle `$with` relation loading natively via database features 
 
 Return `true` when your store returns related rows in the same response as the rows themselves — for example a remote service that embeds them. See [Relations Read in the Same Read](#with-in-read).
 
+### `supportsVersionTokens()` — since 0.1.196 {#supports-version-tokens}
+
+Return `true` when your store issues the row version itself, so a table may declare a [version token](/api/versioning#version-token). Your contract: the token moves on every successful write — see [Versioned tables](#versioned-tables). Default `false`: a table with `@db.column.version.token` refuses every use.
+
 ### `supportsRelationFilters(mode)` — since 0.1.147 {#supports-relation-filters}
 
 Return `true` to receive [relational predicates](/api/queries#relational-filters) (`$some` / `$none`) in `mode`: `'read'` for the filters of find, count, search and `aggregate()`, `'write'` for mutation filters (`updateMany`, `replaceMany`, `deleteMany`, row scopes). Default `false`: the core rejects such a filter with `REL_FILTER_NOT_SUPPORTED` (`… in mutation filters` for writes) before your adapter sees it. All bundled adapters return `true` for both modes. What you receive is described in [Relational Predicates](#relational-predicates).
@@ -219,6 +232,8 @@ nativeDefaultFns(): ReadonlySet<TDbDefaultFn> {
 ```
 
 The generic layer checks this in its defaults pass to decide whether to generate the value client-side or leave it for the DB.
+
+`"store"` (since 0.1.196) admits [`@db.default.store`](/api/defaults#default-store) fields: your store fills such a value when the insert leaves it out, and the SDK never does. Return a store-filled primary key in `insertedId` / `insertedIds`, as for an auto-increment key — `returning`, write checks and nested children read it there. A value the caller sends reaches you: the store decides. Without `"store"` in the set, a table with such a field refuses every use.
 
 ### `supportsColumnModify`
 
