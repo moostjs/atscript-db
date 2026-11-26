@@ -30,7 +30,7 @@ import type {
 import { isAggregateExpr, isAggregateOfExpr, isBucketExpr, resolveAlias } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
-import { DbError, invalidQuery, spaceClosedError } from "../db-error";
+import { DbError, invalidQuery, notSupported, spaceClosedError } from "../db-error";
 import type { TGenericLogger } from "../logger";
 import { NoopLogger } from "../logger";
 import type {
@@ -67,7 +67,17 @@ import {
   loadPlannedRelations,
   loadRelationsImpl,
 } from "../rel/relation-loader";
-import { type TWithPlanEntry, type TWithPlanHost, planWith } from "../rel/with-plan";
+import {
+  type TInReadNode,
+  type TInReadPlan,
+  type TWithPlanEntry,
+  type TWithPlanHost,
+  attachRelations,
+  detachRelations,
+  planWith,
+  relationCapabilityProblem,
+  resolveWithInRead,
+} from "../rel/with-plan";
 import {
   findFKEntryForRelation,
   findFKForRelation,
@@ -115,8 +125,10 @@ interface TReadPlan {
   /** The controls the rows were read with (`$select` widened by join keys). */
   controls: TReadControls | undefined;
   withRelations?: WithRelation[];
-  /** The generic loader's plan of the `$with` level (adapters without native relations). */
+  /** The generic loader's plan of the `$with` level (no native, no in-read relations). */
   withPlan?: TWithPlanEntry[];
+  /** In-read adapter: how the relation values in its rows become logical rows. */
+  inRead?: TInReadNode[];
   /** Join keys added to `$select` for `$with` — stripped after loading. */
   widened: string[];
 }
@@ -465,6 +477,9 @@ export class AtscriptDbReadable<
   /** @internal Set by the owning `DbSpace` when it closes. */
   _spaceClosed = false;
 
+  /** Why the table's relations do not fit its adapter's relation capabilities (set at build). */
+  private _relationsProblem?: string;
+
   /** Ensures metadata is built. Called before any metadata access. */
   protected _ensureBuilt(): void {
     if (this._spaceClosed) throw spaceClosedError();
@@ -477,10 +492,15 @@ export class AtscriptDbReadable<
           (type) => resolver(type) as unknown as TRelationFilterOwner | undefined,
         );
       }
+      this._relationsProblem = relationCapabilityProblem(this._meta, this.adapter, this.tableName);
     }
     // The adapter's `filterOps` refuse a key field the core's own reads need.
     if (this._meta.filterOpsProblem) {
       throw new Error(`Table "${this.tableName}": ${this._meta.filterOpsProblem}`);
+    }
+    // e.g. a `@db.rel.via` relation on an adapter that reads relations in-read
+    if (this._relationsProblem) {
+      throw new Error(this._relationsProblem);
     }
     if (this._meta.encryptedFields.size > 0 && !this._encryption) {
       // Never silently store/read plaintext on a model that declares
@@ -580,6 +600,40 @@ export class AtscriptDbReadable<
     this._ensureBuilt();
     const out = this._fromRead(rows, controls);
     await this._decryptRows(out);
+    return out;
+  }
+
+  /**
+   * Plans `withRelations` of THIS table for an adapter that reads relations
+   * in-read (`supportsWithInRead()`), nested levels included — see
+   * `resolveWithInRead`. `path` is the navigation chain above (messages).
+   *
+   * @internal Core wiring of in-read relations; not consumer API.
+   * @since 0.1.196
+   */
+  public _resolveWithInRead(withRelations: WithRelation[], path: string): TInReadPlan {
+    this._ensureBuilt();
+    return resolveWithInRead(this as unknown as TWithPlanHost, withRelations, path);
+  }
+
+  /**
+   * {@link _rowsFromAdapter} for rows of an in-read adapter: the relation
+   * values (`nodes`) are taken off each row first, converted by their
+   * table's own `_rowsFromInRead` and attached to the logical rows.
+   *
+   * @internal Core wiring of in-read relations; not consumer API.
+   * @since 0.1.196
+   */
+  public async _rowsFromInRead(
+    rows: Record<string, unknown>[],
+    controls: TReadControls | undefined,
+    nodes: readonly TInReadNode[],
+  ): Promise<Record<string, unknown>[]> {
+    this._ensureBuilt();
+    const values = detachRelations(rows, nodes, this.adapter);
+    const out = this._fromRead(rows, controls);
+    await this._decryptRows(out);
+    await attachRelations(out, values, nodes);
     return out;
   }
 
@@ -1034,6 +1088,20 @@ export class AtscriptDbReadable<
         readQuery = { ...readQuery, controls } as Uniquery;
       }
     }
+    if (withRelations?.length && this.adapter.supportsWithInRead()) {
+      // The adapter reads the relations itself, correlated by navigation
+      // name: the whole tree is planned now, the root `$select` kept as is.
+      const plan = this._resolveWithInRead(withRelations, "");
+      readQuery = this._withStableSort(readQuery);
+      const translated = this._fieldMapper.translateQuery(readQuery, this._meta);
+      return {
+        translated: { ...translated, controls: { ...translated.controls, $with: plan.entries } },
+        controls: readQuery.controls as TReadControls | undefined,
+        withRelations,
+        inRead: plan.nodes,
+        widened: [],
+      };
+    }
     let widened: string[] = [];
     if (withRelations?.length && controls?.$select) {
       const widen = this._widenSelectForWith(controls.$select, withRelations);
@@ -1065,6 +1133,10 @@ export class AtscriptDbReadable<
     read: TReadPlan,
     pick?: (rows: Record<string, unknown>[]) => Record<string, unknown>[],
   ): Promise<Record<string, unknown>[]> {
+    if (read.inRead) {
+      const all = await this._rowsFromInRead(results, read.controls, read.inRead);
+      return pick ? pick(all) : all;
+    }
     const all = this._fromRead(results, read.controls);
     await this._decryptRows(all);
     const rows = pick ? pick(all) : all;
@@ -2547,12 +2619,22 @@ export class AtscriptDbReadable<
   /**
    * Loads `$with` relations onto rows already read (in place). Used by
    * adapters for nested `$with` delegation.
+   *
+   * Refused (`NOT_SUPPORTED`, since 0.1.196) on a table whose adapter reads
+   * relations inside the read (`supportsWithInRead()`): request them with
+   * `$with` on the read instead.
    */
   public async loadRelations(
     rows: Array<Record<string, unknown>>,
     withRelations: WithRelation[],
   ): Promise<void> {
     this._ensureBuilt();
+    if (this.adapter.supportsWithInRead()) {
+      throw notSupported(
+        `loadRelations() is not available on "${this.tableName}": its adapter reads relations inside the read — request them with $with`,
+        "$with",
+      );
+    }
     return loadRelationsImpl(
       rows,
       nestDottedWith(withRelations),

@@ -4433,8 +4433,10 @@ export class AsDbReadableController<
         name,
         direction: rel.direction,
         isArray: rel.isArray,
-        // Clients may filter by related rows (`nav=$some(…)`) — since 0.1.147.
-        ...(rel.filterable === true && { filterable: true as const }),
+        // Clients may filter by related rows (`nav=$some(…)`) — since 0.1.147;
+        // only when the adapter renders relational predicates since 0.1.196.
+        ...(rel.filterable === true &&
+          this.readable.dbAdapter.supportsRelationFilters("read") && { filterable: true as const }),
       });
     }
 

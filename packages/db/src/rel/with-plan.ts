@@ -1,15 +1,19 @@
-import type { FilterExpr, WithRelation } from "@uniqu/core";
+import type { FilterExpr, Uniquery, WithRelation } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
-import { unknownWithRelation } from "../db-error";
+import { notSupported, unknownWithRelation } from "../db-error";
 import { andFilters, relationStaticFilter } from "../query/relation-filter";
-import type { TDbRelation, TTableResolver } from "../types";
+import { nestDottedWith } from "../shared/with-nesting";
+import type { TReadControls } from "../strategies/field-mapping";
+import type { TableMetadata } from "../table/table-metadata";
+import type { DbQuery, TDbRelation, TResolvedWith, TTableResolver } from "../types";
 import type { TGroupPage } from "./relation-helpers";
 
 /**
  * The resolved `$with` plan (since 0.1.196): ONE resolution of a read's
  * `$with` entries — relation, target table, merged filter and controls —
- * consumed by the generic loader.
+ * consumed by the generic loader and by an adapter that reads relations
+ * in-read (`supportsWithInRead()`).
  */
 
 /** The table whose `$with` level is planned (an `AtscriptDbReadable`). */
@@ -124,4 +128,194 @@ export function planWith(
       junctionFilter: statics.junction,
     };
   });
+}
+
+// ── In-read ─────────────────────────────────────────────────────────────────
+
+/** A related table of an in-read plan (an `AtscriptDbReadable`). */
+export interface TInReadTable {
+  readonly tableName: string;
+  getAdapter(): BaseDbAdapter;
+  _translateForAdapter(query: Uniquery): DbQuery;
+  _resolveWithInRead(withRelations: WithRelation[], path: string): TInReadPlan;
+  _rowsFromInRead(
+    rows: Record<string, unknown>[],
+    controls: TReadControls | undefined,
+    nodes: readonly TInReadNode[],
+  ): Promise<Record<string, unknown>[]>;
+}
+
+/** How one relation's values in the adapter's rows become logical rows. */
+export interface TInReadNode {
+  nav: string;
+  isArray: boolean;
+  target: TInReadTable;
+  /** The logical controls the related rows were read with. */
+  controls: TReadControls | undefined;
+  children: TInReadNode[];
+}
+
+/** A `$with` tree planned for an in-read adapter: what it receives and how its rows are finished. */
+export interface TInReadPlan {
+  entries: TResolvedWith[];
+  nodes: TInReadNode[];
+}
+
+/**
+ * Plans the whole `$with` tree of `host` for an adapter that reads relations
+ * in-read: each entry becomes the target's `_translateForAdapter(query)` (the
+ * guard and stable sort a generic relation read runs), nested entries in its
+ * `controls.$with`. Paging inside `$with` and a target on another store are
+ * refused (`NOT_SUPPORTED`).
+ */
+export function resolveWithInRead(
+  host: TWithPlanHost,
+  withRelations: WithRelation[],
+  path: string,
+): TInReadPlan {
+  const adapterName = host.adapter.constructor.name;
+  const entries: TResolvedWith[] = [];
+  const nodes: TInReadNode[] = [];
+  for (const entry of planWith(host, nestDottedWith(withRelations), path)) {
+    const where = path ? `${path}.${entry.nav}` : entry.nav;
+    if (entry.page) {
+      throw notSupported(
+        `Relation "${where}": the ${adapterName} adapter reads relations inside the read and does not page them — $skip / $limit inside $with are not supported`,
+        "$with",
+      );
+    }
+    const target = entry.target as unknown as TInReadTable;
+    if (typeof target._translateForAdapter !== "function") {
+      throw new Error(
+        `Relation "${where}" of "${host.tableName}": the table resolver's table cannot be read in-read`,
+      );
+    }
+    const adapter = target.getAdapter();
+    if (!host.adapter.sharesStoreWith(adapter)) {
+      throw notSupported(
+        `Relation "${where}": the related table lives in a different database or adapter — the ${adapterName} adapter reads relations inside the read`,
+        "$with",
+      );
+    }
+    const { $with, ...controls } = entry.query.controls;
+    const nested = Array.isArray($with)
+      ? target._resolveWithInRead($with as WithRelation[], where)
+      : undefined;
+    let query = target._translateForAdapter({ filter: entry.query.filter ?? {}, controls });
+    if (nested && nested.entries.length > 0) {
+      query = { ...query, controls: { ...query.controls, $with: nested.entries } };
+    }
+    entries.push({
+      // `via` relations are refused at table build on such an adapter
+      kind: entry.kind as TResolvedWith["kind"],
+      nav: entry.nav,
+      isArray: entry.isArray,
+      target: { table: adapter.resolveTableName(), name: adapter.resolveTableName(false), adapter },
+      query,
+    });
+    nodes.push({
+      nav: entry.nav,
+      isArray: entry.isArray,
+      target,
+      controls: controls as TReadControls,
+      children: nested?.nodes ?? [],
+    });
+  }
+  return { entries, nodes };
+}
+
+function contractError(adapter: BaseDbAdapter, message: string): Error {
+  return new Error(`${adapter.constructor.name} ${message}`);
+}
+
+/**
+ * Takes each requested relation's value off the adapter's rows (before they
+ * are reconstructed), per node, per row. A row without one is an adapter
+ * defect.
+ */
+export function detachRelations(
+  rows: Record<string, unknown>[],
+  nodes: readonly TInReadNode[],
+  adapter: BaseDbAdapter,
+): unknown[][] {
+  return nodes.map((node) =>
+    rows.map((row) => {
+      const value = row[node.nav];
+      if (value === undefined) {
+        throw contractError(adapter, `returned a row without relation "${node.nav}"`);
+      }
+      if (node.isArray ? !Array.isArray(value) : value !== null && typeof value !== "object") {
+        throw contractError(
+          adapter,
+          `returned relation "${node.nav}" as ${Array.isArray(value) ? "an array" : typeof value}, expected ${node.isArray ? "an array" : "an object or null"}`,
+        );
+      }
+      delete row[node.nav];
+      return value;
+    }),
+  );
+}
+
+/**
+ * Converts the detached relation values through each target's own
+ * `_rowsFromInRead` (field mapping, value formatters, decryption, nested
+ * relations) and attaches them to the logical rows `out` (1:1 with the
+ * adapter's rows).
+ */
+export async function attachRelations(
+  out: Record<string, unknown>[],
+  values: unknown[][],
+  nodes: readonly TInReadNode[],
+): Promise<void> {
+  await Promise.all(
+    nodes.map(async (node, n) => {
+      const perRow = values[n]!;
+      const related: Record<string, unknown>[] = [];
+      for (const value of perRow) {
+        if (Array.isArray(value)) related.push(...(value as Record<string, unknown>[]));
+        else if (value !== null) related.push(value as Record<string, unknown>);
+      }
+      const logical =
+        related.length > 0
+          ? await node.target._rowsFromInRead(related, node.controls, node.children)
+          : [];
+      let next = 0;
+      for (let r = 0; r < out.length; r++) {
+        const value = perRow[r];
+        if (Array.isArray(value)) {
+          out[r]![node.nav] = logical.slice(next, next + value.length);
+          next += value.length;
+        } else {
+          out[r]![node.nav] = value === null ? null : logical[next++];
+        }
+      }
+    }),
+  );
+}
+
+/**
+ * Why `meta`'s relations cannot be used with `adapter`'s relation
+ * capabilities — `undefined` when they can. The table refuses every use
+ * with this message.
+ */
+export function relationCapabilityProblem(
+  meta: TableMetadata,
+  adapter: BaseDbAdapter,
+  tableName: string,
+): string | undefined {
+  if (!adapter.supportsWithInRead() || meta.relations.size === 0) return undefined;
+  const name = adapter.constructor.name;
+  if (adapter.supportsNativeRelations()) {
+    return `Table "${tableName}": the ${name} adapter declares both supportsNativeRelations() and supportsWithInRead() — relations are read one way`;
+  }
+  for (const [nav, relation] of meta.relations) {
+    if (relation.direction === "via") {
+      return `Relation "${nav}" of "${tableName}" is a @db.rel.via relation; the ${name} adapter reads relations in-read, where a junction table is not read`;
+    }
+    const prefix = `${nav}.`;
+    if (meta.allPhysicalFields.some((column) => column === nav || column.startsWith(prefix))) {
+      return `Navigation "${nav}" of "${tableName}" has the name of a stored column; the ${name} adapter reads relations in-read, where relation values travel in the row under the navigation name`;
+    }
+  }
+  return undefined;
 }

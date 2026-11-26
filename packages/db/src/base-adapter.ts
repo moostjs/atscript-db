@@ -1088,6 +1088,35 @@ export abstract class BaseDbAdapter {
   }
 
   /**
+   * Whether this adapter reads `$with` relations inside the read — e.g. a
+   * remote service that returns the related rows in the same response. Its
+   * row reads (`findOne`, `findMany`, `findManyWithCount`, `search*`,
+   * `vectorSearch*`, `geoSearch*`) receive `query.controls.$with` as
+   * resolved entries (`TResolvedWith`) and return every row with each
+   * requested relation under its navigation name (`null` / `[]` when there
+   * is none; a missing one fails the read). The generic loader and
+   * {@link loadRelations} are then never used for this adapter's tables.
+   *
+   * **Authorization contract.** An entry's `query.filter` and
+   * `query.controls.$select` may carry server authorization (a controller's
+   * `validateControls` conjoins row scopes into them; ARBAC restricts the
+   * selected fields): apply every entry as given, at every depth, or refuse
+   * the whole read (`NOT_SUPPORTED`). Never drop a control — the core
+   * cannot check the related rows the adapter returns.
+   *
+   * A table on such an adapter refuses `@db.rel.via` relations, a
+   * navigation named like a stored column, and {@link supportsNativeRelations}
+   * true as well. Entries never carry `$skip` / `$limit`: the core refuses a
+   * request that pages a relation (`NOT_SUPPORTED`). `$sort` is passed on.
+   *
+   * Default `false`.
+   * @since 0.1.196
+   */
+  supportsWithInRead(): boolean {
+    return false;
+  }
+
+  /**
    * Whether this adapter renders relational filter predicates
    * (`{ nav: { $some | $none: … } }`) in `mode` — `read` for find / count /
    * search / aggregate filters, `write` for mutation filters

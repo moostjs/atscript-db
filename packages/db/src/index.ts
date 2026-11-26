@@ -141,6 +141,7 @@ export type {
 export type {
   DbQuery,
   DbControls,
+  TResolvedWith,
   FilterExpr,
   FieldOpsFor,
   NullsPlacement,

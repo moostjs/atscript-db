@@ -15,6 +15,7 @@ import type {
 import type { TDbCas, TDbFieldOp } from "./ops";
 import type { TArrayPatch } from "./patch/patch-types";
 import type { DB_FULLTEXT_LANGUAGES, DB_FULLTEXT_MATCH_MODES } from "./shared/fulltext-options";
+import type { TRelationFilterTable } from "./query/relation-filter";
 import type { UniquSelect } from "./query/uniqu-select";
 import type { TableMetadata } from "./table/table-metadata";
 
@@ -47,8 +48,15 @@ export type {
 // ── Resolved query types (adapter-facing) ──────────────────────────────────
 
 /** Controls with resolved projection. Used in the adapter interface. */
-export interface DbControls extends Omit<_UniqueryControls, "$select" | "$rowOrder"> {
+export interface DbControls extends Omit<_UniqueryControls, "$select" | "$rowOrder" | "$with"> {
   $select?: UniquSelect;
+  /**
+   * The `$with` relations, resolved by the core. Set only for an adapter
+   * whose `supportsWithInRead()` is true; otherwise the core loads the
+   * relations itself and the adapter never sees them.
+   * @since 0.1.196
+   */
+  $with?: TResolvedWith[];
   /**
    * The inner level of a two-level aggregate (since 0.1.168; only on adapters
    * whose `supportsNestedAggregates()` is true): a grouped aggregate over the
@@ -79,6 +87,29 @@ export interface DbQuery {
    * an adapter whose transaction already serialises writers may ignore it.
    */
   lock?: TDbReadLock;
+}
+
+/**
+ * One `$with` entry as an adapter whose `supportsWithInRead()` is true
+ * receives it, in `query.controls.$with` of a row read. The adapter returns
+ * every row with the related row(s) under `nav` (`null` / `[]` when there
+ * are none), read with `query`.
+ * @since 0.1.196
+ */
+export interface TResolvedWith {
+  kind: Exclude<TDbRelation["direction"], "via">;
+  /** Navigation field: each row carries the related row(s) under this name. */
+  nav: string;
+  /** `true`: an array of related rows; `false`: one related row or `null`. */
+  isArray: boolean;
+  /** The related table: `{ table, name, adapter }`, as in `ResolvedRelationFilter`. */
+  target: TRelationFilterTable;
+  /**
+   * The related table's adapter-facing query (physical names, the
+   * relation's `@db.rel.filter` and the entry's filter conjoined), without
+   * `$skip` / `$limit`; `controls.$with` holds the nested entries.
+   */
+  query: DbQuery;
 }
 
 // ── Locking reads & isolation (since 0.1.162) ──────────────────────────────

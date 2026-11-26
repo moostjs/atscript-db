@@ -7,6 +7,8 @@ import type { FilterExpr } from "@uniqu/core";
 import { BaseDbAdapter } from "../base-adapter";
 import type {
   DbQuery,
+  TDbFieldMeta,
+  TResolvedWith,
   TDbInsertResult,
   TDbInsertManyResult,
   TDbUpdateResult,
@@ -145,6 +147,91 @@ export class OrderedMockAdapter extends MockAdapter {
     const limit = query.controls?.$limit as number | undefined;
     return limit === undefined ? rows : rows.slice(0, limit);
   }
+}
+
+type TRow = Record<string, unknown>;
+
+/**
+ * An adapter that reads `$with` relations inside the read
+ * (`supportsWithInRead()`), like a remote service returning the related rows
+ * in the same response. It applies each entry's filter, `$sort`, `$select`
+ * and nested entries as given, and correlates rows with
+ * `links["<table>.<nav>"](parent, child)` (physical rows) — the core hands it
+ * no join keys. Booleans are stored as `1` / `0` (`formatValue`).
+ */
+export class InReadMockAdapter extends MockAdapter {
+  /** The `$with` entries each read received (root reads and nested levels alike). */
+  public entries: TResolvedWith[][] = [];
+  /** Relations this adapter leaves out of its rows (a defective adapter). */
+  public omit = new Set<string>();
+
+  constructor(public links: Record<string, (parent: TRow, child: TRow) => boolean> = {}) {
+    super();
+  }
+
+  override supportsWithInRead(): boolean {
+    return true;
+  }
+
+  formatValue(fd: TDbFieldMeta) {
+    if (fd.designType !== "boolean") return undefined;
+    return {
+      toStorage: (v: unknown) => (typeof v === "boolean" ? (v ? 1 : 0) : v),
+      fromStorage: (v: unknown) => v === 1,
+    };
+  }
+
+  override async findOne(query: DbQuery): Promise<TRow | null> {
+    return (await this.findMany(query))[0] ?? null;
+  }
+
+  override async findMany(query: DbQuery): Promise<TRow[]> {
+    this.record("findMany", query);
+    return (await this.readRows(query)).map((row) => project(row, query));
+  }
+
+  /** Matching rows (copies) with their relations attached, not yet projected. */
+  async readRows(query: DbQuery): Promise<TRow[]> {
+    const rows = this._rows()
+      .filter((r) => matchesFilter(r, query.filter))
+      .map((r) => ({ ...r }));
+    const sort = query.controls?.$sort as Record<string, 1 | -1> | undefined;
+    if (sort) {
+      rows.sort((a, b) => {
+        for (const [k, dir] of Object.entries(sort)) {
+          if (a[k] !== b[k]) return (a[k] as number) < (b[k] as number) ? -dir : dir;
+        }
+        return 0;
+      });
+    }
+    const entries = query.controls?.$with;
+    if (!entries) return rows;
+    this.entries.push(entries);
+    for (const entry of entries) {
+      const target = entry.target.adapter as InReadMockAdapter;
+      const related = await target.readRows(entry.query);
+      const link = this.links[`${this._table.tableName}.${entry.nav}`]!;
+      for (const row of rows) {
+        if (this.omit.has(entry.nav)) continue;
+        const mine = related
+          .filter((child) => link(row, child))
+          .map((child) => project(child, entry.query));
+        row[entry.nav] = entry.isArray ? mine : (mine[0] ?? null);
+      }
+    }
+    return rows;
+  }
+}
+
+/** `row` with the fields of `query`'s `$select` (and its relations) only. */
+function project(row: TRow, query: DbQuery): TRow {
+  const fields = query.controls?.$select?.asArray;
+  if (!fields) return row;
+  const out: TRow = {};
+  for (const key of [...fields, ...(query.controls.$with ?? []).map((e) => e.nav)]) {
+    if (key in row) out[key] = row[key];
+  }
+  return out;
 }
 
 /**
