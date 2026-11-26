@@ -379,8 +379,8 @@ export abstract class AsReadableController<
    * Annotation whitelist: keeps every non-`db.*` key (`meta.*`, `expect.*`,
    * `normalize.*` — db-client's preflight normalizes with it), `db.rel.*`, the `db.*`
    * keys the shared db validator plugin reads in db-client (`db.json`, `db.encrypted`,
-   * `db.patch.strategy`, `db.default*`, `db.onUpdate.now` / `.inc`, `db.column.version`,
-   * `db.column.derived`) and the client-facing `db.http.path` /
+   * `db.patch.strategy`, `db.default*`, `db.onUpdate.now` / `.inc`, `db.column.version`
+   * and `.token`, `db.column.derived`) and the client-facing `db.http.path` /
    * `db.writeOnly` / `db.sort.nulls` and the quantity keys a UI formats a number with
    * (`db.amount.currency` / `.ref`, `db.unit` / `.ref`, `db.column.precision`); strips
    * every other `db.*` (table, column, index, etc.).
@@ -411,6 +411,8 @@ export abstract class AsReadableController<
           // them (and rejects $inc/$dec/$mul on a derived one) only when it
           // can see the annotation.
           key === "db.column.version" ||
+          // (since 0.1.196) a client lifts a string version only on a token column
+          key === "db.column.version.token" ||
           key === "db.column.derived" ||
           // A field's default NULL placement in sorts: UIs show it next to the sort.
           key === "db.sort.nulls" ||

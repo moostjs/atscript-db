@@ -53,6 +53,20 @@ export interface VersionedRevision {
   revision: number
 }
 
+// @db.column.version.token (since 0.1.196) — a version the store issues.
+@db.table 'versioned_tickets'
+export interface VersionedTicket {
+  @meta.id
+  @db.default.increment
+  id: number
+
+  name: string
+
+  @db.column.version
+  @db.column.version.token
+  etag: string
+}
+
 // @db.column.derived — scalar columns computed from a @db.json leaf.
 @db.table 'derived_orders'
 export interface DerivedOrder {

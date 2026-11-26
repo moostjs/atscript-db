@@ -12,7 +12,7 @@ import type {
   UniqueryInsights,
   WithRelation,
 } from "@uniqu/core";
-import type { TDbCas, TDbFieldOp } from "./ops";
+import type { TDbCas, TDbFieldOp, TDbVersion } from "./ops";
 import type { TArrayPatch } from "./patch/patch-types";
 import type { DB_FULLTEXT_LANGUAGES, DB_FULLTEXT_MATCH_MODES } from "./shared/fulltext-options";
 import type { TRelationFilterTable } from "./query/relation-filter";
@@ -1545,8 +1545,11 @@ export interface TDbWriteGuardContext<Row = Record<string, unknown>> {
    * the table re-validates the rows after the guard.
    */
   readonly rows: Row[];
-  /** Parallel to `rows`: expected version lifted from `$cas`, or `undefined`. */
-  readonly expectedVersions: ReadonlyArray<number | undefined>;
+  /**
+   * Parallel to `rows`: expected version lifted from `$cas`, or `undefined`
+   * (a string on a `@db.column.version.token` table, since 0.1.196).
+   */
+  readonly expectedVersions: ReadonlyArray<TDbVersion | undefined>;
   /**
    * Lazy, memoised pre-image of `rows[i]` by its identifying filter, read
    * inside the transaction. Identified exactly like the write (primary key

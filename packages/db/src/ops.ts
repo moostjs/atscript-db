@@ -12,16 +12,24 @@ export interface TDbFieldOp {
 }
 
 /**
+ * A row version: an integer counter (`@db.column.version`), or an opaque
+ * string the store issues (`@db.column.version.token`, since 0.1.196).
+ */
+export type TDbVersion = number | string;
+
+/**
  * A compare-and-set assertion: the update applies only if the version
  * column currently equals `value`. Used inline in update payloads:
  *
  *   { ...patch, $cas: { version: 4 } }
  *
  * The map shape is forward-compatible with multi-field CAS; v1 has
- * exactly one entry keyed by the table's version column name.
+ * exactly one entry keyed by the table's version column name. A string
+ * value is a version token (since 0.1.196); an integer version column
+ * refuses it at run time.
  */
 export interface TDbCas {
-  [versionColumn: string]: number;
+  [versionColumn: string]: TDbVersion;
 }
 
 /** Increment a numeric field by `value` (default 1). */
@@ -49,7 +57,7 @@ export function $mul(value: number): TDbFieldOp {
  * The wrapped object can be spread directly so the marker stays a
  * single, type-safe top-level entry.
  */
-export function $cas(versionColumn: string, value: number): { $cas: TDbCas } {
+export function $cas(versionColumn: string, value: TDbVersion): { $cas: TDbCas } {
   return { $cas: { [versionColumn]: value } };
 }
 
@@ -193,7 +201,9 @@ export function separateFieldOps(data: Record<string, unknown>): TFieldOps | und
  * Errors (all thrown as {@link DbError}):
  * - `$cas` is not a plain object → `"$cas operator: ..."`
  * - `$cas` map is empty
- * - `$cas` value is non-numeric / non-integer
+ * - `$cas` value is non-numeric / non-integer (with `token`, an `@internal`
+ *   flag for a `@db.column.version.token` column since 0.1.196: not a
+ *   non-empty string)
  * - `$cas` has more than one entry (v1 single-column constraint)
  * - `$cas` key does not match `versionColumn` (when provided)
  * - `$cas` is present on a non-versioned table (`versionColumn === undefined`)
@@ -220,24 +230,31 @@ export function separateFieldOps(data: Record<string, unknown>): TFieldOps | und
  *   "table has no @db.column.version" error
  *
  * Only a finite number counts as a present version column value — anything
- * else is left untouched for the write validator to reject.
+ * else is left untouched for the write validator to reject. With `token`
+ * (a `@db.column.version.token` column, since 0.1.196) a string counts
+ * instead.
+ *
+ * @param token - @internal The version column holds a store-issued token.
  */
 export function reconcileCas(
   data: Record<string, unknown>,
   versionColumn: string | undefined,
   target: "cas" | "version",
-): number | undefined {
+  token?: true,
+): TDbVersion | undefined {
   if ("$cas" in data && data.$cas === undefined) {
     delete data.$cas;
   }
   const versionValue = versionColumn === undefined ? undefined : data[versionColumn];
-  const hasVersion = typeof versionValue === "number" && Number.isFinite(versionValue);
+  const hasVersion = token
+    ? typeof versionValue === "string"
+    : typeof versionValue === "number" && Number.isFinite(versionValue);
   const hasCas = "$cas" in data;
   if (!hasCas && !hasVersion) return undefined;
 
-  let expected: number;
+  let expected: TDbVersion;
   if (hasCas) {
-    expected = separateCas(data, versionColumn)!;
+    expected = separateCas(data, versionColumn, token)!;
     if (hasVersion && versionValue !== expected) {
       throw invalidQuery(
         "$cas",
@@ -245,7 +262,7 @@ export function reconcileCas(
       );
     }
   } else {
-    expected = versionValue as number;
+    expected = versionValue as TDbVersion;
   }
   if (target === "cas") {
     delete data[versionColumn!];
@@ -259,7 +276,8 @@ export function reconcileCas(
 export function separateCas(
   data: Record<string, unknown>,
   versionColumn?: string,
-): number | undefined {
+  token?: true,
+): TDbVersion | undefined {
   if (!("$cas" in data)) return undefined;
 
   // Strict: $cas on a non-versioned table is a programmer error — the caller
@@ -301,6 +319,19 @@ export function separateCas(
   }
 
   const foundValue = map[foundKey];
+  if (token) {
+    // A store-issued token (since 0.1.196): compared by equality, never parsed
+    if (typeof foundValue !== "string" || foundValue === "") {
+      throw new DbError("INVALID_QUERY", [
+        {
+          path: `$cas.${foundKey}`,
+          message: `$cas operator: value for "${foundKey}" must be a non-empty string (a version token)`,
+        },
+      ]);
+    }
+    delete data.$cas;
+    return foundValue;
+  }
   if (typeof foundValue !== "number" || !Number.isInteger(foundValue)) {
     throw new DbError("INVALID_QUERY", [
       {

@@ -498,6 +498,10 @@ export class AtscriptDbReadable<
     if (this._meta.filterOpsProblem) {
       throw new Error(`Table "${this.tableName}": ${this._meta.filterOpsProblem}`);
     }
+    // e.g. a `@db.column.version.token` on an adapter without version tokens
+    if (this._meta.adapterProblem) {
+      throw new Error(`Table "${this.tableName}": ${this._meta.adapterProblem}`);
+    }
     // e.g. a `@db.rel.via` relation on an adapter that reads relations in-read
     if (this._relationsProblem) {
       throw new Error(this._relationsProblem);
@@ -858,6 +862,19 @@ export class AtscriptDbReadable<
     const field = this._meta.versionField;
     if (field === undefined) return undefined;
     return this._meta.columnMap.get(field) ?? field;
+  }
+
+  /**
+   * Whether the version column holds a token the store issues
+   * (`@db.column.version.token`, since 0.1.196) rather than a counter: the
+   * adapter fills it, moves it on every write and compares `expectedVersion`
+   * (a string) by equality — see `BaseDbAdapter.supportsVersionTokens()`.
+   *
+   * @internal Adapter-facing surface; not part of the consumer API.
+   */
+  public get versionToken(): boolean {
+    this._ensureBuilt();
+    return this._meta.versionToken;
   }
 
   /**

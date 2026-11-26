@@ -19,6 +19,7 @@ import { ClientValidationError } from "../validator";
 let versionedMeta: Record<string, unknown>;
 let plainMeta: Record<string, unknown>;
 let revisionMeta: Record<string, unknown>;
+let tokenMeta: Record<string, unknown>;
 
 function serialize(type: TAtscriptAnnotatedType) {
   return serializeAnnotatedType(type, {
@@ -30,7 +31,8 @@ function serialize(type: TAtscriptAnnotatedType) {
         key === "db.json" ||
         key === "db.patch.strategy" ||
         key.startsWith("db.default") ||
-        key === "db.column.version"
+        key === "db.column.version" ||
+        key === "db.column.version.token"
       ) {
         return { key, value };
       }
@@ -70,6 +72,12 @@ beforeAll(async () => {
   plainMeta = {
     ...base,
     type: serialize(fixtures.User as unknown as TAtscriptAnnotatedType),
+  };
+  // `@db.column.version.token` (since 0.1.196): the served type says so
+  tokenMeta = {
+    ...base,
+    versionColumn: "etag",
+    type: serialize(fixtures.VersionedTicket as unknown as TAtscriptAnnotatedType),
   };
 });
 
@@ -336,5 +344,70 @@ describe("a version field not named `version` (renamed column, logical `revision
     const err = await caught(client.update({ id: 1, revision: 4 } as any));
     expect(err).toBeInstanceOf(VersionMismatchError);
     expect((err as VersionMismatchError).currentVersion).toBe(5);
+  });
+});
+
+describe("a version token (@db.column.version.token, since 0.1.196)", () => {
+  it("lifts a string `$cas` to the wire shape; a bare token passes preflight", async () => {
+    const fetchFn = mockFetch(tokenMeta, {
+      status: 202,
+      body: { matchedCount: 1, modifiedCount: 1 },
+    });
+    const client = new Client("/api/tickets", { fetch: fetchFn });
+    await client.update({ id: 1, name: "B", $cas: { etag: 'W/"3"' } } as any);
+    expect(sentBody(fetchFn)).toEqual({ id: 1, name: "B", etag: 'W/"3"' });
+    fetchFn.mockClear();
+    await client.update({ id: 1, name: "C", etag: 'W/"4"' } as any);
+    expect(sentBody(fetchFn)).toEqual({ id: 1, name: "C", etag: 'W/"4"' });
+  });
+
+  it("the token is server-managed: insert and replace preflight pass without it", async () => {
+    const fetchFn = mockFetch(tokenMeta, { status: 201, body: { insertedId: 1 } });
+    const client = new Client("/api/tickets", { fetch: fetchFn });
+    await client.insert({ name: "Ada" } as any);
+    expect(sentBody(fetchFn)).toEqual({ name: "Ada" });
+    fetchFn.mockClear();
+    await client.replace({ id: 1, name: "Ada" } as any);
+    expect(sentBody(fetchFn)).toEqual({ id: 1, name: "Ada" });
+  });
+
+  it("a number in `$cas` is rejected client-side with the shared message", async () => {
+    const fetchFn = mockFetch(tokenMeta, { status: 202, body: {} });
+    const client = new Client("/api/tickets", { fetch: fetchFn });
+    const err = await caught(client.update({ id: 1, $cas: { etag: 3 } } as any));
+    expect((err as ClientValidationError).errors).toEqual([
+      {
+        path: "$cas.etag",
+        message: '$cas operator: value for "etag" must be a non-empty string (a version token)',
+      },
+    ]);
+    noWrite(fetchFn);
+  });
+
+  it("a 409 dispatches VersionMismatchError with the current token", async () => {
+    const fetchFn = mockFetch(tokenMeta, {
+      status: 409,
+      body: {
+        statusCode: 409,
+        error: "Conflict",
+        message: "version_mismatch",
+        kind: "version_mismatch",
+        currentVersion: 'W/"9"',
+      },
+    });
+    const client = new Client("/api/tickets", { fetch: fetchFn });
+    const err = await caught(client.update({ id: 1, $cas: { etag: 'W/"3"' } } as any));
+    expect(err).toBeInstanceOf(VersionMismatchError);
+    expect((err as VersionMismatchError).currentVersion).toBe('W/"9"');
+  });
+
+  it("an integer version column still refuses a string `$cas`", async () => {
+    const fetchFn = mockFetch(versionedMeta, { status: 202, body: {} });
+    const client = new Client("/api/vusers", { fetch: fetchFn });
+    const err = await caught(client.update({ id: 1, $cas: { version: "4" } } as any));
+    expect((err as ClientValidationError).errors).toEqual([
+      { path: "$cas.version", message: '$cas operator: value for "version" must be an integer' },
+    ]);
+    noWrite(fetchFn);
   });
 });

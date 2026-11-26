@@ -345,3 +345,76 @@ describe("AsDbController OCC integration", () => {
     });
   });
 });
+
+// ── Version token (since 0.1.196) ─────────────────────────────────────────
+describe("AsDbController OCC with a version token (@db.column.version.token)", () => {
+  function tokenController() {
+    return createController({
+      versionColumn: "etag",
+      versionToken: true,
+      flatMap: new Map([
+        ["", {} as any],
+        ["id", {} as any],
+        ["name", {} as any],
+        ["etag", {} as any],
+      ]),
+    });
+  }
+
+  it("PATCH lifts a string version to $cas", async () => {
+    const { controller, table } = tokenController();
+    await controller.update({ id: "u1", name: "Ada", etag: 'W/"7"' });
+    expect(table.updateOne).toHaveBeenCalledWith({
+      id: "u1",
+      name: "Ada",
+      $cas: { etag: 'W/"7"' },
+    });
+  });
+
+  it("PUT and bulk PATCH lift per item", async () => {
+    const { controller, table } = tokenController();
+    await controller.replace({ id: "u1", name: "Ada", etag: "a" });
+    expect(table.replaceOne).toHaveBeenCalledWith({ id: "u1", name: "Ada", $cas: { etag: "a" } });
+    await controller.update([
+      { id: "u1", etag: "a", name: "A" },
+      { id: "u2", name: "B" },
+    ]);
+    expect(table.bulkUpdate.mock.calls[0]![0]).toEqual([
+      { id: "u1", name: "A", $cas: { etag: "a" } },
+      { id: "u2", name: "B" },
+    ]);
+  });
+
+  it("a stale token answers 409 with the current token, same body shape", async () => {
+    const { controller, table } = tokenController();
+    table.updateOne.mockResolvedValue({ matchedCount: 0, modifiedCount: 0 });
+    table.findOne.mockResolvedValue({ id: "u1", name: "Ada", etag: 'W/"9"' });
+    const err = await expectHttpError(
+      controller.update({ id: "u1", name: "Ada", etag: 'W/"7"' }),
+      409,
+    );
+    expect(err.body).toMatchObject({
+      statusCode: 409,
+      message: "version_mismatch",
+      code: "VERSION_MISMATCH",
+      kind: "version_mismatch",
+      params: { currentVersion: 'W/"9"' },
+      currentVersion: 'W/"9"',
+    });
+  });
+
+  it("an integer version column does not lift a string", async () => {
+    const { controller, table } = createController();
+    await controller.update({ id: "u1", version: "4" });
+    expect(table.updateOne).toHaveBeenCalledWith({ id: "u1", version: "4" });
+  });
+
+  it("/meta's served type keeps db.column.version.token", () => {
+    const { controller } = tokenController();
+    const { processAnnotation } = (controller as any).getSerializeOptions();
+    expect(processAnnotation({ key: "db.column.version.token", value: true })).toEqual({
+      key: "db.column.version.token",
+      value: true,
+    });
+  });
+});

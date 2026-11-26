@@ -290,6 +290,11 @@ export class TableMetadata {
   measures: string[] = [];
   /** Logical field name annotated with `@db.column.version`, if any. */
   versionField?: string;
+  /**
+   * The version column is a store-issued token (`@db.column.version.token`,
+   * since 0.1.196): no `0` default, no bump, no touch.
+   */
+  versionToken = false;
   /** Paths annotated with `@db.column.version.exempt`, as declared (since 0.1.150). */
   private _versionExemptDeclared = new Set<string>();
   /**
@@ -412,6 +417,13 @@ export class TableMetadata {
    * reads use. The table refuses every use with this message. @internal
    */
   filterOpsProblem?: string;
+
+  /**
+   * Set at build when the model uses what the adapter does not declare (a
+   * `@db.column.version.token` without `supportsVersionTokens()`, since
+   * 0.1.196). The table refuses every use with this message. @internal
+   */
+  adapterProblem?: string;
 
   /**
    * Whether the value of the LOGICAL field `path` is always there, may be
@@ -676,6 +688,7 @@ export class TableMetadata {
 
     // After `_built`: an adapter's `filterOps` may read the table's metadata.
     this.filterOpsProblem = this._keyFilterOpsProblem(adapter);
+    this.adapterProblem = this._adapterProblem(adapter);
 
     // Build physical field list for UniquSelect exclusion inversion.
     // Skip nav-relation fields and their descendants — they aren't selectable
@@ -702,6 +715,14 @@ export class TableMetadata {
    * cascades — so the adapter's `filterOps(fd)` list of such a field must
    * hold both.
    */
+  /** What the model uses that `adapter` does not declare — see {@link adapterProblem}. */
+  private _adapterProblem(adapter: BaseDbAdapter): string | undefined {
+    if (this.versionToken && !adapter.supportsVersionTokens()) {
+      return `version column "${this.versionField!}" is a @db.column.version.token; the ${adapter.constructor.name} adapter does not support version tokens`;
+    }
+    return undefined;
+  }
+
   private _keyFilterOpsProblem(adapter: BaseDbAdapter): string | undefined {
     const keys = new Set(this.primaryKeys);
     for (const fk of this.foreignKeys.values()) {
@@ -1058,11 +1079,19 @@ export class TableMetadata {
         );
       } else {
         this.versionField = fieldName;
-        // Implicit `default 0`: schema sync emits NOT NULL DEFAULT 0 so
-        // existing rows backfill at ALTER TABLE time and new inserts get a
-        // usable starting value (§4.6 of VERSION_PROPOSAL.md). An explicit
-        // `@db.default` on the same field wins via the guard below.
-        if (!this.defaults.has(fieldName)) {
+        if (metadata.has("db.column.version.token")) {
+          // A store-issued token (since 0.1.196): the store fills and moves it
+          if (this.defaults.has(fieldName)) {
+            throw new Error(
+              `@db.column.version.token on "${fieldName}" cannot coexist with @db.default* — a token is issued by the store`,
+            );
+          }
+          this.versionToken = true;
+        } else if (!this.defaults.has(fieldName)) {
+          // Implicit `default 0`: schema sync emits NOT NULL DEFAULT 0 so
+          // existing rows backfill at ALTER TABLE time and new inserts get a
+          // usable starting value (§4.6 of VERSION_PROPOSAL.md). An explicit
+          // `@db.default` on the same field wins.
           this.defaults.set(fieldName, { kind: "value", value: "0" });
         }
       }
@@ -1088,6 +1117,12 @@ export class TableMetadata {
       }
       if (this.navFields.has(path)) {
         rejectVersionExempt(path, "a navigation field has no column here");
+      }
+      if (this.versionToken) {
+        rejectVersionExempt(
+          path,
+          `the version "${this.versionField!}" is a @db.column.version.token — a token is issued by the store`,
+        );
       }
       let pos = path.length;
       while ((pos = path.lastIndexOf(".", pos - 1)) !== -1) {

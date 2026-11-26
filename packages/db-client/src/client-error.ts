@@ -1,3 +1,5 @@
+import type { TDbVersion } from "@atscript/db";
+
 import type { ServerError, ServerErrorEntry } from "./types";
 
 /**
@@ -166,7 +168,8 @@ export class ActionTargetError extends ClientError {
  */
 export interface VersionMismatchErrorBody extends ServerError {
   kind: "version_mismatch";
-  currentVersion: number;
+  /** A string on a `@db.column.version.token` table (since 0.1.196). */
+  currentVersion: TDbVersion;
 }
 
 /**
@@ -179,8 +182,11 @@ export interface VersionMismatchErrorBody extends ServerError {
 export class VersionMismatchError extends ClientError {
   override name = "VersionMismatchError";
 
-  /** Row's current server-side version — clients refresh + retry against it. */
-  get currentVersion(): number {
+  /**
+   * Row's current server-side version — clients refresh + retry against it.
+   * A string on a `@db.column.version.token` table (since 0.1.196).
+   */
+  get currentVersion(): TDbVersion {
     return (this.body as VersionMismatchErrorBody).currentVersion;
   }
 }

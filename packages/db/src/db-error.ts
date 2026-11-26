@@ -1,3 +1,5 @@
+import type { TDbVersion } from "./ops";
+
 export type DbErrorCode =
   | "CONFLICT"
   | "FK_VIOLATION"
@@ -304,14 +306,15 @@ export class DepthLimitExceededError extends DbError {
  * Thrown by {@link withOptimisticRetry} when `maxAttempts` is reached
  * without a successful CAS commit — the target row kept changing under
  * the read-modify-write loop. Surfaces the attempt count and the
- * last-observed version so callers can log/report the contention.
+ * last-observed version so callers can log/report the contention
+ * (a string on a `@db.column.version.token` table, since 0.1.196).
  */
 export class CasExhaustedError extends DbError {
   name = "CasExhaustedError";
 
   constructor(
     public readonly attempts: number,
-    public readonly lastSeenVersion: number | undefined,
+    public readonly lastSeenVersion: TDbVersion | undefined,
   ) {
     const message =
       `Optimistic concurrency: exhausted ${attempts} attempts; ` +

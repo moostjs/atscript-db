@@ -16,9 +16,15 @@ import { fkLookupTargetOf } from "./fk-lookup";
 import type { FilterExpr } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
-import { CasMismatchError, DbError, invalidQuery, type TDbErrorEntry } from "../db-error";
+import {
+  CasMismatchError,
+  DbError,
+  invalidQuery,
+  notSupported,
+  type TDbErrorEntry,
+} from "../db-error";
 import type { TGenericLogger } from "../logger";
-import { separateCas, separateFieldOps, type TFieldOps } from "../ops";
+import { separateCas, separateFieldOps, type TDbVersion, type TFieldOps } from "../ops";
 import { resolveArrayOps, getArrayOpsFields } from "../patch/array-ops-resolver";
 import {
   assertNoVersionWrites,
@@ -249,7 +255,7 @@ class WriteGuardContext<Row> implements TDbWriteGuardContext<Row> {
   constructor(
     readonly action: TDbWriteAction,
     readonly rows: Row[],
-    readonly expectedVersions: ReadonlyArray<number | undefined>,
+    readonly expectedVersions: ReadonlyArray<TDbVersion | undefined>,
     private readonly _table: AtscriptDbTable,
     private readonly _opts?: TIdResolveOptions,
   ) {}
@@ -1046,14 +1052,14 @@ export class AtscriptDbTable<
         // validate. Hoist versionColumn — constant per table; one lookup serves
         // the whole batch.
         const versionColumn = this.versionColumn;
-        const expectedVersions: Array<number | undefined> = Array.from({
+        const expectedVersions: Array<TDbVersion | undefined> = Array.from({
           length: payloads.length,
         });
         const clone = depth === 0 ? _cloneWritePayload : _shallowPrunedClone;
         const now = Date.now();
         const items = payloads.map((p, i) => {
           const c = clone(p);
-          expectedVersions[i] = separateCas(c, versionColumn);
+          expectedVersions[i] = separateCas(c, versionColumn, this._casToken);
           // Stamps after defaults: `@db.onUpdate.inc` counters (defaulted to 0
           // for inserts) leave the payload — the adapter increments them.
           const d = this._applyDefaults(c, now);
@@ -1241,7 +1247,7 @@ export class AtscriptDbTable<
         // Work on a local `cloned` array (with `undefined` props dropped) so the
         // caller's payload array (and payload objects) are never mutated.
         const versionColumn = this.versionColumn;
-        const expectedVersions: Array<number | undefined> = Array.from({
+        const expectedVersions: Array<TDbVersion | undefined> = Array.from({
           length: payloads.length,
         });
         const clone = depth === 0 ? _cloneWritePayload : _shallowPrunedClone;
@@ -1251,7 +1257,7 @@ export class AtscriptDbTable<
         const now = Date.now();
         const cloned: Array<Record<string, unknown>> = payloads.map((p, i) => {
           const c = clone(p);
-          expectedVersions[i] = separateCas(c, versionColumn);
+          expectedVersions[i] = separateCas(c, versionColumn, this._casToken);
           this._stampOnUpdate(c, now, false);
           return c;
         });
@@ -1379,6 +1385,14 @@ export class AtscriptDbTable<
           //     other clients' versions), but `matchedCount` is honest: one
           //     PK-indexed count tells whether the row exists.
           //  3. non-empty          → unchanged below.
+          // A version token (since 0.1.196) has no touch: the store moves it
+          // on a write, and a touch writes nothing but a counter.
+          if (isEmptyObject(data) && expectedVersion !== undefined && this._meta.versionToken) {
+            throw notSupported(
+              `A versioned touch (key and $cas only) increments a counter; "${versionColumn!}" is a version token issued by the store`,
+              "$cas",
+            );
+          }
           if (isEmptyObject(data) && expectedVersion === undefined) {
             matched[i] = (await this.adapter.count({ filter: translatedFilter, controls: {} })) > 0;
             if (!matched[i] && _ownedBy?.strict?.[i]) throw concurrentChange();
@@ -1515,6 +1529,11 @@ export class AtscriptDbTable<
     const versionField = this._meta.versionField;
     if (versionField === undefined) {
       throw invalidQuery("", "touchMany requires @db.column.version");
+    }
+    if (this._meta.versionToken) {
+      throw notSupported(
+        `touchMany increments a counter; "${versionField}" is a version token issued by the store`,
+      );
     }
     if (keys.length === 0) {
       return { matchedCount: 0, modifiedCount: 0 };
@@ -2592,6 +2611,11 @@ export class AtscriptDbTable<
     });
   }
 
+  /** `separateCas`'s token flag: the version column is a store-issued token (since 0.1.196). */
+  private get _casToken(): true | undefined {
+    return this._meta.versionToken || undefined;
+  }
+
   /**
    * Drops the nested TO objects of every replace item whose main replace
    * cannot match (pinned row missing, or stale `$cas`) so Phase 1 never
@@ -2603,7 +2627,7 @@ export class AtscriptDbTable<
     items: Array<Record<string, unknown>>,
     nestedTo: boolean[],
     targets: TWriteTarget[],
-    expectedVersions: ReadonlyArray<number | undefined>,
+    expectedVersions: ReadonlyArray<TDbVersion | undefined>,
   ): boolean[] {
     const versionField = this._meta.versionField;
     return items.map((item, i) => {

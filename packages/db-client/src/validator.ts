@@ -71,10 +71,16 @@ export class ClientValidator {
   /** The table's version column when it opts into OCC (from `/meta`). */
   readonly versionColumn?: string;
 
+  /** The version column is a `@db.column.version.token` in the served type (since 0.1.196). */
+  private readonly _versionToken?: true;
+
   constructor(type: TAtscriptAnnotatedType<TAtscriptTypeObject>, opts?: ClientValidatorOptions) {
     this._type = type;
     this._lenientWrites = opts?.lenientWrites === true;
     this.versionColumn = opts?.versionColumn;
+    const versionField =
+      this.versionColumn === undefined ? undefined : type.type.props.get(this.versionColumn);
+    if (versionField?.metadata.has("db.column.version.token")) this._versionToken = true;
     if (opts?.messages) this._translate = messagesTranslator(opts.messages);
     const ctx = buildValidationContext(type);
     this.flatMap = ctx.flatMap;
@@ -84,7 +90,8 @@ export class ClientValidator {
   /**
    * Normalises the SDK `$cas` shape to the wire shape (since 0.1.128):
    * `{ id, $cas: { version: 4 } }` → `{ id, version: 4 }` (the server lifts
-   * `version` back to `$cas`). Returns a shallow clone per item; items
+   * `version` back to `$cas`). On a `@db.column.version.token` column (read
+   * from the served type, since 0.1.196) the version is a string. Returns a shallow clone per item; items
    * without `$cas` (a `$cas: undefined` counts as absent) are returned
    * as-is. Throws `ClientValidationError` when the table is not versioned,
    * the `$cas` shape is invalid, or `version` and `$cas` disagree — the same
@@ -108,7 +115,7 @@ export class ClientValidator {
     }
     const clone = { ...(item as Record<string, unknown>) };
     try {
-      reconcileCas(clone, this.versionColumn, "version");
+      reconcileCas(clone, this.versionColumn, "version", this._versionToken);
     } catch (e) {
       if (e instanceof DbError) {
         throw new ClientValidationError(

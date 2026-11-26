@@ -1,5 +1,6 @@
 import { CasExhaustedError, DbError, invalidQuery } from "./db-error";
 import { isEmptyObject } from "./shared/object";
+import type { TDbVersion } from "./ops";
 import type { AtscriptDbTable } from "./table/db-table";
 import type { FilterExpr, TDbUpdateResult } from "./types";
 
@@ -59,7 +60,7 @@ export async function withOptimisticRetry<TRow extends Record<string, unknown>>(
   }
 
   const maxAttempts = opts?.maxAttempts ?? 5;
-  let lastSeenVersion: number | undefined;
+  let lastSeenVersion: TDbVersion | undefined;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const row = (await table.findOne({
@@ -77,7 +78,7 @@ export async function withOptimisticRetry<TRow extends Record<string, unknown>>(
       ]);
     }
 
-    lastSeenVersion = row[versionColumn] as number;
+    lastSeenVersion = row[versionColumn] as TDbVersion;
     const patch = await mutator(row);
 
     // Explicit no-write (since 0.1.128): a mutator returning `undefined` or `{}`

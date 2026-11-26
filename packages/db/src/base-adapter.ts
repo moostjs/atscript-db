@@ -59,7 +59,7 @@ import type {
   TDbDeleteManyOptions,
   TDbDeleteResult,
 } from "./types";
-import type { TFieldOps } from "./ops";
+import type { TDbVersion, TFieldOps } from "./ops";
 import type { WithRelation } from "@uniqu/core";
 import type { AtscriptDbReadable } from "./table/db-readable";
 import type { DbSpace } from "./table/db-space";
@@ -434,14 +434,16 @@ export abstract class BaseDbAdapter {
 
   /**
    * Physical version column an UPDATE must bump, or `undefined` when it must
-   * not: no `@db.column.version`, or a version-exempt patch
+   * not: no `@db.column.version`, a version token the store moves itself
+   * (`@db.column.version.token`, since 0.1.196), or a version-exempt patch
    * (`opts.keepVersion`, since 0.1.150 — the core never combines it with
    * `expectedVersion`; a violation throws).
    */
   protected _versionColumnFor(
     opts?: TDbUpdateOptions,
-    expectedVersion?: number,
+    expectedVersion?: TDbVersion,
   ): string | undefined {
+    if (this._table.versionToken) return undefined;
     if (!opts?.keepVersion) return this._table.versionColumnPhysical;
     if (expectedVersion !== undefined) {
       throw new Error("keepVersion cannot combine with expectedVersion");
@@ -1117,6 +1119,35 @@ export abstract class BaseDbAdapter {
   }
 
   /**
+   * Whether this adapter's store issues the row version itself, so a table
+   * may declare a **version token**: a string `@db.column.version` field
+   * with `@db.column.version.token` (for example a store that hands out an
+   * HTTP entity tag per row).
+   *
+   * **Contract.** The version moves on every successful write — the store's
+   * guarantee, not the core's. The adapter:
+   * - fills the column on insert and returns it with the row on every read;
+   * - compares `expectedVersion` (a string, from `$cas`) by equality in
+   *   `replaceOne`, `updateOne` and `nativePatch`, and reports a mismatch as
+   *   `{ matchedCount: 0, modifiedCount: 0 }`;
+   * - moves the token on every write, `updateMany` and `replaceMany`
+   *   included. `data` never carries the column.
+   *
+   * The core never bumps nor defaults a token (`_versionColumnFor` returns
+   * `undefined`), refuses a versioned touch and `touchMany` with
+   * `NOT_SUPPORTED` (a touch increments a counter), and refuses
+   * `@db.column.version.exempt` on the table. A write without `$cas` and a
+   * delete are the adapter's business (for example `If-Match: *`). A write
+   * returns no new token: it is read with the row.
+   *
+   * Default `false`: a table with a version token refuses every use.
+   * @since 0.1.196
+   */
+  supportsVersionTokens(): boolean {
+    return false;
+  }
+
+  /**
    * Whether this adapter renders relational filter predicates
    * (`{ nav: { $some | $none: … } }`) in `mode` — `read` for find / count /
    * search / aggregate filters, `write` for mutation filters
@@ -1192,7 +1223,7 @@ export abstract class BaseDbAdapter {
     _filter: FilterExpr,
     _patch: unknown,
     _ops?: TFieldOps,
-    _expectedVersion?: number,
+    _expectedVersion?: TDbVersion,
     _opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult> {
     throw new Error("Native patch not supported by this adapter");
@@ -1749,21 +1780,23 @@ export abstract class BaseDbAdapter {
   supportsInsertIgnore(): boolean {
     return false;
   }
+  /** `expectedVersion` — a string on a version-token table ({@link supportsVersionTokens}). */
   abstract replaceOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
-    expectedVersion?: number,
+    expectedVersion?: TDbVersion,
   ): Promise<TDbUpdateResult>;
   /**
    * `opts.keepVersion` — skip the version bump (and never combine with
-   * `expectedVersion`); see {@link TDbUpdateOptions}.
+   * `expectedVersion`); see {@link TDbUpdateOptions}. `expectedVersion` is a
+   * string on a version-token table ({@link supportsVersionTokens}).
    */
   // oxlint-disable-next-line max-params
   abstract updateOne(
     filter: FilterExpr,
     data: Record<string, unknown>,
     ops?: TFieldOps,
-    expectedVersion?: number,
+    expectedVersion?: TDbVersion,
     opts?: TDbUpdateOptions,
   ): Promise<TDbUpdateResult>;
   abstract deleteOne(filter: FilterExpr): Promise<TDbDeleteResult>;

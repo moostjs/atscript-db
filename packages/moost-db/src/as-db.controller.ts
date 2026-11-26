@@ -7,6 +7,7 @@ import type {
   TDbInsertResult,
   TDbRemoveGuardContext,
   TDbUpdateResult,
+  TDbVersion,
   TDbWriteAction,
   TDbWriteCheckContext,
   TDbWriteGuardContext,
@@ -328,7 +329,9 @@ export class AsDbController<
   ): boolean {
     if (versionColumn === undefined) return false;
     try {
-      return reconcileCas(item, versionColumn, "cas") !== undefined;
+      // A `@db.column.version.token` column lifts a string (since 0.1.196)
+      const token = this.table.versionToken || undefined;
+      return reconcileCas(item, versionColumn, "cas", token) !== undefined;
     } catch (error) {
       if (error instanceof DbError) {
         // The core's answer to the same error (its code kept), under the item's path.
@@ -567,7 +570,8 @@ export class AsDbController<
     // Clients discriminate on `code` (since 0.1.175; `kind` kept for older
     // clients) plus `currentVersion`. The framework constraint is upstream of
     // this package.
-    const currentVersion = row[versionColumn] as number;
+    // a string on a `@db.column.version.token` table (since 0.1.196)
+    const currentVersion = row[versionColumn] as TDbVersion;
     return new HttpError(409, {
       message: "version_mismatch",
       statusCode: 409,

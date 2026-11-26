@@ -58,6 +58,7 @@ export type {
   ValidationContext,
   TDbFieldOp,
   TDbCas,
+  TDbVersion,
   TArrayPatch,
   TDbPatch,
 } from "./validator";
