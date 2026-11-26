@@ -136,6 +136,19 @@ describe("reads with the relations inside", () => {
     expect(nested[0]!.target.name).toBe("wr_chapters");
   });
 
+  it("nested: one related row object shared by several parents is read for each", async () => {
+    // the adapter hands both chapters the same book object, author inside
+    const chapters = space.getTable(WrChapter);
+    const rows = (await chapters.findMany({
+      filter: { bookId: 10 },
+      controls: { $with: [{ name: "book", controls: { $with: [{ name: "author" }] } }] },
+    })) as any[];
+    expect(rows.map((r) => [r.title, r.book.title, r.book.author])).toEqual([
+      ["One", "Alpha", { id: 1, name: "Ann" }],
+      ["Two", "Alpha", { id: 1, name: "Ann" }],
+    ]);
+  });
+
   it("dotted names nest like a nested $with", async () => {
     const authors = space.getTable(WrAuthor);
     const rows = (await authors.findMany({

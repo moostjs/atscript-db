@@ -637,8 +637,11 @@ export class AtscriptDbReadable<
     nodes: readonly TInReadNode[],
   ): Promise<Record<string, unknown>[]> {
     this._ensureBuilt();
-    const values = detachRelations(rows, nodes, this.adapter);
-    const out = this._fromRead(rows, controls);
+    // The adapter's own objects stay untouched: one related row may be the
+    // same object under several parents (detaching deletes from the copies).
+    const own = nodes.length > 0 ? rows.map((row) => ({ ...row })) : rows;
+    const values = detachRelations(own, nodes, this.adapter);
+    const out = this._fromRead(own, controls);
     await this._decryptRows(out);
     await attachRelations(out, values, nodes);
     return out;
