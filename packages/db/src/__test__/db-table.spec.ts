@@ -1205,7 +1205,7 @@ describe("AtscriptDbTable — embedded objects", () => {
       ).rejects.toThrow('Unknown relation "nonexistent"');
     });
 
-    it("should not load relations when no table resolver is provided", async () => {
+    it("fails a read with $with when no table resolver is provided (since 0.1.196)", async () => {
       const noResolverTable = new AtscriptDbTable(UsersTable, mainAdapter);
       const tbl = noResolverTable as any;
       tbl._meta.relations.set("author", {
@@ -1226,18 +1226,26 @@ describe("AtscriptDbTable — embedded objects", () => {
         },
       ];
 
-      const results = await noResolverTable.findMany({
-        filter: {},
-        controls: { $with: [withRel("author")] },
-      } as any);
+      // A configuration fault: before, the rows came back without the relation.
+      await expect(
+        noResolverTable.findMany({
+          filter: {},
+          controls: { $with: [withRel("author")] },
+        } as any),
+      ).rejects.toThrow('Table "users" has no table resolver');
+    });
 
-      // Should return results without relation data (no resolver)
-      expect((results[0] as any).author).toBeUndefined();
+    it("fails a read with $with when the resolver returns no table for the target (since 0.1.196)", async () => {
+      tableResolver.mockReturnValue(undefined);
+      await expect(
+        mainTable.findMany({ filter: {}, controls: { $with: [withRel("author")] } } as any),
+      ).rejects.toThrow('Relation "author" of "users": the table resolver returned no table');
     });
 
     it("should strip $with from translated query before passing to adapter", async () => {
       const findManySpy = vi.fn().mockResolvedValue([]);
       mainAdapter.findMany = findManySpy;
+      tableResolver.mockReturnValue(mockTargetTable);
 
       await mainTable.findMany({
         filter: {},

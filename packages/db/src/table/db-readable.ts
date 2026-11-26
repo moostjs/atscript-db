@@ -62,7 +62,12 @@ import {
   coerceAliasValues,
 } from "../strategies/field-mapping";
 import { RelationalFieldMapper } from "../strategies/relational-field-mapper";
-import type { TRelationLoaderHost } from "../rel/relation-loader";
+import {
+  type TRelationLoaderHost,
+  loadPlannedRelations,
+  loadRelationsImpl,
+} from "../rel/relation-loader";
+import { type TWithPlanEntry, type TWithPlanHost, planWith } from "../rel/with-plan";
 import {
   findFKEntryForRelation,
   findFKForRelation,
@@ -110,6 +115,8 @@ interface TReadPlan {
   /** The controls the rows were read with (`$select` widened by join keys). */
   controls: TReadControls | undefined;
   withRelations?: WithRelation[];
+  /** The generic loader's plan of the `$with` level (adapters without native relations). */
+  withPlan?: TWithPlanEntry[];
   /** Join keys added to `$select` for `$with` — stripped after loading. */
   widened: string[];
 }
@@ -1040,6 +1047,11 @@ export class AtscriptDbReadable<
       translated: this._fieldMapper.translateQuery(readQuery, this._meta),
       controls: readQuery.controls as TReadControls | undefined,
       withRelations,
+      // One level: each relation read plans its own nested `$with`.
+      withPlan:
+        withRelations?.length && !this.adapter.supportsNativeRelations()
+          ? planWith(this as unknown as TWithPlanHost, withRelations)
+          : undefined,
       widened,
     };
   }
@@ -1057,7 +1069,10 @@ export class AtscriptDbReadable<
     await this._decryptRows(all);
     const rows = pick ? pick(all) : all;
     if (read.withRelations?.length) {
-      await this.loadRelations(rows, read.withRelations);
+      const host = this as unknown as TRelationLoaderHost;
+      await (read.withPlan
+        ? loadPlannedRelations(rows, read.withPlan, host)
+        : loadRelationsImpl(rows, read.withRelations, host));
       for (const key of read.widened) {
         for (const row of rows) deletePath(row, key);
       }
@@ -2530,17 +2545,18 @@ export class AtscriptDbReadable<
   // ── Relation loading ($with) ─────────────────────────────────────────────
 
   /**
-   * Public entry point for relation loading. Used by adapters for nested $with delegation.
+   * Loads `$with` relations onto rows already read (in place). Used by
+   * adapters for nested `$with` delegation.
    */
   public async loadRelations(
     rows: Array<Record<string, unknown>>,
     withRelations: WithRelation[],
   ): Promise<void> {
-    const { loadRelationsImpl } = await import("../rel/relation-loader");
+    this._ensureBuilt();
     return loadRelationsImpl(
       rows,
       nestDottedWith(withRelations),
-      this as any as TRelationLoaderHost,
+      this as unknown as TRelationLoaderHost,
     );
   }
 

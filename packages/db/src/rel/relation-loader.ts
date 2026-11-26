@@ -1,11 +1,10 @@
 import type { FilterExpr, Uniquery, WithRelation } from "@uniqu/core";
 
 import type { BaseDbAdapter } from "../base-adapter";
-import { unknownWithRelation } from "../db-error";
 import type { TGenericLogger } from "../logger";
 import type { TDbForeignKey, TDbRelation, TTableResolver } from "../types";
 import { storedValuesFilter } from "../query/normalize-filter";
-import { andFilters, relationStaticFilter } from "../query/relation-filter";
+import { andFilters } from "../query/relation-filter";
 import {
   type TGroupPage,
   compositeKey,
@@ -14,6 +13,7 @@ import {
   resolveRelationTargetTable,
   slicePerGroup,
 } from "./relation-helpers";
+import { type TWithPlanEntry, planWith } from "./with-plan";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -60,7 +60,9 @@ interface TRelationQuery {
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 /**
- * Loads related data for `$with` relations and attaches them to result rows.
+ * Loads related data for `$with` relations and attaches them to result rows:
+ * natively on an adapter whose `supportsNativeRelations()` is true, else
+ * through the resolved plan ({@link planWith}, {@link loadPlannedRelations}).
  */
 export async function loadRelationsImpl(
   rows: Array<Record<string, unknown>>,
@@ -81,92 +83,43 @@ export async function loadRelationsImpl(
     );
   }
 
-  if (!host._tableResolver) {
+  return loadPlannedRelations(rows, planWith(host, withRelations), host);
+}
+
+/**
+ * The generic loader: reads each planned entry of one `$with` level with the
+ * target's `_findManyForRelation` (guard, stable sort, per-parent paging) and
+ * attaches the related rows. The target read plans its own nested level.
+ */
+export async function loadPlannedRelations(
+  rows: Array<Record<string, unknown>>,
+  plan: readonly TWithPlanEntry[],
+  host: TRelationLoaderHost,
+): Promise<void> {
+  if (rows.length === 0 || plan.length === 0) {
     return;
   }
-
   const tasks: Array<Promise<void>> = [];
-
-  for (const withRel of withRelations) {
-    const relName = withRel.name;
-    if (relName.includes(".")) {
-      continue;
-    }
-
-    const relation = host._meta.relations.get(relName);
-    if (!relation) {
-      // `UNKNOWN_RELATION` like moost-db's gate (since 0.1.175; a plain `Error` before).
-      throw unknownWithRelation(relName);
-    }
-
-    const targetType = relation.targetType();
-    if (!targetType) {
-      continue;
-    }
-
-    const targetTable = host._tableResolver(targetType);
-    if (!targetTable) {
-      host.logger.warn(`Could not resolve table for relation "${relName}" — skipping`);
-      continue;
-    }
-
-    // `@db.rel.filter` is part of the relation: its target conditions AND the
-    // `$with` sub-filter; its junction conditions filter the junction rows.
-    const statics = relationStaticFilter(relation, relName);
-    const merged = andFilters(statics.target, withRel.filter);
-    const filter = Object.keys(merged).length > 0 ? merged : undefined;
-
-    // @uniqu/url parseWithSegment places $sort/$limit/$skip/$select as flat
-    // keys on the relation object rather than nesting under .controls.
-    // Merge both shapes so relation loading works either way.
-    const flatRel = withRel as Record<string, unknown>;
-    const nested = (withRel.controls || {}) as Record<string, unknown>;
-    const controls: Record<string, unknown> = { ...nested };
-    if (flatRel.$sort && !controls.$sort) {
-      controls.$sort = flatRel.$sort;
-    }
-    if (flatRel.$nulls && !controls.$nulls) {
-      controls.$nulls = flatRel.$nulls;
-    }
-    if (
-      flatRel.$limit !== null &&
-      flatRel.$limit !== undefined &&
-      (controls.$limit === null || controls.$limit === undefined)
-    ) {
-      controls.$limit = flatRel.$limit;
-    }
-    if (
-      flatRel.$skip !== null &&
-      flatRel.$skip !== undefined &&
-      (controls.$skip === null || controls.$skip === undefined)
-    ) {
-      controls.$skip = flatRel.$skip;
-    }
-    if (flatRel.$select && !controls.$select) {
-      controls.$select = flatRel.$select;
-    }
-    if (flatRel.$with && !controls.$with) {
-      controls.$with = flatRel.$with;
-    }
-    const { $skip, $limit, ...pageless } = controls;
-    const skip = asCount($skip) || undefined;
-    const limit = asCount($limit);
-    const relQuery: TRelationQuery = {
-      filter,
-      controls: pageless,
-      page: skip === undefined && limit === undefined ? undefined : { skip, limit },
-      junctionFilter: statics.junction,
+  for (const entry of plan) {
+    const opts: TLoadOpts = {
+      relName: entry.nav,
+      relation: entry.relation,
+      targetTable: entry.target as unknown as TResolvedTable,
+      relQuery: {
+        filter: entry.query.filter,
+        controls: entry.query.controls,
+        page: entry.page,
+        junctionFilter: entry.junctionFilter,
+      },
     };
-
-    if (relation.direction === "to") {
-      tasks.push(loadToRelation(rows, { relName, relation, targetTable, relQuery }, host));
-    } else if (relation.direction === "via") {
-      tasks.push(loadViaRelation(rows, { relName, relation, targetTable, relQuery }, host));
+    if (entry.kind === "to") {
+      tasks.push(loadToRelation(rows, opts, host));
+    } else if (entry.kind === "via") {
+      tasks.push(loadViaRelation(rows, opts, host));
     } else {
-      tasks.push(loadFromRelation(rows, { relName, relation, targetTable, relQuery }, host));
+      tasks.push(loadFromRelation(rows, opts, host));
     }
   }
-
   await Promise.all(tasks);
 }
 
@@ -444,15 +397,6 @@ async function readRelated(
     rows = slicePerGroup(rows, (row) => compositeKey(partitionBy, row), page);
   }
   return pick ? pick(rows) : rows;
-}
-
-/** A `$skip` / `$limit` value as a number (`undefined` when unset or not a number). */
-function asCount(value: unknown): number | undefined {
-  if (value === null || value === undefined || value === "") {
-    return undefined;
-  }
-  const n = Number(value);
-  return Number.isFinite(n) ? n : undefined;
 }
 
 /** `$skip` / `$limit` controls of a page (only the ones set). */
