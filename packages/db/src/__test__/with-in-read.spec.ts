@@ -286,6 +286,24 @@ describe("refusals", () => {
     expect(error.message).toBe('InReadMockAdapter returned a row without relation "chapters"');
   });
 
+  it("an array for a to-one relation is an adapter defect", async () => {
+    class ArrayForToOne extends InReadMockAdapter {
+      override async readRows(query: any): Promise<TRow[]> {
+        const rows = await super.readRows(query);
+        for (const row of rows) if ("book" in row) row.book = [row.book];
+        return rows;
+      }
+    }
+    const chapters = inReadSpace(ArrayForToOne).getTable(WrChapter);
+    const error = await failure(() =>
+      chapters.findMany({ filter: { id: 100 }, controls: { $with: [{ name: "book" }] } }),
+    );
+    expect(error).not.toBeInstanceOf(DbError);
+    expect(error.message).toBe(
+      'ArrayForToOne returned relation "book" as an array, expected an object or null',
+    );
+  });
+
   it("an unknown relation is UNKNOWN_RELATION", async () => {
     const books = space.getTable(WrBook);
     const error = await failure(() =>

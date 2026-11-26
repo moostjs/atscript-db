@@ -244,7 +244,10 @@ export function detachRelations(
       if (value === undefined) {
         throw contractError(adapter, `returned a row without relation "${node.nav}"`);
       }
-      if (node.isArray ? !Array.isArray(value) : value !== null && typeof value !== "object") {
+      const shapeOk = node.isArray
+        ? Array.isArray(value)
+        : value === null || (typeof value === "object" && !Array.isArray(value));
+      if (!shapeOk) {
         throw contractError(
           adapter,
           `returned relation "${node.nav}" as ${Array.isArray(value) ? "an array" : typeof value}, expected ${node.isArray ? "an array" : "an object or null"}`,
