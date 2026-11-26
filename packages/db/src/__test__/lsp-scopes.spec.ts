@@ -75,6 +75,16 @@ export interface LsOffice {
     region?: LsRegion
 }
 
+@db.table 'ls_tickets'
+export interface LsTicket {
+    @meta.id
+    id: number
+
+    @db.column.version
+    @db.column.version.token
+    etag: string
+}
+
 @db.table 'ls_tags'
 export interface LsTag {
     @meta.id
@@ -545,6 +555,74 @@ describe("db plugin editor scopes", () => {
       const k1 = messages.find((m) => m.message.startsWith("@db.rel.store is only valid"));
       expect(k1?.severity).toBe(1);
       expect(k1?.range.start).toEqual({ line: 6, character: 4 });
+    });
+  });
+
+  /** Diagnostics of a one-file document: message, severity and start of each. */
+  async function diagnosticsOf(lines: string[]) {
+    const rootDir = mkdtempSync(join(tmpdir(), "db-lsp-diag-"));
+    writeFileSync(join(rootDir, "d.as"), lines.join("\n"));
+    const repo = await build({ rootDir, entries: ["d.as"], plugins: [tsPlugin(), dbPlugin()] });
+    return [...(await repo.diagnostics()).values()]
+      .flat()
+      .map((m) => ({ message: m.message, severity: m.severity, start: m.range.start }));
+  }
+
+  describe("@db.column.version.token (since 0.1.196)", () => {
+    it("completion: offered under @db.column.version on a prop, documented", () => {
+      const column = (doc.config.annotations!.db as TAnnotationsTree).column as TAnnotationsTree;
+      const version = column.version as TAnnotationsTree;
+      expect(Object.keys(version)).toContain("token");
+      const spec = version.token;
+      expect(isAnnotationSpec(spec)).toBe(true);
+      if (!isAnnotationSpec(spec)) return;
+      expect(spec.config.nodeType).toEqual(["prop"]);
+      expect(spec.arguments).toEqual([]);
+      expect(spec.renderDocs("@db.column.version.token")).toContain(
+        "an opaque string the store issues",
+      );
+    });
+
+    it("hover: the annotation token resolves to the spec and its docs; @db.column.version names it", () => {
+      const token = tokenAt("@db.column.version.token", 1);
+      expect(token.text).toBe("@db.column.version.token");
+      const spec = doc.resolveAnnotation(token.text.slice(1));
+      expect(spec?.renderDocs(token.text)).toContain("supportsVersionTokens()");
+      expect(
+        doc.resolveAnnotation("db.column.version")?.renderDocs("@db.column.version"),
+      ).toContain("A string field with `@db.column.version.token`");
+    });
+
+    it("diagnostics: its errors land on the annotation; a bare string version points to it", async () => {
+      const messages = await diagnosticsOf([
+        "@db.table 't_docs'",
+        "export interface TDoc {",
+        "    @meta.id",
+        "    id: number",
+        "    @db.column.version.token",
+        "    etag: string",
+        "}",
+        "@db.table 't_notes'",
+        "export interface TNote {",
+        "    @meta.id",
+        "    id: number",
+        "    @db.column.version",
+        "    etag: string",
+        "}",
+      ]);
+      expect(messages).toEqual([
+        {
+          message: "@db.column.version.token requires @db.column.version on the same field",
+          severity: 1,
+          start: { line: 4, character: 4 },
+        },
+        {
+          message:
+            "@db.column.version on a string field: a string version is issued by the store — add @db.column.version.token",
+          severity: 1,
+          start: { line: 11, character: 4 },
+        },
+      ]);
     });
   });
 

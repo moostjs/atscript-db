@@ -251,8 +251,9 @@ describe("@db.column.version compile-time validation", () => {
 
   // WHY: the version column must hold a monotonically incrementing integer
   // — applying the annotation to a string column would produce a runtime
-  // type error on the very first auto-bump in the adapter.
-  it("rejects @db.column.version on a non-numeric field", async () => {
+  // type error on the very first auto-bump in the adapter. A string version
+  // is a store-issued token (since 0.1.196): the error points to the modifier.
+  it("rejects @db.column.version on a string field without @db.column.version.token", async () => {
     const messages = await diagnosticsFor(`
       @db.table 'bad'
       export interface VersionOnString {
@@ -263,11 +264,25 @@ describe("@db.column.version compile-time validation", () => {
         version: string
       }
     `);
-    expect(
-      messages.some(
-        (m) => m.includes("@db.column.version") && m.includes("string") && m.includes("number"),
-      ),
-    ).toBe(true);
+    expect(messages).toEqual([
+      "@db.column.version on a string field: a string version is issued by the store — add @db.column.version.token",
+    ]);
+  });
+
+  it("rejects @db.column.version on another non-numeric field", async () => {
+    const messages = await diagnosticsFor(`
+      @db.table 'bad'
+      export interface VersionOnBoolean {
+        @meta.id
+        id: number
+
+        @db.column.version
+        version: boolean
+      }
+    `);
+    expect(messages).toEqual([
+      '@db.column.version is not compatible with type "boolean" — requires number',
+    ]);
   });
 });
 

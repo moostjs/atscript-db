@@ -143,13 +143,49 @@ function validateVersionExempt(token: Token, doc: AtscriptDoc): TMessages {
 
   // W1: the enclosing top-level table has no version column (declared or inherited)
   if (tableOwner && tableOwner.countAnnotations("db.table") > 0) {
-    if (versionFields(tableOwner, doc).length === 0) {
+    const versions = versionFields(tableOwner, doc);
+    if (versions.length === 0) {
       fail(
         `${tag} has no effect — table '${tableOwner.id ?? ""}' declares no @db.column.version`,
         2,
       );
+    } else if (versions.some((prop) => prop.countAnnotations("db.column.version.token") > 0)) {
+      // (since 0.1.196) a token moves on every write the store accepts
+      fail(
+        `${tag} cannot sit on a table whose version is a @db.column.version.token — a token is issued by the store`,
+      );
     }
   }
+  return errors;
+}
+
+/** Annotations a `@db.column.version.token` field cannot carry, with the reason. */
+const VERSION_TOKEN_INCOMPATIBLE: ReadonlyArray<[annotation: string, why: string]> = [
+  ["db.default", "a token is issued by the store"],
+  ["db.default.increment", "a token is issued by the store"],
+  ["db.default.uuid", "a token is issued by the store"],
+  ["db.default.now", "a token is issued by the store"],
+];
+
+/**
+ * Compile-time rules of `@db.column.version.token` (since 0.1.196): on the
+ * `@db.column.version` field, a string, no `@db.default*`. A
+ * `@db.column.version.exempt` on the table is reported on the exempt field
+ * ({@link validateVersionExempt}). The runtime mirror is in `TableMetadata`.
+ */
+function validateVersionToken(token: Token, doc: AtscriptDoc): TMessages {
+  const tag = "@db.column.version.token";
+  const errors = validateFieldBaseType(token, doc, tag, "string");
+  const field = annotationTarget(token, doc);
+  if (!field) return errors;
+  if (field.countAnnotations("db.column.version") === 0) {
+    errors.push({
+      message: `${tag} requires @db.column.version on the same field`,
+      severity: 1,
+      range: token.range,
+    });
+  }
+  errors.push(...validateIncompatible(token, tag, VERSION_TOKEN_INCOMPATIBLE, doc));
   return errors;
 }
 
@@ -591,23 +627,40 @@ export const dbColumnAnnotations: TAnnotationsTree = {
             "The adapter auto-increments this column on every UPDATE, and callers may pass " +
             "`$cas: { <col>: N }` in a write payload to make the update conditional on the current version. " +
             "Direct writes to the version column (as plain SET, `$inc`, or `$mul`) are rejected. " +
-            "Fields marked `@db.column.version.exempt` do not bump it." +
+            "Fields marked `@db.column.version.exempt` do not bump it.\n\n" +
+            "A string field with `@db.column.version.token` instead holds an opaque version the store " +
+            "issues (for example an HTTP entity tag), on adapters that support version tokens." +
             "\n\n**Constraints:**\n" +
             "- At most one version column per table.\n" +
-            "- Must resolve to an integer type (`int`, `int32`, `int64`, etc.).\n" +
-            "- Default value on insert is `0`.",
+            "- Must resolve to an integer type (`int`, `int32`, `int64`, etc.), or to a string " +
+            "with `@db.column.version.token`.\n" +
+            "- Default value on insert is `0` (an integer version).",
           "@db.column.version",
           "version: int",
         ),
         nodeType: ["prop"],
         passedWhenReferred: false,
         validate(token, _args, doc) {
-          const errors = validateFieldBaseType(token, doc, "@db.column.version", "number");
+          const field = annotationTarget(token, doc);
+          const def = field?.getDefinition();
+          const base = def && isRef(def) ? primitiveBaseType(doc.unwindRef(def)?.def) : undefined;
+          const errors =
+            base === "string"
+              ? ([] as TMessages)
+              : validateFieldBaseType(token, doc, "@db.column.version", "number");
+          // A string version is the store's: only with the token modifier (since 0.1.196)
+          if (base === "string" && field?.countAnnotations("db.column.version.token") === 0) {
+            errors.push({
+              message:
+                "@db.column.version on a string field: a string version is issued by the store — add @db.column.version.token",
+              severity: 1,
+              range: token.range,
+            });
+          }
 
           // Reject optional version fields — the column is server-managed and
           // always populated (DEFAULT 0); a nullable version column would let
           // `NULL + 1` produce `NULL` and silently break the auto-bump invariant.
-          const field = annotationTarget(token, doc);
           if (!field) return errors;
           if (field.has("optional")) {
             errors.push({
@@ -649,6 +702,29 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         multiple: false,
         validate(token, _args, doc) {
           return validateVersionExempt(token, doc);
+        },
+      }),
+
+      token: new AnnotationSpec({
+        description: annotationExample(
+          "Makes the `@db.column.version` field a **version token**: an opaque string the store " +
+            "issues and moves on every successful write (for example an HTTP entity tag), instead " +
+            "of a counter the adapter increments. `$cas: { <col>: '<token>' }` makes a write " +
+            "conditional on it; a stale token matches nothing (`matchedCount: 0`). Valid only on a " +
+            "table whose adapter supports version tokens (`supportsVersionTokens()`); the bundled " +
+            "adapters do not." +
+            "\n\n**Constraints:** on the `@db.column.version` field, a non-optional string; no " +
+            "`@db.default*` on it and no `@db.column.version.exempt` on the table. A versioned touch " +
+            "(key and `$cas` only) and `touchMany` are refused: a touch increments a counter.",
+          "@db.column.version",
+          "@db.column.version.token",
+          "etag: string",
+        ),
+        nodeType: ["prop"],
+        passedWhenReferred: false,
+        multiple: false,
+        validate(token, _args, doc) {
+          return validateVersionToken(token, doc);
         },
       }),
     },
