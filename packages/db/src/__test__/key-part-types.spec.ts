@@ -77,3 +77,17 @@ describe("an integer key (`number.int`)", () => {
     expect(read(adapter)).toBe(false);
   });
 });
+
+describe("an integer key part by `@expect.int` on `number | null`", () => {
+  it.each([["5"], [5], ["-12"]])("%j is a whole number", (seq) => {
+    const { table } = tableOf(fx.KtTicket);
+    expect(table.resolveIdFilter({ seq })).toEqual({ seq });
+  });
+
+  it.each([["1.5"], [1.5], ["1e3"]])("%j matches nothing, without a read", async (seq) => {
+    const { table, adapter } = tableOf(fx.KtTicket);
+    expect(table.resolveIdFilter({ seq })).toBeNull();
+    expect(await table.findById({ seq } as never)).toBeNull();
+    expect(read(adapter)).toBe(false);
+  });
+});

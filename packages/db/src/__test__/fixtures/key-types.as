@@ -1,4 +1,5 @@
-// Key parts typed by a nullable union, by number literals, and as an integer.
+// Key parts typed by a nullable union, by number literals, and as an integer
+// (`number.int`, and `@expect.int` on a nullable number).
 
 @db.table 'kt_codes'
 export interface KtCode {
@@ -23,6 +24,18 @@ export interface KtLevel {
 export interface KtCounter {
     @meta.id
     n: number.int
+
+    title: string
+}
+
+@db.table 'kt_tickets'
+export interface KtTicket {
+    @meta.id
+    id: string
+
+    @db.index.unique
+    @expect.int
+    seq: number | null
 
     title: string
 }

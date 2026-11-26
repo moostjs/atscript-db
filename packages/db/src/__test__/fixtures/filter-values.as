@@ -37,6 +37,11 @@ export interface FvItem {
 
     mixed?: number | boolean
 
+    @expect.int
+    seq?: number | null
+
+    maybe?: number | null
+
     tags: string[]
 
     scores: number[]

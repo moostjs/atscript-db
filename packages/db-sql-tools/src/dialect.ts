@@ -184,12 +184,13 @@ export interface SqlDialect {
    */
   countDistinctColumns?(columns: readonly string[], when?: string): string;
   /**
-   * Maps a driver error of a grouped query to the `DbError` it means — a
-   * numeric overflow (`arithOverflowError` when the query has arithmetic
+   * Maps a driver error to the `DbError` it means — a numeric overflow or
+   * out-of-range value (`arithOverflowError` when the query has arithmetic
    * expressions, else `numericOutOfRangeError`), an unknown calendar-bucket
    * zone — or `undefined` to let it propagate unchanged. `arithmetic` is
    * whether the query selects any arithmetic expression. Run by
-   * {@link mapQueryErrors}.
+   * {@link mapQueryErrors} for grouped queries; an adapter may run it for
+   * its other statements too (`arithmetic: false`).
    * @since 0.1.148
    */
   mapQueryError?(error: unknown, arithmetic: boolean): Error | undefined;

@@ -27,9 +27,9 @@ import { searchMemberKind } from "../shared/search-fields";
  * - `number` and `decimal` — a number, a bigint, or a numeric string
  *   (`'5'`, `'-1.5e3'`, `'12.50'`);
  * - an integer (`number.int` and its sizes, `number.timestamp`, a number
- *   with `@db.default.increment` / `@db.default.now`) — an integral number,
- *   a bigint, or an integer string (`'5'`): integer columns cannot parse
- *   `5.5` (PostgreSQL `invalid input syntax for type bigint`);
+ *   with `@expect.int`, `@db.default.increment` or `@db.default.now`) — an
+ *   integral number, a bigint, or an integer string (`'5'`): integer columns
+ *   cannot parse `5.5` (PostgreSQL `invalid input syntax for type bigint`);
  * - `boolean` — `true` / `false`, or `0` / `1`;
  * - `string` (every `string.*`, string literals) — a string, number, boolean
  *   or bigint: the URL grammar reads an unquoted `?code=123` as a number.

@@ -210,7 +210,8 @@ export const pgDialect: SqlDialect = {
     `COUNT(DISTINCT CASE WHEN ${columns.map((c) => `${c} IS NOT NULL`).join(" AND ")} THEN (${columns.join(", ")}) END)`,
   /**
    * SQLSTATE 22003 (`numeric_value_out_of_range`), a double overflow in
-   * aggregate arithmetic, is `INVALID_QUERY`; SQLSTATE 22023
+   * aggregate arithmetic or a value outside its integer column's range, is
+   * `INVALID_QUERY`; SQLSTATE 22023
    * (`invalid_parameter_value`, `time zone "…" not recognized`), raised by a
    * calendar bucket's `AT TIME ZONE '<tz>'`, is `BUCKET_TZ_UNAVAILABLE` — the
    * zone passed the core's IANA validation, so the server's tz database is

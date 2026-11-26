@@ -136,6 +136,17 @@ describe("filter values — number fields", () => {
     await expectRejected(items, { n: "Infinity" }, "n");
   });
 
+  it("`@expect.int` on a nullable number makes it an integer field", async () => {
+    const { items, calls } = tables();
+    await expectRejected(items, { seq: "1.5" }, "seq", /expected an integer, got "1.5"/);
+    await expectRejected(items, { seq: { $in: [1, 2.5] } }, "seq");
+    expect(calls().filter((c) => c.method === "findMany")).toHaveLength(0);
+    await expectAccepted(items, { seq: "5" });
+    await expectAccepted(items, { seq: null });
+    // Without `@expect.int` a nullable number takes any decimal literal.
+    await expectAccepted(items, { maybe: "1.5" });
+  });
+
   it("accepts numbers, numeric strings, null and the null-ish operators", async () => {
     const { items } = tables();
     for (const filter of [

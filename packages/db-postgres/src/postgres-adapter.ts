@@ -85,6 +85,7 @@ import {
   foreignKeySql,
   SEARCH_SOURCE_ALIAS,
   mapQueryErrors,
+  numericOutOfRangeError,
   orFragment,
   searchRankOrder,
   buildKeyViolationCount,
@@ -207,6 +208,31 @@ function geoNotSupported(path: string, message: string): DbError {
   return new DbError("GEO_NOT_SUPPORTED", [{ path, message }]);
 }
 
+const INT2_RANGE = [-32768n, 32767n] as const;
+const INT4_RANGE = [-2147483648n, 2147483647n] as const;
+const INT8_RANGE = [-(2n ** 63n), 2n ** 63n - 1n] as const;
+
+/** The value range of each integer column type (upper-cased), as the DDL or an `@db.pg.type` override names it. */
+const PG_INT_RANGE: Readonly<Record<string, readonly [bigint, bigint]>> = {
+  SMALLINT: INT2_RANGE,
+  INT2: INT2_RANGE,
+  SMALLSERIAL: INT2_RANGE,
+  INTEGER: INT4_RANGE,
+  INT: INT4_RANGE,
+  INT4: INT4_RANGE,
+  SERIAL: INT4_RANGE,
+  BIGINT: INT8_RANGE,
+  INT8: INT8_RANGE,
+  BIGSERIAL: INT8_RANGE,
+};
+
+/** `value` as a bigint when it is an integer (a whole number, a bigint, integer text), else `undefined`. */
+function integerOf(value: unknown): bigint | undefined {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") return Number.isInteger(value) ? BigInt(value) : undefined;
+  return typeof value === "string" && /^\s*[+-]?\d+\s*$/.test(value) ? BigInt(value) : undefined;
+}
+
 /** PostgreSQL COUNT() may return string (bigint) — parse to number. */
 function parseCount(value: number | string | undefined): number {
   if (typeof value === "string") {
@@ -235,7 +261,7 @@ function parseCount(value: number | string | undefined): number {
 /** Savepoint guarding one `insertManyIgnore` chunk (see {@link PostgresAdapter.insertManyIgnore}). */
 const IGNORE_SAVEPOINT = "atscript_ignore_chunk";
 
-/** Retryable concurrency SQLSTATEs (see `PostgresAdapter._mapConstraintError`). */
+/** Retryable concurrency SQLSTATEs (see {@link mapContention}). */
 const PG_CONTENTION_CODES: Record<string, DbErrorCode | undefined> = {
   "40P01": "DEADLOCK",
   "55P03": "LOCK_TIMEOUT",
@@ -258,6 +284,52 @@ function mapContention(error: unknown): unknown {
   return new DbError(mapped, [{ path: "", message: (error as Error).message }], undefined, {
     cause: error,
   });
+}
+
+/**
+ * Rethrows a driver error of a data statement (all but `aggregate()`'s) as
+ * the `DbError` it means, else as is: SQLSTATE 23505 (unique_violation) →
+ * `CONFLICT`, 23503 (foreign_key_violation) → `FK_VIOLATION`, and what
+ * `pgDialect.mapQueryError` maps — 22003 (numeric_value_out_of_range) →
+ * `INVALID_QUERY`. Contention is mapped by the executor ({@link mapContention}).
+ */
+function rethrowPgError(error: unknown): never {
+  if (error && typeof error === "object" && "code" in error) {
+    const err = error as {
+      code: string;
+      detail?: string;
+      constraint?: string;
+      message: string;
+    };
+
+    // Unique constraint violation — the index / constraint name and the
+    // `Key (a, b)=(…)` columns; the table layer resolves them.
+    if (err.code === "23505") {
+      throw constraintViolation(
+        "CONFLICT",
+        {
+          name: err.constraint,
+          columns: keyColumns(err.detail),
+          primaryKey: err.constraint?.endsWith("_pkey"),
+        },
+        err.detail ?? err.message,
+      );
+    }
+
+    // FK violation — on a write the child's `Key (col)=(…)`; on a delete
+    // the parent's key and the referencing table.
+    if (err.code === "23503") {
+      const detail = err.detail ?? err.message;
+      const referencedBy = detail.match(/is still referenced from table "([^"]+)"/)?.[1];
+      throw constraintViolation(
+        "FK_VIOLATION",
+        referencedBy ? { referencedBy } : { name: err.constraint, columns: keyColumns(detail) },
+        detail,
+      );
+    }
+  }
+  // `arithmetic: false`: a view's `@db.compute` overflow reads as "Numeric value out of range" too
+  throw pgDialect.mapQueryError?.(error, false) ?? error;
 }
 
 /**
@@ -351,6 +423,8 @@ export class PostgresAdapter extends BaseDbAdapter {
   // ── Nocase columns (for CITEXT extension provisioning) ─────────────────
   /** Physical column names with @db.collate 'nocase'. Used to trigger CITEXT extension. */
   private _nocaseColumns = new Set<string>();
+  /** The value range of each integer column, keyed by its `flatMap` type (what {@link prepareId} gets). */
+  private _intRanges = new Map<unknown, readonly [bigint, bigint]>();
   /** Whether citext extension has been provisioned (avoids redundant round-trips). */
   private _citextProvisioned = false;
 
@@ -577,7 +651,18 @@ export class PostgresAdapter extends BaseDbAdapter {
     return true;
   }
 
-  override prepareId(id: unknown, _fieldType: unknown): unknown {
+  /**
+   * An integer id outside its key column's SMALLINT / INTEGER / BIGINT range
+   * throws: PostgreSQL would reject it (22003), so a by-id read matches no
+   * row. Every other id goes as it is.
+   */
+  override prepareId(id: unknown, fieldType: unknown): unknown {
+    const range = this._intRanges.get(fieldType);
+    if (!range) return id;
+    const value = integerOf(id);
+    if (value !== undefined && (value < range[0] || value > range[1])) {
+      throw numericOutOfRangeError();
+    }
     return id;
   }
 
@@ -656,6 +741,10 @@ export class PostgresAdapter extends BaseDbAdapter {
     // Scan field descriptors for @db.collate 'nocase' — maps to CITEXT column type
     // (case-insensitive text). Extension is provisioned in ensureTable().
     const geo: string[] = [];
+    const flatMap = this._table.flatMap;
+    // Key ranges for tables only: a view column has its source column's type, which the
+    // view's field may not show (`id: Order.id` does not carry `@db.default.increment`)
+    const isView = this._table.isView;
     for (const fd of this._table.fieldDescriptors) {
       if (fd.collate === "nocase") {
         this._nocaseColumns.add(fd.physicalName);
@@ -663,6 +752,9 @@ export class PostgresAdapter extends BaseDbAdapter {
       if (fd.isGeoPoint === true && !fd.encrypted) {
         geo.push(fd.physicalName);
       }
+      // Keyed by the flatMap entry: `fd.type` is the column type (the `T` of a `T | null`)
+      const range = isView ? undefined : PG_INT_RANGE[this.typeMapper(fd).trim().toUpperCase()];
+      if (range) this._intRanges.set(flatMap.get(fd.path), range);
     }
     this._geoColumnNames = geo;
     this._geoFields = geo.length > 0;
@@ -770,62 +862,13 @@ export class PostgresAdapter extends BaseDbAdapter {
 
   // ── Error mapping ─────────────────────────────────────────────────────────
 
-  /**
-   * Wraps an async write operation to catch PostgreSQL constraint errors
-   * and rethrow as structured `DbError`.
-   *
-   * PostgreSQL uses SQLSTATE codes:
-   * - 23505 = unique_violation
-   * - 23503 = foreign_key_violation
-   * - 40P01 = deadlock_detected → `DEADLOCK`
-   * - 55P03 = lock_not_available (`lock_timeout`, `NOWAIT`) → `LOCK_TIMEOUT`
-   * - 40001 = serialization_failure → `SERIALIZATION_FAILURE`
-   */
+  /** Runs a write, rethrowing a driver error as {@link rethrowPgError} maps it. */
   private async _wrapConstraintError<R>(fn: () => Promise<R>): Promise<R> {
     try {
       return await fn();
     } catch (error: unknown) {
-      return this._mapConstraintError(error);
+      return rethrowPgError(error);
     }
-  }
-
-  /** Rethrows `error` as a structured `DbError` when it is a unique / FK violation or a deadlock / lock timeout, else as is. */
-  private _mapConstraintError(error: unknown): never {
-    if (error && typeof error === "object" && "code" in error) {
-      const err = error as {
-        code: string;
-        detail?: string;
-        constraint?: string;
-        message: string;
-      };
-
-      // Unique constraint violation — the index / constraint name and the
-      // `Key (a, b)=(…)` columns; the table layer resolves them.
-      if (err.code === "23505") {
-        throw constraintViolation(
-          "CONFLICT",
-          {
-            name: err.constraint,
-            columns: keyColumns(err.detail),
-            primaryKey: err.constraint?.endsWith("_pkey"),
-          },
-          err.detail ?? err.message,
-        );
-      }
-
-      // FK violation — on a write the child's `Key (col)=(…)`; on a delete
-      // the parent's key and the referencing table.
-      if (err.code === "23503") {
-        const detail = err.detail ?? err.message;
-        const referencedBy = detail.match(/is still referenced from table "([^"]+)"/)?.[1];
-        throw constraintViolation(
-          "FK_VIOLATION",
-          referencedBy ? { referencedBy } : { name: err.constraint, columns: keyColumns(detail) },
-          detail,
-        );
-      }
-    }
-    throw error;
   }
 
   // ── CRUD: Insert ──────────────────────────────────────────────────────────
@@ -1012,9 +1055,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       if (clauses.length === 0) continue;
       const sql = `SELECT ${selectCols} FROM ${quoteTableName(this.resolveTableName())} WHERE ${clauses.join(" OR ")} ORDER BY ${order} FOR UPDATE`;
       this._log(sql, params);
-      const found = await this._exec()
-        .all(sql, params)
-        .catch((error: unknown) => this._mapConstraintError(error));
+      const found = await this._exec().all(sql, params).catch(rethrowPgError);
       for (const doc of found) {
         keySets.forEach((fields, k) => {
           const tuple = uniqueKeyTuple(doc, fields);
@@ -1060,19 +1101,14 @@ export class PostgresAdapter extends BaseDbAdapter {
     const controls = { ...query.controls, $limit: 1 };
     const { sql, params } = buildSelect(this.resolveTableName(), where, controls, query.lock);
     this._log(sql, params);
-    // Contention (a locking read's NOWAIT, a deadlock, a serialization failure) → retryable DbError
-    return this._exec()
-      .get(sql, params)
-      .catch((error: unknown) => this._mapConstraintError(error));
+    return this._exec().get(sql, params).catch(rethrowPgError);
   }
 
   async findMany(query: DbQuery): Promise<Array<Record<string, unknown>>> {
     const where = buildWhere(query.filter);
     const { sql, params } = buildSelect(this.resolveTableName(), where, query.controls, query.lock);
     this._log(sql, params);
-    return this._exec()
-      .all(sql, params)
-      .catch((error: unknown) => this._mapConstraintError(error));
+    return this._exec().all(sql, params).catch(rethrowPgError);
   }
 
   /**
@@ -1092,7 +1128,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       partitionBy,
     );
     this._log(sql, params);
-    return stripPartitionRowNumber(await this._exec().all(sql, params));
+    return stripPartitionRowNumber(await this._exec().all(sql, params).catch(rethrowPgError));
   }
 
   async count(query: DbQuery): Promise<number> {
@@ -1104,7 +1140,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     };
     const { sql, params } = finalizeParams(pgDialect, raw);
     this._log(sql, params);
-    const row = await this._exec().get<{ cnt: number | string }>(sql, params);
+    const row = await this._exec().get<{ cnt: number | string }>(sql, params).catch(rethrowPgError);
     return parseCount(row?.cnt);
   }
 
@@ -2426,7 +2462,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       combinedWhere.rank,
     );
     this._log(sql, params);
-    return this._exec().all(sql, params);
+    return this._exec().all(sql, params).catch(rethrowPgError);
   }
 
   override async searchWithCount(
@@ -2463,7 +2499,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       return parseCount(row?.cnt);
     })();
 
-    const [data, count] = await Promise.all([selectPromise, countPromise]);
+    const [data, count] = await Promise.all([selectPromise, countPromise]).catch(rethrowPgError);
     return { data, count };
   }
 
@@ -2637,7 +2673,8 @@ export class PostgresAdapter extends BaseDbAdapter {
     const ctx = this._prepareVectorSearch(vector, query, indexName);
     const { sql, params } = this._buildVectorSearchQuery(ctx);
     this._log(sql, params);
-    return (await this._exec().all(sql, params)).map((row) => addVectorScore(row, ctx.metric));
+    const rows = await this._exec().all(sql, params).catch(rethrowPgError);
+    return rows.map((row) => addVectorScore(row, ctx.metric));
   }
 
   override async vectorSearchWithCount(
@@ -2658,7 +2695,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     const [data, countRow] = await Promise.all([
       this._exec().all(sql, params),
       this._exec().get<{ cnt: number | string }>(countSql, countParams),
-    ]);
+    ]).catch(rethrowPgError);
     const count = parseCount(countRow?.cnt);
     return { data: data.map((row) => addVectorScore(row, ctx.metric)), count };
   }
@@ -2894,7 +2931,7 @@ export class PostgresAdapter extends BaseDbAdapter {
       this._prepareGeoSearch(point, query, indexName),
     );
     this._log(sql, params);
-    const rows = await this._exec().all(sql, params);
+    const rows = await this._exec().all(sql, params).catch(rethrowPgError);
     return rows.map((row) => renameGeoDistance(row));
   }
 
@@ -2918,7 +2955,7 @@ export class PostgresAdapter extends BaseDbAdapter {
     const [rows, countRow] = await Promise.all([
       this._exec().all(sql, params),
       this._exec().get<{ cnt: number | string }>(countFrag.sql, countFrag.params),
-    ]);
+    ]).catch(rethrowPgError);
     return {
       data: rows.map((row) => renameGeoDistance(row)),
       count: parseCount(countRow?.cnt),
