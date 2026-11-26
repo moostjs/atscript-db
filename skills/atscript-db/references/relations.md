@@ -21,11 +21,12 @@ Target must be a chain ref to a `@meta.id` field or a field marked `@db.index.un
 
 ## Navigation annotations
 
-| Annotation     | Cardinality | FK location                  |
-| -------------- | ----------- | ---------------------------- |
-| `@db.rel.to`   | N:1         | This table, own or inherited |
-| `@db.rel.from` | 1:N         | Other table                  |
-| `@db.rel.via`  | M:N         | Junction table holds two FKs |
+| Annotation      | Cardinality     | FK location                           |
+| --------------- | --------------- | ------------------------------------- |
+| `@db.rel.to`    | N:1             | This table, own or inherited          |
+| `@db.rel.from`  | 1:N             | Other table                           |
+| `@db.rel.via`   | M:N             | Junction table holds two FKs          |
+| `@db.rel.store` | `T` 1 / `T[]` N | None — the store correlates (0.1.196) |
 
 ```atscript
 @db.table 'posts'
@@ -80,6 +81,16 @@ reporter: User
 - Adapters with `supportsNativeForeignKeys(): true` push this to the DB.
 - Others emulate via `ApplicationIntegrity`: reads the matching parents, counts children (restrict) / cascades / nulls inside the same transaction, then deletes them — by the filter again, or, when the filter / row scope holds a `$some` / `$none` (0.1.147), EXACTLY those parents by primary key (a `$some` over a cascaded child relation still deletes the parent; no PK → `REL_FILTER_NOT_SUPPORTED`).
 
+### `@db.rel.store` (0.1.196) — navigation without FKs
+
+| #   | Rule                                                                                                                                                                                                                                                                                                      |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | ONLY on a table whose adapter has `supportsWithInRead(): true` (reads related rows itself, e.g. a remote service embedding them). Any other adapter — every bundled one — → the table refuses every use: `Relation "x" of "t" has no foreign key; the <Adapter> adapter does not read relations in-read`. |
+| 2   | Loaded with `$with` like any relation (`filter`, `$sort`, `$select` per entry); `@db.rel.filter` / `@db.rel.filterable` accepted.                                                                                                                                                                         |
+| 3   | NEVER written: any value (`null` included, any depth, `$update` / `$upsert` items too) → `NAV_STORE_WRITE` at the field's path (400). Same in `validateRows`, db-client, forms. Omit the field.                                                                                                           |
+| 4   | Compile errors: non-`@db.table` host, target not a `@db.table` (or array of one), union, combined with `@db.rel.to` / `.from` / `.via` / `@db.rel.FK`.                                                                                                                                                    |
+| 5   | `TDbRelation.direction` / `/meta.relations[].direction` / `ResolvedRelationFilter.kind` = `"store"`. A navigation, not a column (no sync).                                                                                                                                                                |
+
 ## Loading — `controls.$with`
 
 ```ts
@@ -97,9 +108,11 @@ await tasks.findMany({
 
 Dotted names nest (0.1.165; ≤ 0.1.164 silently skipped): `$with: ["tasks.assignee"]` = `tasks` with `$with: [{ name: "assignee" }]`; the entry's own `filter` / `controls` apply at the LAST level; entries for the same relation merge (first entry's filter/controls win, nested lists concatenate); string shorthand works (`$with: ["tasks"]` used to throw). moost-db rewrites `?$with=a.b` into the nested form right after parsing, so checks, seals and row scopes run per level and an unknown segment answers `Unknown relation "b"`.
 
-Adapters with `supportsNativeRelations(): true` can implement JOIN/`$lookup`-based loading; the default is an application-level batch-loader that fires one query per relation, independent of result-set size.
+Adapters with `supportsNativeRelations(): true` can implement JOIN/`$lookup`-based loading; the default is an application-level batch-loader that fires one query per relation, independent of result-set size. Adapters with `supportsWithInRead(): true` (0.1.196) get the whole `$with` tree in the root read and return the related rows in it → [creating-adapters.md](creating-adapters.md). On them: `$skip` / `$limit` inside `$with` (any depth) → `NOT_SUPPORTED` 400; a related table on another store → `NOT_SUPPORTED`; `@db.rel.via` / a nav named like a stored column → table unusable; `table.loadRelations()` → `NOT_SUPPORTED`.
 
-Controls are PER PARENT ROW (0.1.147, every adapter): `{ name: "comments", controls: { $sort: { createdAt: -1 }, $limit: 5 } }` = the 5 newest comments of EACH post. FROM / VIA: sort, then `$skip` / `$limit` per parent; VIA `$sort` orders the targets (no `$sort` → junction order); TO: `$skip ≥ 1` / `$limit: 0` → `null`. SQL reads a paged TO / FROM relation with a `ROW_NUMBER()` window → needs SQLite ≥ 3.25, MySQL ≥ 8.0 (MariaDB ≥ 10.2). ≤ 0.1.146 on SQL / memory: `$skip` / `$limit` paged ALL parents' rows together (`$limit: 1` → one parent got a row) and VIA ignored `$sort` (Mongo was already per parent for VIA).
+Table resolver (0.1.196): `$with` on a table WITHOUT a resolver (built without `DbSpace`), or whose resolver returns nothing for the target → plain `Error` (was: rows without the relation). `DbSpace` tables unaffected; MongoDB's own loader still skips.
+
+Controls are PER PARENT ROW (0.1.147, every adapter that loads relations through the core — not on in-read adapters, see above): `{ name: "comments", controls: { $sort: { createdAt: -1 }, $limit: 5 } }` = the 5 newest comments of EACH post. FROM / VIA: sort, then `$skip` / `$limit` per parent; VIA `$sort` orders the targets (no `$sort` → junction order); TO: `$skip ≥ 1` / `$limit: 0` → `null`. SQL reads a paged TO / FROM relation with a `ROW_NUMBER()` window → needs SQLite ≥ 3.25, MySQL ≥ 8.0 (MariaDB ≥ 10.2). ≤ 0.1.146 on SQL / memory: `$skip` / `$limit` paged ALL parents' rows together (`$limit: 1` → one parent got a row) and VIA ignored `$sort` (Mongo was already per parent for VIA).
 
 Projections (0.1.143): a relation's sub-`$select` accepts array, inclusion-map and exclusion-map forms on every adapter (≤ 0.1.142 Mongo `$lookup` 500'd on the map forms); join keys are never dropped. A parent `$select` that omits the join key (TO: the FK; FROM / VIA: the PK) still loads the relation — the key is read for the join and stripped from the rows (≤ 0.1.142: `project: null`).
 

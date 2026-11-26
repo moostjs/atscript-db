@@ -511,7 +511,7 @@ interface TMetaResponse {
   versionColumn?: string; // LOGICAL field name of the `@db.column.version` field (a `@db.column` rename does not change it); omitted when none → round-trip it only when set. See § Optimistic concurrency over HTTP.
   bucketUnits?: BucketUnit[]; // calendar-bucket units; omitted when none (since 0.1.132). See calendar-buckets.md.
   aggregateFns?: AggregateFn[]; // the adapter's aggregateFns(), canonical order; always sent by moost-db. See aggregation.md.
-  relations: { name; direction: "to" | "from" | "via"; isArray; filterable?: true }[]; // filterable (0.1.147) = @db.rel.filterable; not visibility-aware
+  relations: { name; direction: "to" | "from" | "via" | "store"; isArray; filterable?: true }[]; // "store" (0.1.196) = @db.rel.store; filterable (0.1.147) = @db.rel.filterable ∧ (0.1.196) adapter supportsRelationFilters('read'); not visibility-aware
   fields: Record<
     string,
     {

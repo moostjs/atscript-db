@@ -175,7 +175,7 @@ The filter goes on the entry, not inside `controls` — there is no `$filter` co
 
 This loads each project's tasks sorted by `done` then `title`, limited to 10 incomplete tasks, each with their tags attached.
 
-`$sort`, `$skip` and `$limit` apply to the related rows of **each parent row** (since 0.1.147 on every adapter): above, every project gets up to 10 of its own tasks, not 10 tasks shared among all projects.
+`$sort`, `$skip` and `$limit` apply to the related rows of **each parent row** (since 0.1.147 on every adapter that loads relations through the core): above, every project gets up to 10 of its own tasks, not 10 tasks shared among all projects. An [adapter that reads relations inside the read](#in-read) refuses `$skip` and `$limit` inside `$with` (400 `NOT_SUPPORTED`) and applies `$sort` in its own request or refuses the request.
 
 - **FROM / VIA** — each parent row's related rows are sorted, then paged. On a VIA relation `$sort` orders the related rows themselves; without `$sort` they come in junction order.
 - **TO** — a parent row has at most one related row, so `$limit: 0` or a `$skip` of 1 or more loads `null`.
@@ -331,12 +331,23 @@ await taskTable.updateOne({ id: task.id, assigneeId: null });
 Setting an FK to a non-existent ID results in a foreign key violation error. Via the HTTP controller, this surfaces as a `400` response with an `FK_VIOLATION` error code. Programmatically, the adapter throws an error.
 :::
 
+## Adapters That Read Relations Inside the Read {#in-read}
+
+Since 0.1.196. Some stores return related rows in the same response as the rows — for example a remote service that embeds them. Their adapter declares [`supportsWithInRead()`](/adapters/creating-adapters#with-in-read): the core hands the whole `$with` tree to that one read and converts the related rows it returns, so no second read by a key list is made. For the caller nothing changes, with these limits:
+
+- `$skip` / `$limit` inside a `$with` entry, at any depth, are refused with `NOT_SUPPORTED` (HTTP 400); page the root read instead.
+- A related table on another database or adapter is refused with `NOT_SUPPORTED`.
+- `@db.rel.via` relations are not available on such a table, and `table.loadRelations()` refuses (`NOT_SUPPORTED`).
+- [`@db.rel.store`](./navigation#db-rel-store) relations — navigations without foreign keys — are available only here.
+
+A server scope you add to a `$with` entry (a [`validateControls`](/http/customization#validatecontrols) override) reaches the adapter's request; the adapter applies it or refuses the read.
+
 ## How It Works Internally
 
 Under the hood, relation loading is adapter-specific:
 
 - **SQL adapters** (SQLite / PostgreSQL / MySQL) — **separate batched queries**. Each relation in `$with` triggers one additional query (two for VIA). No JOINs are emitted by the loader.
-- **MongoDB** — a single `$lookup` aggregation pipeline per relation (the adapter overrides `supportsNativeRelations()`). VIA relations chain two `$lookup` stages.
+- **MongoDB** — a single `$lookup` aggregation pipeline per relation (the adapter overrides `supportsNativeRelations()`). VIA relations chain two `$lookup` stages. MongoDB keeps this loader of its own: it does not use the core's `$with` plan (since 0.1.196), so a table resolver that returns no table for a relation's target skips that relation there instead of failing the read.
 
 The descriptions below cover the SQL batching strategy. MongoDB's `$lookup` follows the same logical shape — same FK direction semantics, same composite-key support — but executes server-side.
 

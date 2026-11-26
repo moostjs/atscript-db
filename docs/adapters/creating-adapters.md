@@ -178,6 +178,10 @@ Return `true` if your database enforces FK constraints at the engine level (e.g.
 
 Return `true` to handle `$with` relation loading natively via database features like SQL JOINs or MongoDB `$lookup`. When `false`, the table layer uses application-level batch loading — issuing separate queries per relation and stitching results together.
 
+### `supportsWithInRead()` — since 0.1.196 {#supports-with-in-read}
+
+Return `true` when your store returns related rows in the same response as the rows themselves — for example a remote service that embeds them. See [Relations Read in the Same Read](#with-in-read).
+
 ### `supportsRelationFilters(mode)` — since 0.1.147 {#supports-relation-filters}
 
 Return `true` to receive [relational predicates](/api/queries#relational-filters) (`$some` / `$none`) in `mode`: `'read'` for the filters of find, count, search and `aggregate()`, `'write'` for mutation filters (`updateMany`, `replaceMany`, `deleteMany`, row scopes). Default `false`: the core rejects such a filter with `REL_FILTER_NOT_SUPPORTED` (`… in mutation filters` for writes) before your adapter sees it. All bundled adapters return `true` for both modes. What you receive is described in [Relational Predicates](#relational-predicates).
@@ -407,6 +411,32 @@ The relation's `$sort`, `$skip` and `$limit` apply to the related rows of each p
 
 A native loader must apply the relation's [`@db.rel.filter`](/relations/navigation#db-rel-filter) (since 0.1.147 the generic loader does): `relationStaticFilter(relation)` from `@atscript/db` returns it as logical filters split by side, `{ target?, junction? }` — AND `target` into the related rows and, on a `via` relation, `junction` into the junction rows. A `null` foreign key loads nothing (`null` / `[]`), even where the engine considers `null` equal to `null`. A `$with` entry that names no relation of the table throws `unknownWithRelation(name)` from `@atscript/db` (since 0.1.175): a `DbError("INVALID_QUERY")` whose entry (path `$with`) has code `UNKNOWN_RELATION`, the same error the generic loader throws.
 
+## Relations Read in the Same Read {#with-in-read}
+
+Since 0.1.196. When [`supportsWithInRead()`](#supports-with-in-read) returns `true`, the core never loads relations for your tables. Instead each row read — `findOne`, `findMany`, `findManyWithCount`, `search` / `searchWithCount`, `vectorSearch` / `vectorSearchWithCount`, `geoSearch` / `geoSearchWithCount` — receives the request's `$with` tree in `query.controls.$with`, as resolved entries (`TResolvedWith` from `@atscript/db`):
+
+| Member    | Content                                                                                                                                                                                                                                  |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kind`    | `'to'`, `'from'` or `'store'` (a [`@db.rel.store`](/relations/navigation#db-rel-store) relation)                                                                                                                                         |
+| `nav`     | The navigation field: put the related row(s) under this name                                                                                                                                                                             |
+| `isArray` | `true`: an array of related rows; `false`: one row or `null`                                                                                                                                                                             |
+| `target`  | `{ table, name, adapter }` of the related table, as in [`ResolvedRelationFilter`](#relational-predicates)                                                                                                                                |
+| `query`   | The related table's query, as its own `findMany` would receive it: physical names, the entry's filter AND the relation's [`@db.rel.filter`](/relations/navigation#db-rel-filter), `$sort`, `$select`; nested entries in `controls.$with` |
+
+Return every row with each requested relation under its navigation name — `null` or `[]` when there is none. The core then converts the related rows through their own table (field mapping, value formatters, decryption) at every depth. A row without a requested relation fails the read with an `Error` naming your adapter: it is a defect of the adapter.
+
+The entries carry no join keys: you correlate the rows yourself, by `nav`. They never carry `$skip` / `$limit` — the core refuses a request that pages a relation with `NOT_SUPPORTED` (HTTP 400). Apply `$sort` in your request, or refuse the read.
+
+**Authorization contract.** An entry's `query.filter` and `query.controls.$select` may carry server authorization: a controller's [`validateControls`](/http/customization#validatecontrols) conjoins row scopes into a `$with` entry, and a permission layer may narrow its fields. Apply every entry as given, at every depth, or refuse the whole read with `NOT_SUPPORTED`. Never drop a filter or a `$select`: the core does not check the related rows you return.
+
+A table on such an adapter refuses every use (an `Error` at the first use) when:
+
+- the adapter's `supportsNativeRelations()` is `true` as well;
+- it has a `@db.rel.via` relation — a junction table is read on its own;
+- a navigation field is named like a stored column (`@db.column 'author'` on another field next to an `author` navigation) — the related rows travel in the row under the navigation name.
+
+A related table on another store ([`sharesStoreWith`](#relational-predicates) false) is refused with `NOT_SUPPORTED`. `table.loadRelations()` refuses too (`NOT_SUPPORTED`): request relations with `$with` on the read.
+
 ## Relational Predicates {#relational-predicates}
 
 Since 0.1.147. When [`supportsRelationFilters(mode)`](#supports-relation-filters) returns `true`, a filter reaching your adapter may hold `{ <nav>: { $some | $none: <operand> } }`. The core has already guarded it (limits, the related table's field rules) and resolved it: the operand is a `ResolvedRelationFilter` with physical names on every side. Your adapter only renders it.
@@ -415,12 +445,14 @@ Since 0.1.147. When [`supportsRelationFilters(mode)`](#supports-relation-filters
 
 | `ResolvedRelationFilter` member | Content                                                                                                                                                                                    |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `kind`                          | `'to'`, `'from'` or `'via'`                                                                                                                                                                |
+| `kind`                          | `'to'`, `'from'`, `'via'` or `'store'` (since 0.1.196: a [`@db.rel.store`](/relations/navigation#db-rel-store) relation, correlated by your store — no `pairs`, no `junction`)             |
 | `nav`                           | The logical navigation field (for error paths)                                                                                                                                             |
 | `source`, `target`              | `{ table, name, adapter }` — `table` is the adapter's `resolveTableName()` (schema-qualified), `name` the bare table / collection name                                                     |
-| `pairs`                         | `to` / `from`: `[{ source, target }]` physical columns, one per key part — a related row has `target.<pair.target> = source.<pair.source>`. Empty for `via`                                |
+| `pairs`                         | `to` / `from`: `[{ source, target }]` physical columns, one per key part — a related row has `target.<pair.target> = source.<pair.source>`. Empty for `via`; absent for `store`            |
 | `junction`                      | `via` only: `{ table, name, adapter, toSource: [{ junction, source }], toTarget: [{ junction, target }], filter? }` — `filter` is the junction part of `@db.rel.filter`                    |
 | `filter`                        | The operand on the target: physical names, value formatters applied, nested predicates resolved the same way, the target part of `@db.rel.filter` ANDed in. `{}` matches every related row |
+
+`ResolvedRelationFilter` is a union on `kind` (since 0.1.196): narrow on `kind` before reading `pairs` (TypeScript refuses `pairs` on the union; the type of each member is `ResolvedKeyRelationFilter` / `ResolvedStoreRelationFilter`). Only an adapter whose [`supportsWithInRead()`](#supports-with-in-read) is `true` can receive a `store` node — a table with a `@db.rel.store` relation is refused on any other adapter.
 
 Render `$some` as "a related row exists" and `$none` as "none exists". A `null` component of the source key relates to nothing — `$some` false, `$none` true — even where the engine compares `null` equal to `null` (MongoDB's aggregation `$eq` does). Render nested predicates inside the operand against the related row, not the outer one.
 

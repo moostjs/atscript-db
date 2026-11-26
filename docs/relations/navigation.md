@@ -227,6 +227,30 @@ Atscript resolves the path automatically: `Task.tags` follows `TaskTag.taskId` �
 The junction table must have at least two `@db.rel.FK` fields — one pointing to each side of the relationship. It can also contain additional data fields (e.g., `sortOrder`, `createdAt`) that describe the relationship itself.
 :::
 
+## `@db.rel.store` — Relations Without Foreign Keys {#db-rel-store}
+
+Since 0.1.196. A navigation the **store** resolves by itself, with no foreign key in the model — for an adapter that reads related rows itself, e.g. a remote service that returns them in the same response. `T` is at most one related row, `T[]` many:
+
+```atscript
+@db.table 'teams'
+export interface Team {
+    @meta.id
+    id: number
+
+    @db.rel.store
+    lead?: User
+
+    @db.rel.store
+    members: User[]
+}
+```
+
+- **Loaded with `$with`, never written.** `$with=members` loads it like any relation, per-relation `filter`, `$sort` and `$select` included. A write with any value in it — `null` included, at any depth, on every write path and in `validateRows` — is refused at the field's path with `NAV_STORE_WRITE` (HTTP 400). Leave the field out of the payload.
+- **Only on an adapter that reads relations in-read** ([`supportsWithInRead()`](/adapters/creating-adapters#with-in-read)). On any other adapter — the bundled ones included — the table refuses every use: `Relation "members" of "teams" has no foreign key; the SqliteAdapter adapter does not read relations in-read`.
+- `@db.rel.filter` and `@db.rel.filterable` work on it; a relational predicate (`members=$some(…)`) needs the adapter's [relation filters](/adapters/creating-adapters#supports-relation-filters).
+- `/meta.relations[]` lists it with `direction: "store"`. It is a navigation, not a column: adding one never triggers a sync.
+- Compile errors: on a field of a non-`@db.table` interface, on a type that is not a `@db.table` entity (or an array of one), on a union, and together with `@db.rel.to`, `.from`, `.via` or `@db.rel.FK`.
+
 ## `@db.rel.filter` — Filtering Navigation Properties {#db-rel-filter}
 
 The `@db.rel.filter` annotation restricts which records count as related. It accepts a backtick-delimited query expression that is applied as a `WHERE` condition whenever the relation is loaded with `$with` and inside [relational predicates](/api/queries#relational-filters) on it (`$some` / `$none`).
@@ -249,7 +273,7 @@ export interface Post {
 
 Loading `comments` returns all comments for a post. Loading `visibleComments` only returns comments where `visible` is `true`. The filter is applied at the database level, so filtered-out records are never fetched.
 
-`@db.rel.filter` works with all navigation types — `@db.rel.to`, `@db.rel.from`, and `@db.rel.via`. A query-time `$with` filter is ANDed with it, and `{ visibleComments: { $some: {} } }` means "has a visible comment".
+`@db.rel.filter` works with all navigation types — `@db.rel.to`, `@db.rel.from`, `@db.rel.via` and `@db.rel.store`. A query-time `$with` filter is ANDed with it, and `{ visibleComments: { $some: {} } }` means "has a visible comment".
 
 ::: warning Applied at run time since 0.1.147
 Before 0.1.147 the annotation was validated but **ignored** when loading: `$with=visibleComments` returned every comment. It is now applied on every adapter, so such a relation returns fewer rows after the upgrade — the rows its declaration always described.
@@ -271,7 +295,7 @@ The backtick-delimited syntax (`\`Comment.visible = true\``) follows the same ex
 
 ## `@db.rel.filterable` — Client Filters on a Relation {#db-rel-filterable}
 
-Since 0.1.147. Lets HTTP clients filter the parent rows by this relation with a [relational predicate](/api/queries#relational-filters) — `ticket=$some(status=open)` on `/query`, `/pages` and `/geo`. A flag, valid on `@db.rel.to` / `.from` / `.via` fields only:
+Since 0.1.147. Lets HTTP clients filter the parent rows by this relation with a [relational predicate](/api/queries#relational-filters) — `ticket=$some(status=open)` on `/query`, `/pages` and `/geo`. A flag, valid on `@db.rel.to` / `.from` / `.via` / `.store` fields only:
 
 ```atscript
 @db.table 'issues'
@@ -291,7 +315,7 @@ export interface Issue {
 - **HTTP opt-in only.** Without it, a client predicate on the relation answers `400 Filtering by related "ticket" rows is not permitted — add @db.rel.filterable to enable.` Loading it with `$with` needs no flag.
 - **Server-side code never needs it**: `transformFilter`, `actionRowScope` and direct table calls use predicates on any relation.
 - The related table's own rules still apply to the operand (visibility, encrypted and write-only fields, manual filter mode) — see [Permissions § Relational predicates](/http/permissions#relational-predicates).
-- `/meta.relations[]` marks opted-in relations with `filterable: true`. The flag is not part of the schema, so adding or removing it never triggers a sync.
+- `/meta.relations[]` marks opted-in relations with `filterable: true` — since 0.1.196 only when the table's adapter renders relational predicates (`supportsRelationFilters('read')`; every bundled adapter does). The flag is not part of the schema, so adding or removing it never triggers a sync.
 
 Opt in only where clients need it: a predicate filters the parent set and runs a correlated lookup per candidate row (index advice in [Queries § Relational filters](/api/queries#relational-filters)).
 

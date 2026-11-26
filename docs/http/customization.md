@@ -237,6 +237,8 @@ protected validateControls(controls: Record<string, unknown>, type: TDbControlsT
 }
 ```
 
+On a table whose adapter [reads relations inside the read](/relations/loading#in-read) (since 0.1.196), the scope you add reaches the adapter's request; the adapter applies it or refuses the read.
+
 Since 0.1.147 the [relational-predicate](./permissions#relational-predicates) gate judges the client's `$with` tree as recorded **before** this hook runs, so predicates you add here are not gated or counted as client input, and [`transformRelationFilter`](#transformrelationfilter) rewrites only the client's. Keep the client's filter object when you wrap it (as above): with `transformRelationFilter` overridden, a client `$with` predicate that was copied or dropped makes the request fail with 500 instead of running without its overlay.
 
 ### hasField {#hasfield}
