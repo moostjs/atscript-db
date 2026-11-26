@@ -243,6 +243,12 @@ function renderRelation(
     addFilter(junction.filter, j);
     addFilter(node.filter, t);
   } else {
+    if (node.kind === "store") {
+      // refused at table build: only an adapter that reads relations in-read holds one
+      throw new Error(
+        `Relational predicate on "${node.nav}": a @db.rel.store relation has no join keys`,
+      );
+    }
     const t = nextAlias();
     from = `${dialect.quoteTable(node.target.table)} AS ${t}`;
     for (const p of node.pairs) {

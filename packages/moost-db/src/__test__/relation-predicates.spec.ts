@@ -10,7 +10,7 @@ import {
   REL_FILTER_MAX_NODES,
   type DbQuery,
   type FilterExpr,
-  type ResolvedRelationFilter,
+  type ResolvedKeyRelationFilter,
 } from "@atscript/db";
 import { HttpError, Post } from "@moostjs/event-http";
 import { current, getMoostInfact, key } from "moost";
@@ -72,7 +72,7 @@ class RelEvalAdapter extends MockAdapter {
 
 function relatedRows(
   row: Record<string, unknown>,
-  node: ResolvedRelationFilter,
+  node: ResolvedKeyRelationFilter,
 ): Array<Record<string, unknown>> {
   const targets = (node.target.adapter as RelEvalAdapter).rowsOf();
   return targets.filter((t) =>

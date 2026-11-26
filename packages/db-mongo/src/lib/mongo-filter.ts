@@ -347,8 +347,9 @@ function createPredicateRenderer() {
     if (node.kind === "via") {
       return viaLookupOf(node, field, as, vars, exists);
     }
-    if (node.pairs.length === 0) {
-      // An empty correlation would relate every target document.
+    if (node.kind === "store" || node.pairs.length === 0) {
+      // An empty correlation would relate every target document (a
+      // `@db.rel.store` relation has none: refused at table build here).
       throw malformed(field, `Relational predicate on "${field}" has no join key pairs`);
     }
     const join = correlate(

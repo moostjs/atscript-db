@@ -7,6 +7,7 @@ import type {
   TMessages,
 } from "@atscript/core";
 import { isArray, isInterface, isProp, isRef, isStructure } from "@atscript/core";
+import { NAV_PROP_ANNOTATIONS } from "@atscript/core/nav";
 
 import {
   AGG_ANNOTATIONS,
@@ -274,10 +275,11 @@ export function refuseCiphertext(annotation: string): TAnnotationSpecConfig["val
 
 /**
  * Navigation relation annotations — a navigation field holds another table's
- * rows, never part of this table's stored value.
+ * rows, never part of this table's stored value. The one list of
+ * `@atscript/core/nav` (`db.rel.store` included since 0.1.196).
  * @since 0.1.162
  */
-export const NAV_ANNOTATIONS = ["db.rel.to", "db.rel.from", "db.rel.via"] as const;
+export const NAV_ANNOTATIONS = NAV_PROP_ANNOTATIONS;
 
 /** Whether a prop is a navigation field ({@link NAV_ANNOTATIONS}). */
 export function isNavProp(prop: SemanticNode): boolean {

@@ -427,7 +427,8 @@ function nestedToObjects(
 
 /**
  * Checks if any payload contains navigational data that would be silently
- * dropped because maxDepth is 0.
+ * dropped because maxDepth is 0. A `@db.rel.store` navigation is skipped:
+ * the validator refuses any value in it.
  */
 export function checkDepthOverflow(
   payloads: Array<Record<string, unknown>>,
@@ -439,6 +440,7 @@ export function checkDepthOverflow(
   }
   for (const payload of payloads) {
     for (const navField of meta.navFields) {
+      if (meta.relations.get(navField)?.direction === "store") continue;
       if (payload[navField] !== undefined) {
         throw new Error(
           `Nested data in '${navField}' exceeds maxDepth (${maxDepth}). ` +

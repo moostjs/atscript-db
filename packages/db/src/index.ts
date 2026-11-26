@@ -282,6 +282,8 @@ export {
   REL_FILTER_MAX_NODES,
 } from "./query/relation-filter";
 export type {
+  ResolvedKeyRelationFilter,
+  ResolvedStoreRelationFilter,
   TRelationFilterTable,
   TRelationFilterJunction,
   TRelationStaticFilter,

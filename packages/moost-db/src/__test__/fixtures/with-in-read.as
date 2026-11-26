@@ -28,3 +28,14 @@ export interface WmMember {
     @db.rel.to
     team?: WmTeam
 }
+
+@db.table 'wm_projects'
+export interface WmProject {
+    @meta.id
+    id: number
+
+    name: string
+
+    @db.rel.store
+    lead?: WmMember
+}

@@ -2881,7 +2881,7 @@ export class AtscriptDbTable<
   /**
    * Lazy — builds a `normalized-path → from-depth` map from `this._meta.flatMap`
    * on first use. Only paths reachable through an unbroken chain of `db.rel.from`
-   * nav fields from the root are included (chains crossing `to`/`via` are excluded).
+   * nav fields from the root are included (chains crossing `to`/`via`/`store` are excluded).
    */
   private _getFromDepthMap(): ReadonlyMap<string, number> {
     if (!this._fromDepthMap) {
@@ -2897,7 +2897,7 @@ export class AtscriptDbTable<
           prefix = prefix ? `${prefix}.${segments[i]}` : segments[i]!;
           const pdef = this._meta.flatMap.get(prefix);
           const pmd = pdef?.metadata;
-          if (pmd?.has("db.rel.to") || pmd?.has("db.rel.via")) {
+          if (pmd?.has("db.rel.to") || pmd?.has("db.rel.via") || pmd?.has("db.rel.store")) {
             valid = false;
             break;
           }

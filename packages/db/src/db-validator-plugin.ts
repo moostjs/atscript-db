@@ -12,6 +12,8 @@ import type {
   TValidatorPluginContext,
 } from "@atscript/typescript/utils";
 
+import { NAV_PROP_ANNOTATIONS } from "@atscript/core/nav";
+
 import { DepthLimitExceededError } from "./db-error";
 import { DB_VALIDATOR_MESSAGES, type TDbValidatorErrorCode } from "./db-validator-messages";
 import { getDbFieldOp } from "./ops";
@@ -29,7 +31,7 @@ export interface DbValidationContext {
    * `@meta.id` is accepted in `replace` mode.
    */
   keyless?: boolean;
-  /** Precomputed nav field names — used to skip field-op validation inside TO/FROM/VIA relations. */
+  /** Precomputed nav field names — used to skip field-op validation inside TO/FROM/VIA/STORE relations. */
   navFields?: ReadonlySet<string>;
   /**
    * Depth-limit enforcement bundle. Set only on the root write call; nested
@@ -230,12 +232,17 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
     }
 
     // ── Nav field handling ──────────────────────────────────────────────────
-    const isTo = def.metadata.has("db.rel.to");
-    const isFrom = def.metadata.has("db.rel.from");
-    const isVia = def.metadata.has("db.rel.via");
-
-    if (isTo || isFrom || isVia) {
-      return handleNavField(ctx, def, value, dbCtx, isTo, isFrom, isVia);
+    if (NAV_PROP_ANNOTATIONS.some((key) => def.metadata.has(key))) {
+      // A store navigation is read by the store and never written: the one
+      // refusal every write path, `validateRows`, db-client and forms share.
+      if (def.metadata.has("db.rel.store")) {
+        if (value === undefined) return true;
+        const dot = ctx.path.lastIndexOf(".");
+        return fail(ctx, "NAV_STORE_WRITE", { field: ctx.path.slice(dot + 1) });
+      }
+      const isTo = def.metadata.has("db.rel.to");
+      const isFrom = def.metadata.has("db.rel.from");
+      return handleNavField(ctx, def, value, dbCtx, isTo, isFrom, !isTo && !isFrom);
     }
 
     // ── Insert/Replace: accept undefined for auto-generated/defaulted fields ─

@@ -38,6 +38,8 @@ function collectFilter(filter: unknown, out: Set<string>): boolean {
     if (value && typeof value === "object" && !Array.isArray(value)) {
       for (const operand of Object.values(value as Record<string, unknown>)) {
         if (isResolvedRelationFilter(operand)) {
+          // (a store relation is correlated by the store: no source columns)
+          if (operand.kind === "store") continue;
           for (const pair of operand.pairs) out.add(pair.source);
           for (const pair of operand.junction?.toSource ?? []) out.add(pair.source);
         } else if (operand && typeof operand === "object" && "$field" in operand) {

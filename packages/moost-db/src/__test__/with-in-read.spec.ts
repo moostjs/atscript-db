@@ -13,7 +13,8 @@ import { bootHttp, prepareFixtures, type THttpSend } from "./test-utils";
  * controller: what a `validateControls` override conjoins into a `$with`
  * entry (a row scope, a narrower `$select`) reaches the entry the adapter
  * receives; `/meta` offers `relations[].filterable` only when the adapter
- * renders relational predicates.
+ * renders relational predicates, and serves a `@db.rel.store` navigation
+ * with `direction: "store"`.
  */
 
 /** Records each read's `$with` entries; answers every relation empty. */
@@ -50,16 +51,19 @@ let send: THttpSend;
 let SEQ = 0;
 let scoped = "";
 let plain = "";
+let projects = "";
 
 beforeAll(async () => {
   await prepareFixtures();
-  const { WmTeam } = await import("./fixtures/with-in-read.as");
+  const { WmTeam, WmProject } = await import("./fixtures/with-in-read.as");
   getMoostInfact()._cleanup();
   const teams = new DbSpace(() => new InReadMemoryAdapter()).getTable(WmTeam);
   await teams.insertOne({ id: 1, name: "Core" });
   const other = new DbSpace(() => new NoPredicatesMemoryAdapter()).getTable(WmTeam);
+  const projectTable = new DbSpace(() => new InReadMemoryAdapter()).getTable(WmProject);
   scoped = `wm${++SEQ}`;
   plain = `wm${++SEQ}`;
+  projects = `wm${++SEQ}`;
 
   @TableController(teams, scoped)
   @Inherit()
@@ -82,7 +86,11 @@ beforeAll(async () => {
   @Inherit()
   class PlainTeams extends AsDbController {}
 
-  send = await bootHttp(ScopedTeams, PlainTeams);
+  @TableController(projectTable, projects)
+  @Inherit()
+  class Projects extends AsDbController {}
+
+  send = await bootHttp(ScopedTeams, PlainTeams, Projects);
 });
 
 describe("an in-read adapter behind a controller", () => {
@@ -115,5 +123,20 @@ describe("/meta relations[].filterable", () => {
   it("is left out when it does not (supportsRelationFilters('read') false)", async () => {
     const { relations } = (await send("GET", `/${plain}/meta`)).body;
     expect(relations).toEqual([{ name: "members", direction: "from", isArray: true }]);
+  });
+});
+
+describe("@db.rel.store over HTTP", () => {
+  it("/meta lists it with direction 'store'", async () => {
+    const { relations } = (await send("GET", `/${projects}/meta`)).body;
+    expect(relations).toEqual([{ name: "lead", direction: "store", isArray: false }]);
+  });
+
+  it("a write with a value in it answers 400 NAV_STORE_WRITE", async () => {
+    const res = await send("POST", `/${projects}`, { id: 1, name: "P", lead: null });
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual([
+      expect.objectContaining({ path: "lead", code: "NAV_STORE_WRITE" }),
+    ]);
   });
 });

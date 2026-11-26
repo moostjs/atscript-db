@@ -21,6 +21,7 @@ export { SERVER_STAMPED_ON_UPDATE_KEYS, isServerStampedOnUpdate } from "./shared
 // Where a patch may send a partial object (`@db.patch.strategy "merge"`), since 0.1.184
 export { mergeStrategyPaths } from "./shared/merge-paths";
 
+import { NAV_PROP_ANNOTATIONS } from "@atscript/core/nav";
 import {
   flattenAnnotatedType,
   type TAtscriptAnnotatedType,
@@ -110,7 +111,7 @@ export function buildPatchPartial(
   };
 }
 
-/** Collects top-level nav-relation (TO/FROM/VIA) prop names from an object type. */
+/** Collects top-level nav-relation (TO/FROM/VIA/STORE) prop names from an object type. */
 function collectNavRoots(type: TAtscriptAnnotatedType): ReadonlySet<string> {
   const roots = new Set<string>();
   if (type.type.kind === "object") {
@@ -123,14 +124,12 @@ function collectNavRoots(type: TAtscriptAnnotatedType): ReadonlySet<string> {
 
 // ── Shared validator option helpers ─────────────────────────────────────────
 
-/** Returns true if the annotated type is a navigation relation (TO/FROM/VIA). */
+/**
+ * Returns true if the annotated type is a navigation relation (TO / FROM /
+ * VIA / STORE — `NAV_PROP_ANNOTATIONS` of `@atscript/core/nav`).
+ */
 export function isNavRelation(type: TAtscriptAnnotatedType): boolean {
-  return (
-    !!type.metadata &&
-    (type.metadata.has("db.rel.to") ||
-      type.metadata.has("db.rel.from") ||
-      type.metadata.has("db.rel.via"))
-  );
+  return !!type.metadata && NAV_PROP_ANNOTATIONS.some((key) => type.metadata.has(key));
 }
 
 /**
@@ -149,7 +148,7 @@ export function forceNavNonOptional(type: TAtscriptAnnotatedType): TAtscriptAnno
 export interface ValidationContext {
   /** Flat map of dotted field paths → annotated types (same shape the server builds). */
   flatMap: Map<string, TAtscriptAnnotatedType>;
-  /** Set of field paths that are navigation relations (TO/FROM/VIA). */
+  /** Set of field paths that are navigation relations (TO/FROM/VIA/STORE). */
   navFields: ReadonlySet<string>;
 }
 
@@ -169,7 +168,7 @@ export function buildValidationContext(
   const flatMap = flattenAnnotatedType(type, {
     topLevelArrayTag: "db.__topLevelArray",
     onField: (path, _type, metadata) => {
-      if (metadata.has("db.rel.to") || metadata.has("db.rel.from") || metadata.has("db.rel.via")) {
+      if (NAV_PROP_ANNOTATIONS.some((key) => metadata.has(key))) {
         navFields.add(path);
       }
     },

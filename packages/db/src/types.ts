@@ -232,7 +232,8 @@ export interface TSearchIndexInfo {
 /** Relation summary in a meta response. */
 export interface TRelationInfo {
   name: string;
-  direction: "to" | "from" | "via";
+  /** See `TDbRelation.direction` (`"store"` since 0.1.196). */
+  direction: "to" | "from" | "via" | "store";
   isArray: boolean;
   /**
    * Present (true) when the relation is `@db.rel.filterable`: clients may
@@ -1428,8 +1429,12 @@ export type TFkLookupResolver = (tableName: string) => TFkLookupTarget | undefin
 // ── Relation Types ───────────────────────────────────────────────────────
 
 export interface TDbRelation {
-  /** Direction: 'to' (FK is local), 'from' (FK is remote), or 'via' (M:N junction). */
-  direction: "to" | "from" | "via";
+  /**
+   * Direction: 'to' (FK is local), 'from' (FK is remote), 'via' (M:N
+   * junction), or 'store' (since 0.1.196, `@db.rel.store`): no foreign key —
+   * the store correlates the rows; `isArray` is the cardinality.
+   */
+  direction: "to" | "from" | "via" | "store";
   /** The alias used for pairing (if any). */
   alias?: string;
   /** Target type's annotated type reference. */

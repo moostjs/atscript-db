@@ -6,6 +6,8 @@ import {
   type TMetadataMap,
 } from "@atscript/typescript/utils";
 
+import { NAV_PROP_ANNOTATIONS } from "@atscript/core/nav";
+
 import type { BaseDbAdapter } from "../base-adapter";
 import type { TRelationFilterHost } from "../query/relation-filter";
 import type { TGenericLogger } from "../logger";
@@ -104,9 +106,9 @@ export function relationalColumnName(
   return flattened ? path.replace(/\./g, "__") : path;
 }
 
-/** Returns true if `metadata` indicates a navigation relation field. */
+/** Returns true if `metadata` indicates a navigation relation field (`NAV_PROP_ANNOTATIONS`). */
 export function isNavRelation(metadata: TMetadataMap<AtscriptMetadata>): boolean {
-  return metadata.has("db.rel.to") || metadata.has("db.rel.from") || metadata.has("db.rel.via");
+  return NAV_PROP_ANNOTATIONS.some((key) => metadata.has(key));
 }
 
 /**
@@ -869,7 +871,7 @@ export class TableMetadata {
       this.ignoredFields.add(fieldName);
     }
 
-    // @db.rel.to / @db.rel.from / @db.rel.via → navigational field, not a stored column
+    // @db.rel.to / .from / .via / .store → navigational field, not a stored column
     if (isNavRelation(metadata)) {
       this.navFields.add(fieldName);
       this.ignoredFields.add(fieldName);
@@ -878,9 +880,10 @@ export class TableMetadata {
         ? ("to" as const)
         : metadata.has("db.rel.from")
           ? ("from" as const)
-          : ("via" as const);
-      const raw =
-        direction === "via" ? metadata.get("db.rel.via") : metadata.get(`db.rel.${direction}`);
+          : metadata.has("db.rel.via")
+            ? ("via" as const)
+            : ("store" as const);
+      const raw = direction === "store" ? undefined : metadata.get(`db.rel.${direction}`);
       const alias = (raw === true || typeof raw === "function" ? undefined : raw) as
         | string
         | undefined;

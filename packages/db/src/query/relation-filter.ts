@@ -65,54 +65,106 @@ export interface TRelationFilterJunction extends TRelationFilterTable {
  */
 const RESOLVED_BRAND = Symbol.for("@atscript/db:ResolvedRelationFilter");
 
+/** What every {@link ResolvedRelationFilter} carries. */
+interface TResolvedRelationFilterBase {
+  /** @internal cross-realm brand (see {@link isResolvedRelationFilter}). */
+  readonly [RESOLVED_BRAND]: true;
+  /** Logical navigation field name on the source table. */
+  readonly nav: string;
+  readonly source: TRelationFilterTable;
+  readonly target: TRelationFilterTable;
+  readonly filter: FilterExpr;
+}
+
+/** A predicate on a `to` / `from` / `via` relation: correlated by foreign keys. */
+export interface ResolvedKeyRelationFilter extends TResolvedRelationFilterBase {
+  readonly kind: "to" | "from" | "via";
+  readonly pairs: ReadonlyArray<{ source: string; target: string }>;
+  readonly junction?: TRelationFilterJunction;
+}
+
+/**
+ * A predicate on a `@db.rel.store` relation (since 0.1.196): no foreign key
+ * — the store correlates the rows by the navigation `nav`; no `pairs`.
+ */
+export interface ResolvedStoreRelationFilter extends TResolvedRelationFilterBase {
+  readonly kind: "store";
+  readonly junction?: undefined;
+}
+
 /**
  * A relational predicate as adapters receive it — the operand of
  * `FilterVisitor.relation(field, op, operand)` once the core translated the
- * filter. Every name is physical:
+ * filter. A union on `kind`; every name is physical:
  *
  * - `to` / `from`: `pairs` correlate a SOURCE column with a TARGET column
  *   (`target.<pair.target> = source.<pair.source>`, one pair per composite
  *   key part);
  * - `via`: `pairs` is empty — `junction.toSource` correlates the junction
- *   with the source row, `junction.toTarget` with the target row.
+ *   with the source row, `junction.toTarget` with the target row;
+ * - `store` (since 0.1.196): no `pairs` — the store correlates by `nav`.
  *
  * `filter` is the inner filter on the TARGET (already translated by the
  * target's field mapper: renames, flattening, value formatters; nested
  * predicates resolved the same way), conjoined with the target part of the
  * relation's `@db.rel.filter`. `{}` matches every related row.
  *
+ * `new ResolvedRelationFilter(init)` builds one; `instanceof` works too.
+ *
  * @since 0.1.147
  */
-export class ResolvedRelationFilter {
-  /** @internal cross-realm brand (see {@link isResolvedRelationFilter}). */
+export type ResolvedRelationFilter = ResolvedKeyRelationFilter | ResolvedStoreRelationFilter;
+
+class ResolvedRelationFilterNode {
   readonly [RESOLVED_BRAND] = true as const;
-  readonly kind: "to" | "from" | "via";
-  /** Logical navigation field name on the source table. */
+  readonly kind: ResolvedRelationFilter["kind"];
   readonly nav: string;
   readonly source: TRelationFilterTable;
   readonly target: TRelationFilterTable;
-  readonly pairs: ReadonlyArray<{ source: string; target: string }>;
-  readonly junction?: TRelationFilterJunction;
+  // (no `pairs` / `junction` property at all on a `store` node)
+  declare readonly pairs?: ReadonlyArray<{ source: string; target: string }>;
+  declare readonly junction?: TRelationFilterJunction;
   readonly filter: FilterExpr;
 
-  constructor(init: {
-    kind: "to" | "from" | "via";
-    nav: string;
-    source: TRelationFilterTable;
-    target: TRelationFilterTable;
-    pairs: Array<{ source: string; target: string }>;
-    junction?: TRelationFilterJunction;
-    filter: FilterExpr;
-  }) {
+  constructor(init: TResolvedRelationFilterInit) {
     this.kind = init.kind;
     this.nav = init.nav;
     this.source = init.source;
     this.target = init.target;
-    this.pairs = init.pairs;
-    this.junction = init.junction;
+    if (init.kind !== "store") {
+      this.pairs = init.pairs;
+      this.junction = init.junction;
+    }
     this.filter = init.filter;
   }
 }
+
+type TResolvedRelationFilterInit =
+  | {
+      kind: "to" | "from" | "via";
+      nav: string;
+      source: TRelationFilterTable;
+      target: TRelationFilterTable;
+      pairs: Array<{ source: string; target: string }>;
+      junction?: TRelationFilterJunction;
+      filter: FilterExpr;
+    }
+  | {
+      kind: "store";
+      nav: string;
+      source: TRelationFilterTable;
+      target: TRelationFilterTable;
+      filter: FilterExpr;
+    };
+
+/** Builds a {@link ResolvedRelationFilter} (`kind` decides its member). */
+export const ResolvedRelationFilter = ResolvedRelationFilterNode as unknown as {
+  new (init: Extract<TResolvedRelationFilterInit, { kind: "store" }>): ResolvedStoreRelationFilter;
+  new (
+    init: Extract<TResolvedRelationFilterInit, { kind: "to" | "from" | "via" }>,
+  ): ResolvedKeyRelationFilter;
+  readonly prototype: ResolvedRelationFilter;
+};
 
 /** `true` for a {@link ResolvedRelationFilter} (the resolved operand of a predicate). */
 export function isResolvedRelationFilter(value: unknown): value is ResolvedRelationFilter {
@@ -353,7 +405,7 @@ function collectSides(
 
 /** Logical pairing of one relation, resolved once per navigation field. */
 interface TRelationPlan {
-  kind: "to" | "from" | "via";
+  kind: TDbRelation["direction"];
   relation: TDbRelation;
   target: TRelationFilterOwner;
   /** to / from: source field ↔ target field (logical). */
@@ -420,7 +472,10 @@ export function createRelationFilterHost(
     }
     sameAdapter(target, path, "related");
     let plan: TRelationPlan;
-    if (relation.direction === "to") {
+    if (relation.direction === "store") {
+      // correlated by the store itself (an adapter that reads relations in-read)
+      plan = { kind: "store", relation, target, pairs: [] };
+    } else if (relation.direction === "to") {
       const fk = findFKEntryForRelation(relation, meta.foreignKeys);
       if (!fk) throw invalidQuery(path, `Relation "${nav}" has no foreign key to filter by`);
       plan = {
@@ -537,6 +592,15 @@ export function createRelationFilterHost(
             ? { filter: plan.junction.owner._resolveRelationOperand(statics.junction, depth) }
             : {}),
         };
+      }
+      if (plan.kind === "store") {
+        return new ResolvedRelationFilter({
+          kind: "store",
+          nav,
+          source: tableOf(owner),
+          target: tableOf(plan.target),
+          filter,
+        });
       }
       return new ResolvedRelationFilter({
         kind: plan.kind,

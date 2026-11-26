@@ -303,8 +303,17 @@ export function relationCapabilityProblem(
   adapter: BaseDbAdapter,
   tableName: string,
 ): string | undefined {
-  if (!adapter.supportsWithInRead() || meta.relations.size === 0) return undefined;
+  if (meta.relations.size === 0) return undefined;
   const name = adapter.constructor.name;
+  if (!adapter.supportsWithInRead()) {
+    // `@db.rel.store`: only an adapter that reads relations in-read can hold it
+    for (const [nav, relation] of meta.relations) {
+      if (relation.direction === "store") {
+        return `Relation "${nav}" of "${tableName}" has no foreign key; the ${name} adapter does not read relations in-read`;
+      }
+    }
+    return undefined;
+  }
   if (adapter.supportsNativeRelations()) {
     return `Table "${tableName}": the ${name} adapter declares both supportsNativeRelations() and supportsWithInRead() — relations are read one way`;
   }

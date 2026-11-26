@@ -32,6 +32,11 @@ export const DB_VALIDATOR_MESSAGES = Object.freeze({
   FIELD_OP_NOT_FINITE: "Field operation operand must be a finite number, got {operand}",
   /** A navigation property set to `null`. */
   NAV_NULL: "Cannot process null navigation property '{field}'",
+  /**
+   * A value (`null` included) in a `@db.rel.store` navigation, which the
+   * store reads and nothing writes (since 0.1.196).
+   */
+  NAV_STORE_WRITE: "Navigation property '{field}' is read from the store and cannot be written",
   /** A 1:N / M:N relation patched with a plain value. `{ relation }`: `1:N` / `M:N`. */
   NAV_PATCH_PLAIN_VALUE:
     "Cannot patch {relation} relation '{field}' with a plain value — use patch operators ({ $insert, $remove, $replace, $update, $upsert })",

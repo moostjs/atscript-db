@@ -112,7 +112,10 @@ export async function loadPlannedRelations(
         junctionFilter: entry.junctionFilter,
       },
     };
-    if (entry.kind === "to") {
+    if (entry.kind === "store") {
+      // refused at table build: only an in-read adapter holds such a relation
+      throw new Error(`Relation "${entry.nav}" of "${host.tableName}" has no foreign key`);
+    } else if (entry.kind === "to") {
       tasks.push(loadToRelation(rows, opts, host));
     } else if (entry.kind === "via") {
       tasks.push(loadViaRelation(rows, opts, host));

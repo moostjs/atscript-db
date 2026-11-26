@@ -411,9 +411,17 @@ function keyPart(value: unknown): string | undefined {
 
 /** Source-side correlation columns of a resolved predicate (physical names). */
 function sourceColumns(node: ResolvedRelationFilter): string[] {
+  if (node.kind === "store") throw noJoinKeys(node);
   return node.junction
     ? node.junction.toSource.map((p) => p.source)
     : node.pairs.map((p) => p.source);
+}
+
+/** A `@db.rel.store` predicate — never built for this adapter (refused at table build). */
+function noJoinKeys(node: ResolvedRelationFilter): Error {
+  return new Error(
+    `Relational predicate on "${node.nav}": a @db.rel.store relation has no join keys`,
+  );
 }
 
 /**
@@ -513,6 +521,7 @@ async function correlationSet(
 ): Promise<Set<string>> {
   const targets = await matchingRows(node.target.adapter, node.filter, load, sets);
   const result = new Set<string>();
+  if (node.kind === "store") throw noJoinKeys(node);
   if (!node.junction) {
     const columns = node.pairs.map((p) => p.target);
     for (const row of targets) {

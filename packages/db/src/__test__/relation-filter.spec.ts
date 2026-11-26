@@ -12,6 +12,7 @@ import {
   REL_FILTER_MAX_DEPTH,
   REL_FILTER_MAX_NODES,
   ResolvedRelationFilter,
+  type ResolvedKeyRelationFilter,
   containsRelationFilter,
   forEachResolvedRelation,
   isResolvedRelationFilter,
@@ -105,7 +106,7 @@ describe("resolution (ResolvedRelationFilter)", () => {
     const db = space();
     const issues = db.getTable(fx.RfIssue);
     await issues.findMany({ filter: { ticket: { $some: { teamId: "t1", status: "open" } } } });
-    const node = lastFilter(issues).ticket.$some as ResolvedRelationFilter;
+    const node = lastFilter(issues).ticket.$some as ResolvedKeyRelationFilter;
     expect(node).toBeInstanceOf(ResolvedRelationFilter);
     expect(node.kind).toBe("to");
     expect(node.nav).toBe("ticket");
@@ -120,7 +121,7 @@ describe("resolution (ResolvedRelationFilter)", () => {
   it("from: correlates the source key with the remote FK column", async () => {
     const tickets = space().getTable(fx.RfTicket);
     await tickets.findMany({ filter: { issues: { $none: {} } } });
-    const node = lastFilter(tickets).issues.$none as ResolvedRelationFilter;
+    const node = lastFilter(tickets).issues.$none as ResolvedKeyRelationFilter;
     expect(node.kind).toBe("from");
     expect(node.pairs).toEqual([{ source: "key", target: "ticket_ref" }]);
     expect(node.filter).toEqual({});
@@ -129,7 +130,7 @@ describe("resolution (ResolvedRelationFilter)", () => {
   it("via: correlates through the junction on both sides", async () => {
     const tickets = space().getTable(fx.RfTicket);
     await tickets.findMany({ filter: { labels: { $some: { name: "bug" } } } });
-    const node = lastFilter(tickets).labels.$some as ResolvedRelationFilter;
+    const node = lastFilter(tickets).labels.$some as ResolvedKeyRelationFilter;
     expect(node.kind).toBe("via");
     expect(node.pairs).toEqual([]);
     expect(node.junction?.name).toBe("rf_ticket_labels");
@@ -142,7 +143,7 @@ describe("resolution (ResolvedRelationFilter)", () => {
   it("composite foreign keys yield one pair per key part", async () => {
     const cards = space().getTable(fx.RfCard);
     await cards.findMany({ filter: { board: { $some: { title: "x" } } } });
-    const node = lastFilter(cards).board.$some as ResolvedRelationFilter;
+    const node = lastFilter(cards).board.$some as ResolvedKeyRelationFilter;
     expect(node.pairs).toEqual([
       { source: "boardOrg", target: "org" },
       { source: "boardCode", target: "code" },
@@ -152,7 +153,7 @@ describe("resolution (ResolvedRelationFilter)", () => {
   it("self relation: target is the same table", async () => {
     const tickets = space().getTable(fx.RfTicket);
     await tickets.findMany({ filter: { parent: { $some: { status: "open" } } } });
-    const node = lastFilter(tickets).parent.$some as ResolvedRelationFilter;
+    const node = lastFilter(tickets).parent.$some as ResolvedKeyRelationFilter;
     expect(node.target.name).toBe("rf_tickets");
     expect(node.pairs).toEqual([{ source: "parentKey", target: "key" }]);
   });
@@ -165,8 +166,8 @@ describe("resolution (ResolvedRelationFilter)", () => {
       },
     });
     const filter = lastFilter(issues);
-    const outer = filter.$or[1].$not.ticket.$some as ResolvedRelationFilter;
-    const inner = (outer.filter as Record<string, any>).team.$none as ResolvedRelationFilter;
+    const outer = filter.$or[1].$not.ticket.$some as ResolvedKeyRelationFilter;
+    const inner = (outer.filter as Record<string, any>).team.$none as ResolvedKeyRelationFilter;
     expect(inner).toBeInstanceOf(ResolvedRelationFilter);
     expect(inner.source.name).toBe("rf_tickets");
     expect(inner.pairs).toEqual([{ source: "team_ref", target: "id" }]);
@@ -234,7 +235,7 @@ describe("@db.rel.filter is part of the relation", () => {
   it("from: the target condition is ANDed into the predicate operand", async () => {
     const teams = space().getTable(fx.RfTeam);
     await teams.findMany({ filter: { openTickets: { $some: {} } } });
-    const node = lastFilter(teams).openTickets.$some as ResolvedRelationFilter;
+    const node = lastFilter(teams).openTickets.$some as ResolvedKeyRelationFilter;
     expect(node.filter).toEqual({ status: { $eq: "open" } });
     expect(node.pairs).toEqual([{ source: "id", target: "team_ref" }]);
   });
@@ -242,7 +243,7 @@ describe("@db.rel.filter is part of the relation", () => {
   it("via: junction conditions go to the junction, target ones to the target", async () => {
     const tickets = space().getTable(fx.RfTicket);
     await tickets.findMany({ filter: { pinnedLabels: { $none: { id: 3 } } } });
-    const node = lastFilter(tickets).pinnedLabels.$none as ResolvedRelationFilter;
+    const node = lastFilter(tickets).pinnedLabels.$none as ResolvedKeyRelationFilter;
     expect(node.junction?.filter).toEqual({ pinned: { $eq: true } });
     expect(node.filter).toEqual({ $and: [{ label_name: { $ne: "hidden" } }, { id: 3 }] });
   });
