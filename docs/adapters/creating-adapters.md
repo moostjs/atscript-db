@@ -932,21 +932,22 @@ Override `getValidatorPlugins()` to return adapter-specific `TValidatorPlugin[]`
 
 Inside your adapter, `this._table` provides access to all computed metadata:
 
-| Property                           | Description                                              |
-| ---------------------------------- | -------------------------------------------------------- |
-| `this._table.tableName`            | Resolved table/collection name                           |
-| `this._table.schema`               | Database schema (if applicable)                          |
-| `this._table.flatMap`              | All fields after flattening (dot-notation paths)         |
-| `this._table.primaryKeys`          | Set of primary key field names                           |
-| `this._table.columnMap`            | Logical field name to physical column name mappings      |
-| `this._table.indexes`              | Computed index definitions from `@db.index` annotations  |
-| `this._table.foreignKeys`          | FK definitions from `@db.rel.FK` annotations             |
-| `this._table.defaults`             | Default value configurations from `@db.default`          |
-| `this._table.fieldDescriptors`     | Full field metadata (type, nullability, PK, storage)     |
-| `this._table.ignoredFields`        | Fields excluded from the database via `@db.ignore`       |
-| `this._table.uniqueProps`          | Single-field unique index properties                     |
-| `this._table.isView`               | Whether this readable is a view (vs a table)             |
-| `this._table.originalMetaIdFields` | Fields annotated with `@meta.id` (before column mapping) |
+| Property                           | Description                                                                                                                                    |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `this._table.tableName`            | Resolved table/collection name                                                                                                                 |
+| `this._table.schema`               | Database schema (if applicable)                                                                                                                |
+| `this._table.flatMap`              | All fields after flattening (dot-notation paths)                                                                                               |
+| `this._table.primaryKeys`          | Set of primary key field names                                                                                                                 |
+| `this._table.columnMap`            | Logical field name to physical column name mappings                                                                                            |
+| `this._table.indexes`              | Computed index definitions from `@db.index` annotations                                                                                        |
+| `this._table.foreignKeys`          | FK definitions from `@db.rel.FK` annotations                                                                                                   |
+| `this._table.defaults`             | Default value configurations from `@db.default`                                                                                                |
+| `this._table.fieldDescriptors`     | Full field metadata (type, nullability, PK, storage). It includes ignored entries, navigation fields and their parts among them (`fd.ignored`) |
+| `this._table.storedDescriptors`    | The stored fields: no ignored entry, no `@db.column.derived` field — read these for stored fields                                              |
+| `this._table.ignoredFields`        | Fields excluded from the database via `@db.ignore`                                                                                             |
+| `this._table.uniqueProps`          | Single-field unique index properties                                                                                                           |
+| `this._table.isView`               | Whether this readable is a view (vs a table)                                                                                                   |
+| `this._table.originalMetaIdFields` | Fields annotated with `@meta.id` (before column mapping)                                                                                       |
 
 The `resolveTableName()` method on the adapter itself returns the full table name, optionally including the schema prefix. Override it for databases that don't support schemas:
 

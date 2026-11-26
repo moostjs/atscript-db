@@ -86,9 +86,9 @@ this._table.relations;
 this._table.defaults;
 this._table.ignoredFields;
 this._table.isView;
-this._table.fieldDescriptors; // pre-built TDbFieldMeta[]
+this._table.fieldDescriptors; // pre-built TDbFieldMeta[] — includes ignored entries, navigation fields and their parts among them (fd.ignored)
 this._table.columnDescriptors; // what schema sync manages as columns (0.1.141)
-this._table.storedDescriptors; // columns holding their own value — insert / copy these, never generated ones (0.1.141)
+this._table.storedDescriptors; // columns holding their own value — read these for stored fields; insert / copy these, never generated ones (0.1.141)
 this._table.versionColumnPhysical; // STORED column of @db.column.version (undefined when none) — see § Versioned tables
 ```
 

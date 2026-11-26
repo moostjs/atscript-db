@@ -1234,7 +1234,9 @@ export class AtscriptDbReadable<
   }
 
   /**
-   * Pre-computed field metadata for adapter use.
+   * Pre-computed field metadata for adapter use. It includes ignored entries
+   * (`fd.ignored`), navigation fields and their parts among them; read
+   * {@link storedDescriptors} for stored fields.
    */
   public get fieldDescriptors(): readonly TDbFieldMeta[] {
     this._ensureBuilt();
