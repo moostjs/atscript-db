@@ -6,6 +6,12 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.196 {#v0-1-196}
+
+### Custom adapters
+
+- **The base class answers an unsupported vector search or grouped query with `NOT_SUPPORTED` (HTTP 400).** `BaseDbAdapter`'s defaults of `vectorSearch()`, `vectorSearchWithCount()` and `aggregate()` threw a plain `Error`, which moost-db answered 500; they throw `DbError("NOT_SUPPORTED")`, answered 400 with `code: "NOT_SUPPORTED"`. `NOT_SUPPORTED` is a new `DbErrorCode`: the adapter cannot perform what was asked and no more specific code applies; the message names the capability. Throw it for your adapter's own refusals of that kind. **Affected:** an adapter that does not override one of these methods — such a request answers 400 instead of 500. See [Capability Flags](/adapters/creating-adapters#capability-flags).
+
 ## 0.1.195 {#v0-1-195}
 
 ### Fixes

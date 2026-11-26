@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vite-plus/test";
 
-import { DbError, aggregateFailure, isConflict, uniqueKeyTuple } from "../index";
+import { BaseDbAdapter, DbError, aggregateFailure, isConflict, uniqueKeyTuple } from "../index";
 import { findRowsByKeys, keyString, rowMatchesKey } from "../shared/keys";
 
 describe("uniqueKeyTuple", () => {
@@ -45,6 +45,25 @@ describe("isConflict / aggregateFailure", () => {
     expect(err).toBeInstanceOf(AggregateError);
     expect(err.message).toBe("close failed: a; b");
     expect(err.errors).toHaveLength(2);
+  });
+});
+
+describe("NOT_SUPPORTED", () => {
+  it("the base class's vector search and aggregation defaults throw NOT_SUPPORTED", async () => {
+    const base = BaseDbAdapter.prototype;
+    for (const [call, message] of [
+      [() => base.vectorSearch([1, 0], {} as any), "Vector search not supported by this adapter"],
+      [
+        () => base.vectorSearchWithCount([1, 0], {} as any),
+        "Vector search not supported by this adapter",
+      ],
+      [() => base.aggregate({} as any), "Aggregation not supported by this adapter"],
+    ] as const) {
+      const error = await call().catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(DbError);
+      expect(error).toMatchObject({ code: "NOT_SUPPORTED", errors: [{ path: "", message }] });
+      expect((error as DbError).errors[0]).not.toHaveProperty("params");
+    }
   });
 });
 

@@ -33,6 +33,12 @@ beforeAll(async () => {
   @TableController(items, prefix)
   @Inherit()
   class Items extends AsDbController {
+    /** A vector search on an adapter without one: the base class's `NOT_SUPPORTED`. */
+    @Get("vector")
+    vector() {
+      return this.readable.vectorSearch([1, 0]);
+    }
+
     /** A nested `join: 'same'` call inside a transaction opened without a level. */
     @Get("nested-tx")
     nestedTx() {
@@ -113,6 +119,12 @@ describe("coded error envelopes", () => {
       const res = await send("GET", `/${prefix}/query${qs}`);
       expectCoded(res, 400, "INVALID_QUERY", undefined);
     }
+  });
+
+  it("NOT_SUPPORTED (no params) — what the adapter cannot perform, the capability in the message", async () => {
+    const res = await send("GET", `/${prefix}/vector`);
+    expectCoded(res, 400, "NOT_SUPPORTED", undefined, "");
+    expect(res.body.message).toBe("Vector search not supported by this adapter");
   });
 
   it("EXPECTED_OBJECT", async () => {

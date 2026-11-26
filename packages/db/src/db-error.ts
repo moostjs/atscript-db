@@ -66,6 +66,14 @@ export type DbErrorCode =
   // ── Conflict-ignoring insert ──
   /** The adapter does not implement `insertManyIgnore` (moost-db: 400). @since 0.1.148 */
   | "ON_CONFLICT_NOT_SUPPORTED"
+  // ── Generic capability gap ──
+  /**
+   * The adapter cannot perform what was asked, and no more specific code
+   * exists (the `*_NOT_SUPPORTED` codes above win). The message names the
+   * capability; the error has no `params`. Every such refusal is one the
+   * request can avoid (moost-db: 400). @since 0.1.196
+   */
+  | "NOT_SUPPORTED"
   // ── SQLite transaction gate (waiter timed out; moost-db maps it to 503) ──
   | "TX_WAIT_TIMEOUT"
   // ── Row-lock contention (retryable; moost-db maps both to 503) ──
@@ -373,4 +381,13 @@ export function aggregateExpressionsNotSupported(): DbError {
   return new DbError("AGG_EXPR_NOT_SUPPORTED", [
     { path: "$select", message: "Aggregate expressions are not supported by this adapter" },
   ]);
+}
+
+/**
+ * The adapter cannot perform what was asked (`NOT_SUPPORTED`; moost-db: 400)
+ * — for refusals without a more specific code. `message` names the
+ * capability. @internal @since 0.1.196
+ */
+export function notSupported(message: string, path = ""): DbError {
+  return new DbError("NOT_SUPPORTED", [{ path, message }]);
 }

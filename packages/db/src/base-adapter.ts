@@ -8,7 +8,7 @@ import type {
 
 import { type AggregateFn, BUCKET_UNITS, type BucketUnit, type FilterExpr } from "@uniqu/core";
 
-import { DbError, invalidQuery } from "./db-error";
+import { DbError, invalidQuery, notSupported } from "./db-error";
 import { BASE_AGGREGATE_FNS } from "./query/aggregate-fns";
 import { compositeKey, slicePerGroup } from "./rel/relation-helpers";
 import { fkColumns, fkKey } from "./schema/fk-diff";
@@ -1502,7 +1502,9 @@ export abstract class BaseDbAdapter {
    * `1 / (1 + distance)`, `dotProduct` `(1 + dot) / 2`). Return a row only
    * when its `$score` reaches the threshold (`$threshold`, else
    * `@db.search.vector.threshold`), never a row without a stored vector, and
-   * keep `$score` under any `$select`.
+   * keep `$score` under any `$select`. Default (and
+   * {@link vectorSearchWithCount}'s) throws a `NOT_SUPPORTED` `DbError`
+   * (since 0.1.196; a plain `Error` before).
    *
    * @param vector - Pre-computed embedding vector.
    * @param query - Filter, sort, limit, etc.
@@ -1513,7 +1515,7 @@ export abstract class BaseDbAdapter {
     _query: DbQuery,
     _indexName?: string,
   ): Promise<Array<Record<string, unknown>>> {
-    throw new Error("Vector search not supported by this adapter");
+    throw notSupported("Vector search not supported by this adapter");
   }
 
   /**
@@ -1529,7 +1531,7 @@ export abstract class BaseDbAdapter {
     _query: DbQuery,
     _indexName?: string,
   ): Promise<{ data: Array<Record<string, unknown>>; count: number }> {
-    throw new Error("Vector search not supported by this adapter");
+    throw notSupported("Vector search not supported by this adapter");
   }
 
   // ── Geo Search ────────────────────────────────────────────────────────
@@ -1645,10 +1647,11 @@ export abstract class BaseDbAdapter {
 
   /**
    * Executes an aggregate query (GROUP BY + aggregate functions).
-   * Default throws — override in adapters that support aggregation.
+   * Default throws a `NOT_SUPPORTED` `DbError` (since 0.1.196; a plain
+   * `Error` before) — override in adapters that support aggregation.
    */
   async aggregate(_query: DbQuery): Promise<Array<Record<string, unknown>>> {
-    throw new Error("Aggregation not supported by this adapter");
+    throw notSupported("Aggregation not supported by this adapter");
   }
 
   // ── Abstract CRUD — adapters must implement ───────────────────────────────

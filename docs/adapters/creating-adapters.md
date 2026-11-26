@@ -148,6 +148,8 @@ Data passed to insert/update/replace methods is **already processed** by the tab
 
 Override these methods to declare what your database supports. All return `false` by default. The generic DB layer reads these flags and adapts its behavior automatically.
 
+When a request asks for something your engine cannot do and neither a flag nor a more specific code covers it, throw `new DbError("NOT_SUPPORTED", [{ path, message }])` (since 0.1.196) with a message naming the capability; moost-db answers it 400. The specific codes (`AGG_FN_NOT_SUPPORTED`, `REL_FILTER_NOT_SUPPORTED`, `GEO_NOT_SUPPORTED`, …) stay the answer where they apply. A plain `Error` is a server fault (500).
+
 ### `supportsNativePatch()`
 
 Return `true` if your database handles array patch operators natively (e.g., MongoDB's `$push`, `$pull`). When `false`, the table layer decomposes patch operations into read-modify-write cycles using standard `updateOne`.
@@ -733,7 +735,7 @@ private fkSync(dryRun: boolean) {
 aggregate(query: DbQuery): Promise<Array<Record<string, unknown>>>
 ```
 
-Override to support [grouped queries](/api/aggregation); the default throws. The table validates the query, maps logical names to physical ones, and hands you a `DbQuery` whose `controls.$groupBy` is a `string[]` and whose `controls.$select` is a `UniquSelect`: `asArray` lists the plain grouped fields, `aggregates` the `{ $fn, $field, $as? }` entries, `buckets` the calendar buckets. Since 0.1.132 `UniquSelect` rejects any other `$select` entry when it is constructed (`INVALID_QUERY`, `Unsupported $select entry at index i`), so your translator only ever sees those three kinds.
+Override to support [grouped queries](/api/aggregation); the default throws `DbError("NOT_SUPPORTED")` (HTTP 400; a plain `Error`, HTTP 500, before 0.1.196). The table validates the query, maps logical names to physical ones, and hands you a `DbQuery` whose `controls.$groupBy` is a `string[]` and whose `controls.$select` is a `UniquSelect`: `asArray` lists the plain grouped fields, `aggregates` the `{ $fn, $field, $as? }` entries, `buckets` the calendar buckets. Since 0.1.132 `UniquSelect` rejects any other `$select` entry when it is constructed (`INVALID_QUERY`, `Unsupported $select entry at index i`), so your translator only ever sees those three kinds.
 
 Return one row per group, with physical names for grouped fields and each computed entry under its output key — `resolveAlias(expr)` from `@atscript/db/agg` (`$as`, else `{fn}_{field}`; `count(*)` → `count_star` since 0.1.132, `count_*` before). The table reverse-maps the rows. Match the portable semantics: `null` and missing values form one group, `count(field)` counts non-null values, `sum` / `avg` ignore nulls. `$count: true` returns `[{ count: N }]`, the number of groups that survive `$having`. SQL adapters get all of this from `buildAggregateSelect` / `buildAggregateCount` in `@atscript/db-sql-tools`. Before rendering a `$fn`, re-assert it with `assertAggregateFn(fn)` from `@atscript/db/agg` (since 0.1.135).
 
@@ -868,6 +870,8 @@ Since 0.1.183 each returned row carries a `$score` field (as each geo search row
 #### `vectorSearchWithCount(vector, query, indexName?)`
 
 Same as `vectorSearch()` but also returns the total count. Returns `{ data, count }`; the `data` rows carry `$score` as above.
+
+Without an override, both throw `DbError("NOT_SUPPORTED")` (HTTP 400; a plain `Error`, HTTP 500, before 0.1.196).
 
 ### Geo Search
 

@@ -50,6 +50,9 @@ import type { TCapabilityVerdict } from "./meta/field-capabilities";
  *   server's code, not of the request (since 0.1.179; 400 `INVALID_QUERY`
  *   before). `open` is `null` when there is no level to compare, so the
  *   template names `{requested}` only;
+ * - `NOT_SUPPORTED` — the core's code for what the adapter cannot perform
+ *   when no more specific code exists (since 0.1.196); the English message
+ *   names the capability, no `params`;
  * - `INVALID_QUERY` — every other malformed request (bad query string,
  *   unsupported control or combination, unknown search index, …). Also the
  *   top-level code of the core's query errors, whose entries carry the
@@ -73,6 +76,7 @@ export const MOOST_DB_MESSAGES = {
   ACTION_FORBIDDEN: 'Action "{action}" is not allowed',
   ISOLATION_MISMATCH:
     'The open transaction does not satisfy isolation "{requested}" — set the level on the outermost call',
+  NOT_SUPPORTED: "Not supported by this data source",
   INVALID_QUERY: "Invalid query",
 } as const;
 

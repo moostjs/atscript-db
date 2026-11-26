@@ -36,6 +36,13 @@ describe("DbError HTTP envelope", () => {
     expect((reply.body as any).errors[0]).not.toHaveProperty("details");
   });
 
+  it("NOT_SUPPORTED answers 400, its entry coded like the envelope (since 0.1.196)", () => {
+    const message = "Vector search not supported by this adapter";
+    const reply = httpReplyFor(new DbError("NOT_SUPPORTED", [{ path: "", message }]));
+    expect(reply.body).toMatchObject({ statusCode: 400, code: "NOT_SUPPORTED", message });
+    expect((reply.body as any).errors).toEqual([{ path: "", message, code: "NOT_SUPPORTED" }]);
+  });
+
   it("entries without a code stay { path, message }", () => {
     const reply = httpReplyFor(new DbError("NOT_FOUND", [{ path: "id", message: "Not found" }]));
     expect((reply.body as any).errors).toEqual([{ path: "id", message: "Not found" }]);

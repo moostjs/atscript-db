@@ -695,6 +695,7 @@ Database operations throw `DbError` with a `code` property indicating the error 
 | `AGG_EXPR_NOT_SUPPORTED`  | A [grouped query](/api/aggregation#arithmetic-expressions) uses an arithmetic entry and the adapter's `supportsAggregateExpressions()` is false (a custom adapter). HTTP 400. Since 0.1.148                                    |
 | `LOCK_NOT_SUPPORTED`      | A [locking read](/api/transactions#locking-reads) on an adapter that cannot lock rows (MongoDB). HTTP 501. Since 0.1.162                                                                                                       |
 | `ISOLATION_NOT_SUPPORTED` | `withTransaction(fn, { isolation })` asked for a level the adapter cannot provide (MongoDB `serializable`, or any level on a standalone MongoDB). HTTP 501. Since 0.1.162 — see [Isolation level](/api/transactions#isolation) |
+| `NOT_SUPPORTED`           | The adapter cannot perform what was asked and no more specific code applies — e.g. `vectorSearch()` or a grouped query on an adapter that implements neither. The message names the capability. HTTP 400. Since 0.1.196        |
 
 Handle errors by checking the code:
 
