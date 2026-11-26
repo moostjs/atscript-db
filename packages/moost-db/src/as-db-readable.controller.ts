@@ -32,6 +32,7 @@ import {
   searchIndexNotFoundMessage,
   searchMemberKind,
   selfOrAncestor,
+  unlistedFilterOp,
   unsupportedOperatorMessage,
   vectorIndexNotFoundMessage,
 } from "@atscript/db";
@@ -2734,9 +2735,9 @@ export class AsDbReadableController<
 
   /**
    * `@db.column.searchable` paths, minus anything the adapter can't filter
-   * (JSON storage, encrypted), `@db.writeOnly` fields and navigation
-   * descendants — physical capability only (manual-mode policy does not
-   * apply to `$search`).
+   * (JSON storage, encrypted, a `filterOps(fd)` list without `$regex`),
+   * `@db.writeOnly` fields and navigation descendants — physical capability
+   * only (manual-mode policy does not apply to `$search`).
    */
   private _collectSearchFallbackFields(): string[] {
     const out: string[] = [];
@@ -2746,6 +2747,8 @@ export class AsDbReadableController<
       // A float / decimal / timestamp is not searchable (the runtime metadata build refuses it).
       if (typeof searchMemberKind(fd.type) === "object") continue;
       if (!this.capabilities.isPhysicallyFilterable(fd.path)) continue;
+      // The fallback filters with `$regex`: a list without it would refuse every `$search`.
+      if (unlistedFilterOp(this.readable.filterOps?.(fd), ["$regex"]) !== undefined) continue;
       out.push(fd.path);
     }
     return out;

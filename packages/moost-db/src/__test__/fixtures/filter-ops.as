@@ -14,12 +14,14 @@ export interface FoProduct {
     @meta.id
     id: number
 
+    @db.column.searchable
     name: string
 
     sku: string
 
     rating?: number
 
+    @db.column.searchable
     note?: string
 
     @db.writeOnly

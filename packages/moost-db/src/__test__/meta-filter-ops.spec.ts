@@ -53,7 +53,14 @@ beforeAll(async () => {
   const suppliers = space.getTable(FoSupplier);
   await suppliers.insertOne({ id: 1, name: "Acme" });
   await products.insertOne({ id: 1, name: "Bolt", sku: "B-1", rating: 4, supplierId: 1 });
-  await products.insertOne({ id: 2, name: "Nut", sku: "N-1", rating: 2, supplierId: 1 });
+  await products.insertOne({
+    id: 2,
+    name: "Nut",
+    sku: "N-1",
+    rating: 2,
+    note: "brass",
+    supplierId: 1,
+  });
   prefix = `fo${++SEQ}`;
 
   @TableController(products, prefix)
@@ -77,6 +84,18 @@ describe("/meta serves the adapter's operator lists", () => {
     // no list: unchanged
     expect(fields.note.filterable).toBe(true);
     expect(fields.note).not.toHaveProperty("filterOps");
+  });
+});
+
+describe("the $search fallback reads only fields whose list holds $regex", () => {
+  it("skips a searchable field without it: $search answers, /meta.searchable follows", async () => {
+    expect((await send("GET", `/${prefix}/meta`)).body.searchable).toBe(true);
+    // `name` (listed without $regex) is not searched — before, every $search was a 400
+    const byName = await send("GET", `/${prefix}/query?$search=Bolt`);
+    expect(byName.status).toBe(200);
+    expect(byName.body).toEqual([]);
+    const byNote = await send("GET", `/${prefix}/query?$search=brass`);
+    expect(byNote.body.map((row: any) => row.id)).toEqual([2]);
   });
 });
 
