@@ -112,6 +112,8 @@ await taskTags.updateOne({ taskId: 1, tagId: 2, assignedAt: Date.now() });
 
 Providing only some key fields results in a `400` error for operations that require the full key (findById, deleteOne, replaceOne, updateOne). For `findMany`, partial key fields act as regular filters.
 
+A key part given as text (`findById({ taskId: "1", tagId: "2" })`, what a URL carries) is read as its field's type, and a value the field cannot hold finds nothing — see [how key parts are read](/http/crud#get-one).
+
 ::: tip HTTP usage
 See the [HTTP CRUD endpoints](/http/crud#get-one) for how composite keys map to URL query parameters.
 :::

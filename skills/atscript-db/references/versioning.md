@@ -32,7 +32,7 @@ interface User {
 Constraints:
 
 - Field type MUST resolve to `int` (SQL `INTEGER`, Mongo `Number`).
-- At most one version column per table (an inherited one counts, 0.1.192).
+- At most one version column per table (an inherited one counts, 0.1.192; two inherited from two bases → error on the table's `@db.table`, 0.1.194).
 - Field must be non-optional. Schema sync emits `NOT NULL DEFAULT 0`; existing rows backfill to `0` automatically on `ALTER TABLE`.
 - `@db.column 'row_version'` renames ONLY the stored column (supported since 0.1.141). `$cas` key, write bodies, rows read back, `table.versionColumn` and `/meta.versionColumn` all use the FIELD name (`version`). ≤ 0.1.140 `versionColumn` returned the column name → renamed version fields had no working OCC; don't key anything on the column name.
 

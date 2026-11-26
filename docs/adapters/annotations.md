@@ -18,6 +18,41 @@ The sibling-ref quantity bindings — `@db.amount.currency.ref` and `@db.unit.re
 
 Practically: declaring `@db.index.unique` on `User.id` never creates an index on tables that FK-ref it; if the referring table needs an index on its FK column, declare one on the FK field itself. This holds at any ref depth (including refs through an intermediate dict/view interface). `extends` is different — inherited props keep all their annotations, structural ones included, because the child table physically owns those columns.
 
+## Annotations in `annotate` blocks {#annotate-blocks}
+
+A `@db.*` annotation written in an `annotate` block on a top-level field is checked like the same annotation written on the field: on the field the entry names, in the interface the block writes into, with the error on the annotation in the block (since 0.1.194). The block may be in another file than the interface — a generated `.as` file enriched in your own:
+
+```atscript
+@db.table 'users'
+export interface User {
+    @meta.id
+    id: string
+}
+
+@db.table 'posts'
+export interface Post {
+    @meta.id
+    id: string
+    authorId: User.id
+    author?: User
+}
+
+annotate Post {
+    @db.rel.FK
+    authorId
+
+    @db.rel.to       // finds the foreign key the same block declares
+    author
+}
+```
+
+- `annotate Post { … }` writes into `Post`: the checks see `Post`'s fields, inherited ones included, with the block's annotations applied.
+- `annotate Post as AdminPost { … }` declares a copy of `Post` with the block's annotations added. It is a `@db.table` when `Post` is.
+- Type-level annotations at the top of the block (`@db.table.sortable 'manual'`, `@db.depth.limit 2`) are checked on that interface.
+- A check sees the interface as declared plus the block it is written in. It does not see other `annotate` blocks on the same interface, and an annotation written on the field does not see blocks: keep annotations that depend on each other — a `@db.rel.FK` and its `@db.rel.to`, a table's version column and the second one — in one place.
+- A relation reads the other table as declared: `@db.rel.from`, `@db.rel.via` and a foreign key's target key find that table's `@db.rel.FK`, `@meta.id` or `@db.index.unique` only on the table itself, so relations spanning blocks on two different interfaces are not supported. A relation to the block's own interface — a self-reference such as `parent` / `children` — can be completed in one block.
+- Only these are checked. A db annotation on a nested entry (`address.city`), in a block on a type that is no interface, or on another `annotate … as` copy is applied, but not checked.
+
 ## Tables & Columns
 
 | Annotation                  | Applies To | Arguments                              | Description                                                                                                                                                                                                                                                                                          |

@@ -372,6 +372,8 @@ prepareId(id: unknown, fieldType: TAtscriptAnnotatedType): unknown {
 
 The default implementation returns `id` unchanged.
 
+A key part reaches `prepareId` checked against the key field's type: a value the field cannot hold never reaches it (the lookup matches no row), a boolean part arrives as a boolean, and a number part may arrive as numeric text (`"7"`, what a URL carries) — an engine that binds query parameters converts it; a store that compares values strictly converts it here. Read the field's column type with `resolveDesignType(fieldType)` (exported by `@atscript/db`): it reads `T | null` as `T` and number literals (`1 | 2 | 3`) as `"number"`. The primary key of a row is prepared the same way on insert, so a key is written and looked up as one type.
+
 ## Native Operations
 
 ### Native Patch

@@ -6,6 +6,30 @@ outline: deep
 
 Changes that need action or attention when you upgrade. Each entry links to the page that documents the current behavior.
 
+## 0.1.194 {#v0-1-194}
+
+### Fixes
+
+- **A db annotation in an `annotate` block is checked on the field it lands on.** Written in `annotate User { … }` or `annotate User as Admin { … }` on a top-level field — in the same file as `User` or in another — a `@db.*` annotation was checked against the block instead of the field the entry names, so valid schemas were refused and mistakes were missed. Refused before, accepted now: `@db.rel.to`, `@db.rel.from`, `@db.column.sortable`, `@db.column.filterable` and `@db.column.derived` on a table's field (`… is only valid on fields of a @db.table interface`), `@db.rel.FK` on a chain-reference field (`requires a chain reference type …, got scalar type`), and type-level annotations written on the block, such as `@db.table.sortable 'manual'` or `@db.depth.limit` (`requires @db.table on the same interface`). Missed before, reported now: every check that reads the field's type, its other annotations or its table — a `@db.column.version` that is optional or not a number, `@db.default.increment` on a string, `@db.rel.onDelete "setNull"` on a required foreign key, `@db.patch.strategy` on a field that is no object, `@db.ignore` on the primary key, a float in `@db.column.searchable`, and the others. The error sits on the annotation in the block. `annotate User as Admin` makes `Admin` a table when `User` is one. A `@db.rel.from` or `@db.rel.via` finds the other table's foreign keys, and a `@db.rel.FK` its target key, only on that table as declared — or in the same block for a relation to the block's own interface: relations spanning blocks on two different interfaces are not supported. A db annotation on a nested entry (`address.city`) is applied but still not checked. See [Annotations in annotate blocks](/adapters/annotations#annotate-blocks).
+
+  **Affected:** a schema with one of these mistakes in an `annotate` block no longer compiles.
+
+- **A table checks the fields it inherits from several bases.** Two mistakes compiled when the fields came from base types, because the check on each field sees only the type that declares it. Both are now reported on the table's `@db.table`:
+  - two `@db.column.version` columns inherited from two bases (`At most one @db.column.version per table — inherited: "a", "b"`);
+  - an inherited `@db.rel.FK` to one column of a composite primary key whose other columns the table does not cover, also when the base that declares it is no table (`Inherited field "refA": @db.rel.FK target … is one column of a composite primary key …`). Two bases that each declare one column of the same aliased composite foreign key are accepted.
+
+  **Affected:** such a table no longer compiles. At run time it used only the first version column, and schema sync could not create the foreign key.
+
+- **A key part is read as its field's type.** In `GET /one/:id`, `GET /one?…`, `findById` and every write addressed by a key, the text of a key part is read as the type of its field's column: `number | null` as a number, number literals (`1 | 2 | 3`) as a number, an integer field (`number.int` and its sizes, `@expect.int`, `@db.default.increment` / `now`) as a whole number. Before, such a part stayed text: on MongoDB and the in-memory adapter, `GET /one/7` answered `404` for a row whose `code: number | null` is `7`. An id that the key field cannot hold now answers `404` on every adapter without a query. Before, `1.5` for an integer key was a database error on PostgreSQL (`invalid input syntax for type integer`), and so was hexadecimal text (`0x10`) for a number key. On MongoDB and the in-memory adapter, a primary key typed as number literals or `number | null` is now written as a number. See [GET /one](/http/crud#get-one).
+
+  **Affected:** MongoDB tables whose primary key includes a field typed as number literals (`level: 1 | 2 | 3`) or `number | null` (`@meta.id` fields, no `_id`, no `@db.mongo.collection`) and that hold rows written before 0.1.194. Such a field was stored as text (`"2"`). Now a number is stored and matched, so the earlier rows are not found by their key, and the unique key does not see them as duplicates of new rows. Convert them once — for a collection `levels` and a field `level`:
+
+  ```js
+  db.levels.updateMany({ level: { $type: "string" } }, [
+    { $set: { level: { $toDouble: "$level" } } },
+  ]);
+  ```
+
 ## 0.1.192 {#v0-1-192}
 
 ### Fixes

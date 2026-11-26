@@ -148,7 +148,16 @@ curl "http://localhost:3000/task-tags/one?taskId=1&tagId=2"    # composite prima
 
 The controller walks every registered identification (primary key + every unique index, single-field and compound) in declaration order and picks the first whose fields are all present in the query.
 
-A boolean key field takes exactly `true` or `false` (`/drafts/one?id=42&active=true`, what `@atscript/db-client` sends for `client.one({ id: 42, active: true })`, since 0.1.192); any other value matches no row (`404`).
+Each key part is read as the type of its field's column — in `/one/:id`, in `/one?…`, and in `findById` called with text. `T | null` is read as `T`:
+
+| Key field type                                                                                             | Takes                                                 | Example                         |
+| ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ------------------------------- |
+| `number`, `number \| null`, number literals (`1 \| 2 \| 3`)                                                | a number (`7`, `-1.5`; no hexadecimal, no `Infinity`) | `/codes/one/7`                  |
+| an integer: `number.int` and its sizes, `number.timestamp`, `@expect.int`, `@db.default.increment` / `now` | a whole number (`5`, not `1.5` or `1e3`)              | `/counters/one/5`               |
+| `boolean`, `boolean \| null`                                                                               | exactly `true` or `false` (since 0.1.192)             | `/drafts/one?id=42&active=true` |
+| `string`, `decimal` and the other types                                                                    | the text, with the field's `@normalize.*` applied     | `/users/one/admin`              |
+
+A value the key field cannot hold matches no row: the endpoint answers `404` on every adapter without querying the database (since 0.1.194; see [Upgrading](/guide/upgrading#v0-1-194)).
 
 ### GET /meta {#get-meta}
 

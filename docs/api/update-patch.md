@@ -321,7 +321,7 @@ export interface User {
 }
 ```
 
-Written where it can never apply, the annotation is a build error, shown in your editor: on a field that also has `@db.json` or `@db.encrypted`, and inside an array element or a `@db.json` / `@db.encrypted` field, where the annotation is written. The build checks the annotation where it is written: inside one of these places, a merge-strategy field that arrives through a referenced type, through an object written in a type group (`( … ) | null`, `&`, a union, a tuple) or through `annotate` is not a build error, and it has no effect there. The same field merges wherever a patch reaches it by its own path.
+Written where it can never apply, the annotation is a build error, shown in your editor: on a field that also has `@db.json` or `@db.encrypted`, and inside an array element or a `@db.json` / `@db.encrypted` field, where the annotation is written. The build checks the annotation where it is written: inside one of these places, a merge-strategy field that arrives through a referenced type or through an object written in a type group (`( … ) | null`, `&`, a union, a tuple) is not a build error, and it has no effect there. Written in an `annotate` block on a top-level field, the annotation is checked like one written on the field (since 0.1.194; before, never); on a nested entry it is not checked — see [Annotations in annotate blocks](/adapters/annotations#annotate-blocks). The same field merges wherever a patch reaches it by its own path.
 
 Before 0.1.184 a partial merge-strategy object in these places was stored without the children it left out — see [Upgrading](/guide/upgrading#v0-1-184).
 

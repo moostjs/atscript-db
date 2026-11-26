@@ -41,7 +41,7 @@ interface Task {
 
 Constraints (enforced at compile time):
 
-- **At most one** version column per table — composite versioning makes no semantic sense. A version column inherited through `extends` counts.
+- **At most one** version column per table — composite versioning makes no semantic sense. A version column inherited through `extends` counts; two inherited from two bases are reported on the table's `@db.table` (since 0.1.194).
 - The field must resolve to a SQL `INTEGER` (or Mongo `Number`). String / timestamp versioning is not supported.
 - The annotation takes no arguments. To store the field under another column name, add [`@db.column`](/api/tables#custom-column-names) as for any field (`@db.column 'row_version'`). The rename changes only the storage column: `$cas`, write bodies, rows read back and `/meta`'s `versionColumn` keep using the field name (`version`). Renamed version fields are supported since 0.1.141.
 - The field is **server-managed**: the adapter sets it to `0` on insert and increments it by `1` on every successful update that writes a non-exempt field (see [Version-exempt fields](#version-exempt)). See [defaults](./defaults#version-defaults).

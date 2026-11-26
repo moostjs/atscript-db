@@ -190,6 +190,8 @@ export class UsersController extends AsDbController<typeof User> {
   protected async prepareRequest(ctx: TDbRequestContext) {
     requestScopes.set(await loadScopes(ctx.endpoint)); // FIRST on every endpoint; throw HttpError to deny
   }
+  // scopes THIS controller's reads only: rows another controller loads via `$with` skip it →
+  // scope them in THAT controller's validateControls (conjoin into each $with entry) or hide the relation (hasField)
   protected transformFilter(filter) {
     return { ...filter, tenantId: useTenant() };
   }

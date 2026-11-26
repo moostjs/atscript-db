@@ -119,6 +119,10 @@ export class TodoController extends AsDbController<typeof Todo> {
 
 The returned filter replaces the original for all read endpoints (`/query`, `/pages`, `/one/:id`).
 
+::: warning Rows loaded through `$with` are scoped by the controller that loads them
+`transformFilter` scopes this controller's own reads. When another controller's table has a relation to this table, rows that controller loads through `$with` never pass through this hook. A table can be served by several controllers with different scopes, so there is no single scope to apply. Scope them in the loading controller: conjoin the related table's row scope into each `$with` entry in [`validateControls`](#validatecontrols), or hide the relation with [`hasField`](#hasfield). With `@aooth/arbac-moost`, the `$with` relation policy does this for you.
+:::
+
 **Soft deletes:**
 
 ```typescript
