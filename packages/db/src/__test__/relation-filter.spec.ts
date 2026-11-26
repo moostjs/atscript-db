@@ -503,7 +503,7 @@ export interface B {
     });
     const messages = [...(await repo.diagnostics()).values()].flat().map((m) => m.message);
     expect(messages.filter((m) => m.includes("@db.rel.filterable"))).toEqual([
-      "@db.rel.filterable is only valid on navigational fields (@db.rel.to, @db.rel.from, or @db.rel.via)",
+      "@db.rel.filterable is only valid on navigational fields (@db.rel.to, @db.rel.from, @db.rel.via or @db.rel.store)",
     ]);
   });
 });

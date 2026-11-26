@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   build,
+  isAnnotationSpec,
   getDeclaredValue,
   getFieldPathCompletionScope,
   getQueryCompletionScope,
@@ -10,7 +11,7 @@ import {
   getValueCandidates,
   resolveFieldRefAt,
 } from "@atscript/core";
-import type { AtscriptDoc, SemanticNode, Token } from "@atscript/core";
+import type { AtscriptDoc, SemanticNode, TAnnotationsTree, Token } from "@atscript/core";
 import { tsPlugin } from "@atscript/typescript";
 import { describe, expect, it, beforeAll } from "vite-plus/test";
 
@@ -63,6 +64,15 @@ export interface LsRegion {
     @meta.id
     id: number
     name: string
+}
+
+@db.table 'ls_offices'
+export interface LsOffice {
+    @meta.id
+    id: number
+
+    @db.rel.store
+    region?: LsRegion
 }
 
 @db.table 'ls_tags'
@@ -488,6 +498,54 @@ describe("db plugin editor scopes", () => {
         expect(declared?.definition?.token.range.start).toEqual(posOf(`${sibling}: string`));
       },
     );
+  });
+
+  describe("@db.rel.store (since 0.1.196)", () => {
+    it("completion: offered under @db.rel on a prop, documented", () => {
+      // what the editor walks: `config.annotations` by the typed segments
+      const rel = (doc.config.annotations!.db as TAnnotationsTree).rel as TAnnotationsTree;
+      expect(Object.keys(rel)).toContain("store");
+      const spec = rel.store;
+      expect(isAnnotationSpec(spec)).toBe(true);
+      if (!isAnnotationSpec(spec)) return;
+      expect(spec.config.nodeType).toEqual(["prop"]);
+      expect(spec.arguments).toEqual([]);
+      expect(spec.renderDocs("@db.rel.store")).toContain("no foreign key in the model");
+    });
+
+    it("hover: the annotation token resolves to the spec and its docs", () => {
+      const token = tokenAt("@db.rel.store", 1);
+      expect(token.text).toBe("@db.rel.store");
+      const spec = doc.resolveAnnotation(token.text.slice(1));
+      expect(spec?.renderDocs(token.text)).toContain(
+        "Valid only on a table whose adapter reads relations in-read",
+      );
+    });
+
+    it("diagnostics: K1 lands on the annotation", async () => {
+      const rootDir = mkdtempSync(join(tmpdir(), "db-lsp-store-"));
+      const source = [
+        "@db.table 'k_people'",
+        "export interface KPerson {",
+        "    @meta.id",
+        "    id: number",
+        "}",
+        "export interface KForm {",
+        "    @db.rel.store",
+        "    lead?: KPerson",
+        "}",
+      ].join("\n");
+      writeFileSync(join(rootDir, "k.as"), source);
+      const repo = await build({
+        rootDir,
+        entries: ["k.as"],
+        plugins: [tsPlugin(), dbPlugin()],
+      });
+      const messages = [...(await repo.diagnostics()).values()].flat();
+      const k1 = messages.find((m) => m.message.startsWith("@db.rel.store is only valid"));
+      expect(k1?.severity).toBe(1);
+      expect(k1?.range.start).toEqual({ line: 6, character: 4 });
+    });
   });
 
   describe("ref argument completion filters", () => {

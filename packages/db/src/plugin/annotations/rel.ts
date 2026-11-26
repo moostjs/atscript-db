@@ -13,6 +13,7 @@ import {
   type SemanticRefNode,
 } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
+import { NAV_PROP_ANNOTATIONS } from "@atscript/core/nav";
 import {
   annotationTarget,
   checkedAsFieldOf,
@@ -172,8 +173,12 @@ export const dbRelAnnotations: TAnnotationsTree = {
         // F1 (relaxed): `@db.rel.FK` validates on any interface kind — @db.table hosts get the
         // full DB-relation semantics, other hosts use it purely as the value-help indicator.
 
-        // F6: Cannot coexist with @db.rel.to or @db.rel.from
-        if (field.countAnnotations("db.rel.to") > 0 || field.countAnnotations("db.rel.from") > 0) {
+        // F6: Cannot coexist with @db.rel.to, @db.rel.from or @db.rel.store
+        if (
+          field.countAnnotations("db.rel.to") > 0 ||
+          field.countAnnotations("db.rel.from") > 0 ||
+          field.countAnnotations("db.rel.store") > 0
+        ) {
           errors.push({
             message: "A field cannot be both a foreign key and a navigational property",
             severity: 1,
@@ -583,11 +588,15 @@ export const dbRelAnnotations: TAnnotationsTree = {
         const field = annotationTarget(token, doc);
         if (!field) return errors;
 
-        // V6: Cannot coexist with .to or .from
-        if (field.countAnnotations("db.rel.to") > 0 || field.countAnnotations("db.rel.from") > 0) {
+        // V6: Cannot coexist with .to, .from or .store
+        if (
+          field.countAnnotations("db.rel.to") > 0 ||
+          field.countAnnotations("db.rel.from") > 0 ||
+          field.countAnnotations("db.rel.store") > 0
+        ) {
           errors.push({
             message:
-              "@db.rel.via is self-sufficient — cannot be combined with @db.rel.to or @db.rel.from",
+              "@db.rel.via is self-sufficient — cannot be combined with @db.rel.to, @db.rel.from or @db.rel.store",
             severity: 1,
             range: token.range,
           });
@@ -682,6 +691,86 @@ export const dbRelAnnotations: TAnnotationsTree = {
       },
     }),
 
+    store: new AnnotationSpec({
+      description: annotationExample(
+        "A relation the store resolves by itself, with no foreign key in the model. `T` is at most " +
+          "one related row, `T[]` many. Valid only on a table whose adapter reads relations " +
+          "in-read (an adapter that reads related rows itself, e.g. a remote service that returns " +
+          "them in the same response); loaded with `$with`, never written.",
+        "@db.rel.store",
+        "author?: User",
+        "",
+        "@db.rel.store",
+        "comments: Comment[]",
+      ),
+      nodeType: ["prop"],
+      passedWhenReferred: false,
+      validate(token, _args, doc) {
+        const errors = [] as TMessages;
+        const field = annotationTarget(token, doc);
+        if (!field) return errors;
+
+        // K1: only on a field of a @db.table interface
+        const owner = getDbTableOwner(token, doc);
+        if (!owner || owner.countAnnotations("db.table") === 0) {
+          errors.push({
+            message: "@db.rel.store is only valid on fields of a @db.table interface",
+            severity: 1,
+            range: token.range,
+          });
+        }
+
+        // K1: no other relation kind, no foreign key on the same field
+        const others = ["db.rel.to", "db.rel.from", "db.rel.via", "db.rel.FK"].filter(
+          (key) => field.countAnnotations(key) > 0,
+        );
+        if (others.length > 0) {
+          errors.push({
+            message: `@db.rel.store cannot be combined with ${others.map((key) => `@${key}`).join(", ")} — it is a relation without foreign keys`,
+            severity: 1,
+            range: token.range,
+          });
+        }
+
+        // K1: no union
+        const fieldDef = field.getDefinition();
+        if (fieldDef && fieldDef.entity === "group" && (fieldDef as any).op === "|") {
+          errors.push({
+            message: "@db.rel.store does not support union types — use separate relations",
+            severity: 1,
+            range: token.range,
+          });
+          return errors;
+        }
+
+        // K1: typed as a @db.table entity or an array of one
+        const targetRef = getNavTargetRef(field);
+        const targetTypeName = targetRef?.id;
+        if (!targetRef || !targetTypeName) {
+          errors.push({
+            message:
+              "@db.rel.store requires a @db.table type or an array of one (e.g. User or Comment[])",
+            severity: 1,
+            range: token.range,
+          });
+          return errors;
+        }
+        const unwound = doc.refOrigin(targetRef).unwindType(targetTypeName);
+        if (unwound) {
+          const targetDef = landedDeclaration(token, doc, unwound.def);
+          if (!isInterface(targetDef) || targetDef.countAnnotations("db.table") === 0) {
+            errors.push({
+              message: `@db.rel.store target '${targetTypeName}' is not a @db.table entity`,
+              severity: 1,
+              range: token.range,
+            });
+          }
+        }
+
+        return errors;
+      },
+    }),
+
     filterable: new AnnotationSpec({
       description: annotationExample(
         "Lets HTTP clients filter the parent rows by this relation's related rows — " +
@@ -701,14 +790,11 @@ export const dbRelAnnotations: TAnnotationsTree = {
         const errors = [] as TMessages;
         const field = annotationTarget(token, doc);
         if (!field) return errors;
-        const isNav =
-          field.countAnnotations("db.rel.to") > 0 ||
-          field.countAnnotations("db.rel.from") > 0 ||
-          field.countAnnotations("db.rel.via") > 0;
+        const isNav = NAV_PROP_ANNOTATIONS.some((key) => field.countAnnotations(key) > 0);
         if (!isNav) {
           errors.push({
             message:
-              "@db.rel.filterable is only valid on navigational fields (@db.rel.to, @db.rel.from, or @db.rel.via)",
+              "@db.rel.filterable is only valid on navigational fields (@db.rel.to, @db.rel.from, @db.rel.via or @db.rel.store)",
             severity: 1,
             range: token.range,
           });
@@ -739,15 +825,13 @@ export const dbRelAnnotations: TAnnotationsTree = {
         const field = annotationTarget(token, doc);
         if (!field) return errors;
 
-        const hasTo = field.countAnnotations("db.rel.to") > 0;
-        const hasFrom = field.countAnnotations("db.rel.from") > 0;
         const hasVia = field.countAnnotations("db.rel.via") > 0;
 
         // FL1: Must be on a navigational field
-        if (!hasTo && !hasFrom && !hasVia) {
+        if (!NAV_PROP_ANNOTATIONS.some((key) => field.countAnnotations(key) > 0)) {
           errors.push({
             message:
-              "@db.rel.filter is only valid on navigational fields (@db.rel.to, @db.rel.from, or @db.rel.via)",
+              "@db.rel.filter is only valid on navigational fields (@db.rel.to, @db.rel.from, @db.rel.via or @db.rel.store)",
             severity: 1,
             range: token.range,
           });
