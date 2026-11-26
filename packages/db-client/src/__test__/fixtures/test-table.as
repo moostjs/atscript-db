@@ -127,3 +127,13 @@ export interface UpdatedRow {
   @db.onUpdate.inc
   rev: number.int
 }
+
+// @db.default.store (since 0.1.196) — a key the store fills.
+@db.table 'store_keyed_orders'
+export interface StoreKeyedOrder {
+  @meta.id
+  @db.default.store
+  orderNo: string
+
+  customer: string
+}

@@ -83,6 +83,9 @@ export interface LsTicket {
     @db.column.version
     @db.column.version.token
     etag: string
+
+    @db.default.store
+    code: string
 }
 
 @db.table 'ls_tags'
@@ -621,6 +624,56 @@ describe("db plugin editor scopes", () => {
             "@db.column.version on a string field: a string version is issued by the store — add @db.column.version.token",
           severity: 1,
           start: { line: 11, character: 4 },
+        },
+      ]);
+    });
+  });
+
+  describe("@db.default.store (since 0.1.196)", () => {
+    it("completion: offered under @db.default on a prop, documented", () => {
+      const dflt = (doc.config.annotations!.db as TAnnotationsTree).default as TAnnotationsTree;
+      expect(Object.keys(dflt)).toContain("store");
+      const spec = dflt.store;
+      expect(isAnnotationSpec(spec)).toBe(true);
+      if (!isAnnotationSpec(spec)) return;
+      expect(spec.config.nodeType).toEqual(["prop"]);
+      expect(spec.arguments).toEqual([]);
+      expect(spec.renderDocs("@db.default.store")).toContain(
+        "The store fills this value when an insert leaves it out",
+      );
+    });
+
+    it("hover: the annotation token resolves to the spec and its docs", () => {
+      const token = tokenAt("@db.default.store", 1);
+      expect(token.text).toBe("@db.default.store");
+      const spec = doc.resolveAnnotation(token.text.slice(1));
+      expect(spec?.renderDocs(token.text)).toContain("lists `store` in `nativeDefaultFns()`");
+    });
+
+    it("diagnostics: its errors land on the annotation", async () => {
+      const messages = await diagnosticsOf([
+        "@db.table 's_docs'",
+        "export interface SDoc {",
+        "    @meta.id",
+        "    id: number",
+        "    @db.default.store",
+        "    @db.default.uuid",
+        "    code: string",
+        "    @db.default.store",
+        "    tags: string[]",
+        "}",
+      ]);
+      expect(messages).toEqual([
+        {
+          message:
+            "@db.default.store cannot coexist with @db.default.uuid — a field has one default",
+          severity: 1,
+          start: { line: 4, character: 4 },
+        },
+        {
+          message: "@db.default.store requires a scalar field — the store fills a column",
+          severity: 1,
+          start: { line: 7, character: 4 },
         },
       ]);
     });

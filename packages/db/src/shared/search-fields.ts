@@ -120,6 +120,7 @@ export const ENCRYPTED_INCOMPATIBLE: ReadonlyArray<[annotation: string, why: str
   ["db.column.version", "the OCC filter needs cleartext equality"],
   ["db.default.increment", "engine-side defaults bypass the encryption transform"],
   ["db.default.now", "engine-side defaults bypass the encryption transform"],
+  ["db.default.store", "the store fills the value, bypassing the encryption transform"],
   ["db.onUpdate.now", "the update time is set after the encryption transform"],
   ["db.onUpdate.inc", "the counter is incremented by the database"],
 ];

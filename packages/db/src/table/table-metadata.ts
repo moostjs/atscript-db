@@ -420,7 +420,8 @@ export class TableMetadata {
 
   /**
    * Set at build when the model uses what the adapter does not declare (a
-   * `@db.column.version.token` without `supportsVersionTokens()`, since
+   * `@db.column.version.token` without `supportsVersionTokens()`, a
+   * `@db.default.store` without `"store"` in `nativeDefaultFns()`; since
    * 0.1.196). The table refuses every use with this message. @internal
    */
   adapterProblem?: string;
@@ -719,6 +720,13 @@ export class TableMetadata {
   private _adapterProblem(adapter: BaseDbAdapter): string | undefined {
     if (this.versionToken && !adapter.supportsVersionTokens()) {
       return `version column "${this.versionField!}" is a @db.column.version.token; the ${adapter.constructor.name} adapter does not support version tokens`;
+    }
+    if (!adapter.nativeDefaultFns().has("store")) {
+      for (const [field, def] of this.defaults) {
+        if (def.kind === "fn" && def.fn === "store") {
+          return `field "${field}" is a @db.default.store; the ${adapter.constructor.name} adapter does not list "store" in nativeDefaultFns()`;
+        }
+      }
     }
     return undefined;
   }

@@ -271,6 +271,9 @@ export function resolveDefaultFromMetadata(
   if (metadata.has("db.default.now")) {
     return { kind: "fn", fn: "now" };
   }
+  if (metadata.has("db.default.store")) {
+    return { kind: "fn", fn: "store" };
+  }
   return undefined;
 }
 

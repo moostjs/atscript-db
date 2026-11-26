@@ -266,7 +266,8 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
       );
       const has = (key: keyof AtscriptMetadata) =>
         defaulted && (meta.has(key) || baseMeta?.has(key) === true);
-      // Server-managed fields: defaulted columns, the OCC version column
+      // Server-managed fields: defaulted columns (`@db.default.store`, since
+      // 0.1.196: filled by the store, never by the SDK), the OCC version column
       // (adapter-initialised to 0 on insert, auto-bumped on every write),
       // derived columns (computed from the row; a payload value is dropped)
       // and, in a replace, `@db.onUpdate.now` columns (set by the write),
@@ -280,6 +281,7 @@ export function createDbValidatorPlugin(): TValidatorPlugin {
         has("db.default.increment") ||
         has("db.default.uuid") ||
         has("db.default.now") ||
+        has("db.default.store") ||
         (dbCtx.mode === "replace" && has("db.onUpdate.now")) ||
         meta.has("db.column.version") ||
         meta.has("db.onUpdate.inc") ||

@@ -809,7 +809,13 @@ export type TDbFulltextMatch = (typeof DB_FULLTEXT_MATCH_MODES)[number];
 
 // ── Default Value Types ─────────────────────────────────────────────────────
 
-export type TDbDefaultFn = "increment" | "uuid" | "now";
+/**
+ * A function default (`@db.default.increment` / `.uuid` / `.now`), or
+ * `"store"` (`@db.default.store`, since 0.1.196): the store fills the value
+ * when an insert leaves it out — only on an adapter whose
+ * `nativeDefaultFns()` lists it.
+ */
+export type TDbDefaultFn = "increment" | "uuid" | "now" | "store";
 
 export type TDbCollation = "binary" | "nocase" | "unicode";
 

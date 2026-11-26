@@ -2681,8 +2681,9 @@ export class AtscriptDbTable<
 
   /**
    * The SDK's maker of `field`'s default `def` — `undefined` when the SDK
-   * leaves it alone: the version column, `increment`, and function defaults
-   * the adapter generates natively (outside a JSON value).
+   * leaves it alone: the version column, `increment`, `store` (the store
+   * fills it, since 0.1.196), and function defaults the adapter generates
+   * natively (outside a JSON value).
    */
   private _sdkDefaultMaker(
     field: string,
@@ -2699,7 +2700,7 @@ export class AtscriptDbTable<
     if (nativeFns.has(def.fn) && findAncestorInSet(field, this._meta.jsonParents) === undefined) {
       return undefined;
     }
-    // 'increment' is left to the DB (e.g. INTEGER PRIMARY KEY in SQLite)
+    // 'increment' is left to the DB (e.g. INTEGER PRIMARY KEY in SQLite), 'store' to the store
     if (def.fn === "now") return () => now;
     if (def.fn === "uuid") {
       // `@normalize.*` applies to a generated value too

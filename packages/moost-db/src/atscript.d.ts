@@ -70,6 +70,7 @@ declare global {
     "db.default.increment": number | true
     "db.default.uuid": boolean
     "db.default.now": boolean
+    "db.default.store": boolean
     "db.onUpdate.now": boolean
     "db.onUpdate.inc": boolean
     "db.json": boolean

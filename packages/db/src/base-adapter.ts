@@ -816,6 +816,14 @@ export abstract class BaseDbAdapter {
    * Override in adapters whose DB engine supports function defaults.
    * The generic layer checks this in `_applyDefaults()` to decide whether
    * to generate the value client-side or leave it for the DB.
+   *
+   * `"store"` (since 0.1.196) admits `@db.default.store` fields: the store
+   * fills such a value when an insert leaves it out, and the SDK never does
+   * (a table with one refuses every use unless the set lists `"store"`).
+   * **Contract:** an insert returns a store-filled primary key in
+   * `insertedId` / `insertedIds`, as for an auto-increment key — `returning`,
+   * the write check and nested FROM / VIA children read it. A value the
+   * caller sends is passed on: the store decides.
    */
   nativeDefaultFns(): ReadonlySet<TDbDefaultFn> {
     return EMPTY_DEFAULT_FNS;

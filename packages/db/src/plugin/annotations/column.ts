@@ -165,7 +165,60 @@ const VERSION_TOKEN_INCOMPATIBLE: ReadonlyArray<[annotation: string, why: string
   ["db.default.increment", "a token is issued by the store"],
   ["db.default.uuid", "a token is issued by the store"],
   ["db.default.now", "a token is issued by the store"],
+  ["db.default.store", "a token is issued by the store"],
 ];
+
+/** Annotations a `@db.default.store` field cannot carry, with the reason. */
+const DEFAULT_STORE_INCOMPATIBLE: ReadonlyArray<[annotation: string, why: string]> = [
+  ["db.default", "a field has one default"],
+  ["db.default.increment", "a field has one default"],
+  ["db.default.uuid", "a field has one default"],
+  ["db.default.now", "a field has one default"],
+  [
+    "db.column.version",
+    "a version the store issues is a @db.column.version.token, which the store fills",
+  ],
+  ["db.onUpdate.inc", "a change counter starts at 0"],
+  ["db.column.derived", "a derived column is computed from its row"],
+  ["db.json", "the store fills a scalar column, not a JSON value"],
+];
+
+/** Whether a field's type (refs unwound, `| null` members skipped) is an object or an array. */
+function isObjectOrArray(def: SemanticNode | undefined, doc: AtscriptDoc): boolean {
+  if (def && isRef(def)) return isObjectOrArray(doc.unwindRef(def)?.def, doc);
+  if (isStructure(def) || isInterface(def) || isArray(def)) return true;
+  return (
+    !!def &&
+    isGroup(def) &&
+    (def.op === "|" || def.op === "&") &&
+    def.unwrap().some((member) => !isNullMember(member) && isObjectOrArray(member, doc))
+  );
+}
+
+/**
+ * Compile-time rule of `@db.default.store` (since 0.1.196): a scalar field
+ * outside any `@db.json` value or array element, with no other default and
+ * not a version, change counter or derived column. `@db.encrypted` is in
+ * `ENCRYPTED_INCOMPATIBLE`. The adapter capability is checked at table build.
+ */
+function validateDefaultStore(token: Token, doc: AtscriptDoc): TMessages {
+  const tag = "@db.default.store";
+  const errors = validateIncompatible(token, tag, DEFAULT_STORE_INCOMPATIBLE, doc);
+  const field = annotationTarget(token, doc);
+  if (!field) return errors;
+  const fail = (message: string) => {
+    errors.push({ message, severity: 1, range: token.range });
+  };
+  if (isObjectOrArray(field.getDefinition(), doc)) {
+    fail(`${tag} requires a scalar field — the store fills a column`);
+  }
+  const { whole } = walkFieldAncestors(field, ["db.json"]);
+  if (whole) {
+    const where = whole.via === "element" ? "an array element" : "a @db.json value";
+    fail(`${tag} cannot sit inside ${where} ('${whole.id}') — the store fills a column`);
+  }
+  return errors;
+}
 
 /**
  * Compile-time rules of `@db.column.version.token` (since 0.1.196): on the
@@ -819,6 +872,29 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       passedWhenReferred: false,
       validate(token, args, doc) {
         return validateFieldBaseType(token, doc, "db.default.now", ["number", "string"]);
+      },
+    }),
+
+    store: new AnnotationSpec({
+      description: annotationExample(
+        "The store fills this value when an insert leaves it out — for a store that assigns " +
+          "keys or other values itself (a remote service, a number range). The SDK never fills " +
+          "it, the field may be left out of an insert or replace, and a value the caller does " +
+          "send is passed to the adapter: the store decides. A store-filled key comes back in " +
+          "`insertedId`. Valid only on a table whose adapter lists `store` in " +
+          "`nativeDefaultFns()`; the bundled adapters do not." +
+          "\n\n**Constraints:** a scalar field outside any `@db.json` value; no other " +
+          "`@db.default*`, not the version column, a `@db.onUpdate.inc`, `@db.column.derived` " +
+          "or `@db.encrypted` field.",
+        "@meta.id",
+        "@db.default.store",
+        "orderNo: string",
+      ),
+      nodeType: ["prop"],
+      passedWhenReferred: false,
+      multiple: false,
+      validate(token, _args, doc) {
+        return validateDefaultStore(token, doc);
       },
     }),
   },
