@@ -2,7 +2,12 @@ import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { TAnnotationsTree, TMessages } from "@atscript/core";
 import { isArray, isInterface, isPrimitive, isRef, isStructure } from "@atscript/core";
 
-import { getDbTableOwner, isNullableUnion, primitiveBaseType } from "../../shared/annotation-utils";
+import {
+  annotationTarget,
+  getDbTableOwner,
+  isNullableUnion,
+  primitiveBaseType,
+} from "../../shared/annotation-utils";
 import { viewFieldSeals } from "../../shared/view-validation";
 
 /**
@@ -40,7 +45,8 @@ export const dbSortAnnotations: TAnnotationsTree = {
       },
       validate(token, _args, doc) {
         const errors = [] as TMessages;
-        const field = token.parentNode!;
+        const field = annotationTarget(token, doc);
+        if (!field) return errors;
         const fail = (message: string, severity: 1 | 2 = 1) =>
           errors.push({ message, severity, range: token.range });
 
@@ -61,7 +67,7 @@ export const dbSortAnnotations: TAnnotationsTree = {
         }
         const def = field.getDefinition();
         let leaf = def;
-        if (def && isRef(def)) leaf = doc.unwindType(def.id!, def.chain)?.def;
+        if (def && isRef(def)) leaf = doc.unwindRef(def)?.def;
         const base = primitiveBaseType(leaf);
         if (
           (def && (isArray(def) || isStructure(def))) ||
@@ -75,7 +81,7 @@ export const dbSortAnnotations: TAnnotationsTree = {
         // nothing to place. (A view column can be NULL through a left join or
         // an aggregate, and a nested field through its optional parent, so
         // neither is flagged.)
-        const owner = getDbTableOwner(token);
+        const owner = getDbTableOwner(token, doc);
         if (
           !field.has("optional") &&
           !isNullableUnion(def, doc) &&

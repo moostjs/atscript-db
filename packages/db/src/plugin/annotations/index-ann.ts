@@ -4,6 +4,7 @@ import type { AtscriptDoc, SemanticNode, TAnnotationsTree, TMessages, Token } fr
 import { DB_FULLTEXT_LANGUAGES, DB_FULLTEXT_MATCH_MODES } from "../../shared/fulltext-options";
 
 import {
+  annotationTarget,
   getTypeFields,
   integerMemberIndexProblem,
   searchFieldVerdict,
@@ -82,7 +83,8 @@ export const dbIndexAnnotations: TAnnotationsTree = {
           "refNo: number.int",
         ),
         validate(token, args, doc): TMessages {
-          const field = token.parentNode!;
+          const field = annotationTarget(token, doc);
+          if (!field) return [];
           // `atscript__…` keys alias the declared names (since 0.1.165): a declared
           // name with that prefix could shadow another index's key.
           const indexName = args[0]?.text;
@@ -291,7 +293,8 @@ function validateFulltextOption(
   option: "language" | "match",
 ): TMessages {
   const label = `@db.index.fulltext.${option}`;
-  const owner = token.parentNode;
+  const owner = annotationTarget(token, doc);
+  if (!owner) return [];
   const names = collectFulltextIndexNames(owner, doc);
   if (names.size === 0) {
     return [

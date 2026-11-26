@@ -9,6 +9,7 @@ import type {
 } from "@atscript/core";
 
 import {
+  annotationTarget,
   getDbTableOwner,
   getTypeFields,
   primitiveBaseType,
@@ -97,9 +98,10 @@ function findComputeCycle(
 
 function validateCompute(token: Token, args: Token[], doc: AtscriptDoc): TMessages {
   const errors: TMessages = [];
-  const prop = token.parentNode!;
+  const prop = annotationTarget(token, doc);
+  if (!prop) return errors;
   const field = prop.id ?? "field";
-  const view = getDbTableOwner(token);
+  const view = getDbTableOwner(token, doc);
   const error = (message: string, range = token.range) =>
     errors.push({ message, severity: 1, range });
 

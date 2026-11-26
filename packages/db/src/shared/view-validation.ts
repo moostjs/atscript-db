@@ -14,6 +14,7 @@ import {
   NULL_WHEN_EMPTY_AGGREGATE_FNS,
 } from "../query/aggregate-fns";
 import {
+  annotationTarget,
   getAnnotationAlias,
   getTypeFields,
   isViewField,
@@ -185,15 +186,13 @@ function lazySeals(field: SemanticNode, doc: AtscriptDoc): () => TViewFieldSeals
  * view field whose source is `@db.writeOnly` — a search hit would reveal the
  * sealed value (the runtime refuses it at sync and on every query), or
  * `undefined`. The field's own `@db.writeOnly` is reported by that spec.
- * @since 0.1.162
  */
-export function viewSourceSealProblem(
+function viewSourceSealProblem(
   token: Token,
-  doc: AtscriptDoc,
+  field: SemanticNode,
   annotation: string,
-  seals = lazySeals(token.parentNode!, doc),
+  seals: () => TViewFieldSeals,
 ): TMessages[number] | undefined {
-  const field = token.parentNode!;
   if (field.countAnnotations("db.writeOnly") > 0) return undefined;
   if (!seals().writeOnly) return undefined;
   return {
@@ -216,15 +215,16 @@ export function encryptedSearchProblem(
   doc: AtscriptDoc,
   annotation: string,
 ): TMessages[number] | undefined {
-  return encryptedProblem(token, annotation, lazySeals(token.parentNode!, doc));
+  const field = annotationTarget(token, doc);
+  return field && encryptedProblem(token, field, annotation, lazySeals(field, doc));
 }
 
 function encryptedProblem(
   token: Token,
+  field: SemanticNode,
   annotation: string,
   seals: () => TViewFieldSeals,
 ): TMessages[number] | undefined {
-  const field = token.parentNode!;
   if (field.countAnnotations("db.encrypted") > 0) return undefined;
   const where = encryptedAncestorName(field);
   const why =
@@ -250,10 +250,12 @@ export function sealedSearchProblem(
   doc: AtscriptDoc,
   annotation: string,
 ): TMessages[number] | undefined {
-  const seals = lazySeals(token.parentNode!, doc);
+  const field = annotationTarget(token, doc);
+  if (!field) return undefined;
+  const seals = lazySeals(field, doc);
   return (
-    viewSourceSealProblem(token, doc, annotation, seals) ??
-    encryptedProblem(token, annotation, seals)
+    viewSourceSealProblem(token, field, annotation, seals) ??
+    encryptedProblem(token, field, annotation, seals)
   );
 }
 
@@ -337,7 +339,8 @@ export function encryptedTypeSearchProblem(
   token: Token,
   doc: AtscriptDoc,
 ): TMessages[number] | undefined {
-  const field = token.parentNode!;
+  const field = annotationTarget(token, doc);
+  if (!field) return undefined;
   const found = findStoredField(
     field.getDefinition(),
     doc,

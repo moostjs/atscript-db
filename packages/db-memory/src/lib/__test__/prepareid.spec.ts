@@ -148,3 +148,50 @@ describe("MemoryAdapter — a nullable boolean part of a compound unique index",
     expect(await flags.findById({ code: "x", flag } as never)).toMatchObject({ title });
   });
 });
+
+// A key part takes its field's column type (since 0.1.194): `T | null` is a
+// `T`, number literals (`1 | 2 | 3`) a number — on the write (a primary key
+// is stored as a number, never its text) and on the read (`"7"` finds 7).
+describe("MemoryAdapter — key parts typed `number | null` and by number literals", () => {
+  let fx: Record<string, any>;
+  let space: DbSpace;
+
+  beforeAll(async () => {
+    await prepareFixtures();
+    fx = await import("./fixtures/key-types.as");
+  });
+
+  beforeEach(async () => {
+    space = createTestSpace();
+    await bootstrapStoredTables(space, [fx.KtCode, fx.KtLevel]);
+    await space.getTable(fx.KtCode).insertOne({ id: "a", code: 7, title: "seven" } as never);
+    await space.getTable(fx.KtLevel).insertOne({ level: 2, title: "two" } as never);
+  });
+
+  it("a number-literal primary key is stored as a number", async () => {
+    expect(await space.getTable(fx.KtLevel).findMany({} as never)).toEqual([
+      { level: 2, title: "two" },
+    ]);
+  });
+
+  it.each([["7"], [7], [{ code: "7" }]])(
+    "findById with %j finds the `number | null` unique row",
+    async (id) => {
+      expect(await space.getTable(fx.KtCode).findById(id as never)).toMatchObject({
+        title: "seven",
+      });
+    },
+  );
+
+  it.each([["2"], [2]])("findById with %j finds the number-literal key row", async (id) => {
+    expect(await space.getTable(fx.KtLevel).findById(id as never)).toMatchObject({ title: "two" });
+  });
+
+  it("updates a number-literal key row and deletes it by its text id", async () => {
+    const levels = space.getTable(fx.KtLevel);
+    await levels.updateOne({ level: 2, title: "edited" } as never);
+    expect(await levels.findById("2" as never)).toMatchObject({ title: "edited" });
+    expect((await levels.deleteOne("2" as never)).deletedCount).toBe(1);
+    expect(await levels.findMany({} as never)).toEqual([]);
+  });
+});

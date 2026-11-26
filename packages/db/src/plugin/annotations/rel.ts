@@ -10,11 +10,16 @@ import {
   isStructure,
   type SemanticQueryComparisonNode,
   type SemanticQueryExprNode,
+  type SemanticRefNode,
 } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
 import {
+  annotationTarget,
+  checkedAsFieldOf,
+  landedDeclaration,
   getAnnotationAlias,
   getDbTableOwner,
+  getNavTargetRef,
   getNavTargetTypeName,
   getParentStruct,
   getParentTypeName,
@@ -34,13 +39,13 @@ import { fieldScopes, isDbTable, relFilterScope } from "../lsp-scopes";
  * X2b: on a `@db.table` a foreign key is a real constraint — one column of a
  * composite primary key is not unique on its own. Columns that together cover
  * the whole key (same alias, same target, each naming a top-level key column)
- * are a valid composite foreign key. Returns whether `token`'s FK is covered
- * (or the rule does not apply). Cheap checks run before the sibling scan.
- * The target's key and the covering columns count inherited fields.
+ * are a valid composite foreign key. Returns whether the FK (`alias` to
+ * `targetProp` of `refTypeName`) is covered by the table's fields
+ * `hostFields`. Cheap checks run before the sibling scan. The target's key
+ * and the covering columns count inherited fields.
  */
-function checkCompositeFkCoverage(
-  token: Token,
-  doc: AtscriptDoc,
+function compositeFkCovered(
+  hostFields: ReadonlyMap<string, SemanticNode>,
   alias: string | undefined,
   refTypeName: string,
   targetFields: ReadonlyMap<string, SemanticNode>,
@@ -51,9 +56,6 @@ function checkCompositeFkCoverage(
     .filter(([, p]) => p.countAnnotations("meta.id") > 0)
     .map(([name]) => name);
   if (pk.length <= 1) return true;
-  const hostFields = getTypeFields(getParentStruct(token), doc);
-  const owner = getDbTableOwner(token);
-  if (!hostFields || owner === undefined || !isDbTable(owner)) return true;
   const covered = new Set<string>();
   for (const [, sibling] of hostFields) {
     if (sibling.countAnnotations("db.rel.FK") === 0) continue;
@@ -65,6 +67,66 @@ function checkCompositeFkCoverage(
     }
   }
   return pk.every((name) => covered.has(name));
+}
+
+/** The message of a foreign key to one column of a composite primary key (X2b). */
+function compositeFkMessage(target: string): string {
+  return `@db.rel.FK target '${target}' is one column of a composite primary key — a foreign key must reference a unique column; for value help without a constraint use @ui.valueHelp`;
+}
+
+/**
+ * The field a foreign key `ref` (`User.id`) names and the fields of its type
+ * (inherited ones included), resolved where the reference is written — an
+ * inherited or annotate block's field may be another file's. With `token`
+ * (the `@db.rel.FK`), a key of the table its own block writes into is read
+ * as the block lands it ({@link landedDeclaration}).
+ */
+function fkTarget(
+  ref: SemanticRefNode,
+  doc: AtscriptDoc,
+  token?: Token,
+): { doc: AtscriptDoc; fields: ReadonlyMap<string, SemanticNode>; prop: SemanticNode } | undefined {
+  const unwound = doc.refOrigin(ref).unwindType(ref.id!);
+  const def = unwound && token ? landedDeclaration(token, doc, unwound.def) : unwound?.def;
+  if (!unwound || !(isInterface(def) || isStructure(def)) || ref.chain.length === 0) {
+    return undefined;
+  }
+  const fields = getTypeFields(def, unwound.doc);
+  const prop = fields?.get(ref.chain[0].text);
+  return fields && prop ? { doc: unwound.doc, fields, prop } : undefined;
+}
+
+/**
+ * X2b for the foreign keys `@db.table` interface `owner` inherits: a column
+ * its own `@db.rel.FK` checked over the fields of the type declaring it (a
+ * base that is no table, or a table of its own) is a constraint of THIS
+ * table too, so it is checked over this table's fields — reported on the
+ * table's `@db.table` (since 0.1.194).
+ */
+export function inheritedForeignKeyProblems(
+  owner: SemanticNode,
+  doc: AtscriptDoc,
+  range: Token["range"],
+): TMessages {
+  const fields = getTypeFields(owner, doc);
+  const errors = [] as TMessages;
+  for (const [name, prop] of fields ?? []) {
+    if (prop.countAnnotations("db.rel.FK") === 0) continue;
+    if (checkedAsFieldOf(prop, "db.rel.FK", owner)) continue;
+    const ref = fkChainRef(prop.getDefinition());
+    const target = ref && fkTarget(ref, doc);
+    if (!ref || !target) continue;
+    const alias = getAnnotationAlias(prop, "db.rel.FK");
+    if (!compositeFkCovered(fields!, alias, ref.id!, target.fields, target.prop)) {
+      const path = `${ref.id}.${ref.chain.map((c) => c.text).join(".")}`;
+      errors.push({
+        message: `Inherited field "${name}": ${compositeFkMessage(path)}`,
+        severity: 1,
+        range,
+      });
+    }
+  }
+  return errors;
 }
 
 export const dbRelAnnotations: TAnnotationsTree = {
@@ -103,7 +165,8 @@ export const dbRelAnnotations: TAnnotationsTree = {
       },
       validate(token, args, doc) {
         const errors = [] as TMessages;
-        const field = token.parentNode!;
+        const field = annotationTarget(token, doc);
+        if (!field) return errors;
         const alias = args[0]?.text;
 
         // F1 (relaxed): `@db.rel.FK` validates on any interface kind — @db.table hosts get the
@@ -131,76 +194,66 @@ export const dbRelAnnotations: TAnnotationsTree = {
         }
 
         const refTypeName = ref.id!;
-        const chainFields = ref.chain.map((c) => c.text);
+        const targetPath = `${refTypeName}.${ref.chain.map((c) => c.text).join(".")}`;
 
         // X2: FK target field must be @meta.id or @db.index.unique
         // F3: FK must resolve to a scalar type
         // (the target's fields include the ones it inherits)
-        const targetUnwound = doc.unwindType(refTypeName);
-        if (targetUnwound) {
-          const targetDef = targetUnwound.def;
-          if (isInterface(targetDef) || isStructure(targetDef)) {
-            const targetFields = getTypeFields(targetDef, targetUnwound.doc);
-            if (targetFields && chainFields.length > 0) {
-              const targetProp = targetFields.get(chainFields[0]);
-              if (targetProp) {
-                // X2: Check that target field is @meta.id or @db.index.unique
-                if (
-                  targetProp.countAnnotations("meta.id") === 0 &&
-                  targetProp.countAnnotations("db.index.unique") === 0
-                ) {
-                  errors.push({
-                    message: `@db.rel.FK target '${refTypeName}.${chainFields.join(".")}' is not a primary key (@meta.id) or unique (@db.index.unique) field`,
-                    severity: 1,
-                    range: token.range,
-                  });
-                }
+        const target = fkTarget(ref, doc, token);
+        if (target) {
+          const { prop: targetProp, fields: targetFields } = target;
+          // X2: Check that target field is @meta.id or @db.index.unique
+          if (
+            targetProp.countAnnotations("meta.id") === 0 &&
+            targetProp.countAnnotations("db.index.unique") === 0
+          ) {
+            errors.push({
+              message: `@db.rel.FK target '${targetPath}' is not a primary key (@meta.id) or unique (@db.index.unique) field`,
+              severity: 1,
+              range: token.range,
+            });
+          }
 
-                // X2b: a column of a composite primary key is not unique on its own
-                if (
-                  !checkCompositeFkCoverage(
-                    token,
-                    doc,
-                    alias,
-                    refTypeName,
-                    targetFields,
-                    targetProp,
-                  )
-                ) {
-                  errors.push({
-                    message: `@db.rel.FK target '${refTypeName}.${chainFields.join(".")}' is one column of a composite primary key — a foreign key must reference a unique column; for value help without a constraint use @ui.valueHelp`,
-                    severity: 1,
-                    range: token.range,
-                  });
-                }
+          // X2b: on a @db.table, a column of a composite primary key is not unique on its own
+          const owner = getDbTableOwner(token, doc);
+          const hostFields = getTypeFields(getParentStruct(token, doc), doc);
+          if (
+            owner !== undefined &&
+            isDbTable(owner) &&
+            hostFields &&
+            !compositeFkCovered(hostFields, alias, refTypeName, targetFields, targetProp)
+          ) {
+            errors.push({
+              message: compositeFkMessage(targetPath),
+              severity: 1,
+              range: token.range,
+            });
+          }
 
-                // F3: Check that FK resolves to a scalar type
-                const propDef = targetProp.getDefinition();
-                if (propDef && isRef(propDef)) {
-                  // resolved where it is written — an inherited key may be another file
-                  const propUnwound = targetUnwound.doc.unwindRef(propDef);
-                  if (propUnwound && !isPrimitive(propUnwound.def)) {
-                    errors.push({
-                      message: `Foreign key field must resolve to a scalar type (number, string, etc.), got '${propDef.id}'`,
-                      severity: 1,
-                      range: token.range,
-                    });
-                  }
-                } else if (propDef && !isPrimitive(propDef)) {
-                  errors.push({
-                    message: `Foreign key field must resolve to a scalar type (number, string, etc.)`,
-                    severity: 1,
-                    range: token.range,
-                  });
-                }
-              }
+          // F3: Check that FK resolves to a scalar type
+          const propDef = targetProp.getDefinition();
+          if (propDef && isRef(propDef)) {
+            // resolved where it is written — an inherited key may be another file
+            const propUnwound = target.doc.unwindRef(propDef);
+            if (propUnwound && !isPrimitive(propUnwound.def)) {
+              errors.push({
+                message: `Foreign key field must resolve to a scalar type (number, string, etc.), got '${propDef.id}'`,
+                severity: 1,
+                range: token.range,
+              });
             }
+          } else if (propDef && !isPrimitive(propDef)) {
+            errors.push({
+              message: `Foreign key field must resolve to a scalar type (number, string, etc.)`,
+              severity: 1,
+              range: token.range,
+            });
           }
         }
 
         // F4: Multiple unaliased FKs to same target type (inherited FKs included)
         if (!alias) {
-          const fields = getTypeFields(getParentStruct(token), doc);
+          const fields = getTypeFields(getParentStruct(token, doc), doc);
           if (fields) {
             let sameTargetCount = 0;
             for (const [, prop] of fields) {
@@ -252,11 +305,12 @@ export const dbRelAnnotations: TAnnotationsTree = {
       },
       validate(token, args, doc) {
         const errors = [] as TMessages;
-        const field = token.parentNode!;
+        const field = annotationTarget(token, doc);
+        if (!field) return errors;
         const alias = args[0]?.text;
 
         // T2: Must be on a @db.table interface
-        const owner = getDbTableOwner(token);
+        const owner = getDbTableOwner(token, doc);
         if (!owner || owner.countAnnotations("db.table") === 0) {
           errors.push({
             message: "@db.rel.to is only valid on fields of a @db.table interface",
@@ -274,15 +328,16 @@ export const dbRelAnnotations: TAnnotationsTree = {
           });
         }
 
-        const targetTypeName = getNavTargetTypeName(field);
-        if (!targetTypeName) {
+        const targetRef = getNavTargetRef(field);
+        const targetTypeName = targetRef?.id;
+        if (!targetRef || !targetTypeName) {
           return errors;
         }
 
-        // T1: Target type must have @db.table
-        const unwound = doc.unwindType(targetTypeName);
+        // T1: Target type must have @db.table (resolved where the field is written)
+        const unwound = doc.refOrigin(targetRef).unwindType(targetTypeName);
         if (unwound) {
-          const targetDef = unwound.def;
+          const targetDef = landedDeclaration(token, doc, unwound.def);
           const targetNode = isInterface(targetDef) ? targetDef : undefined;
           if (!targetNode || targetNode.countAnnotations("db.table") === 0) {
             errors.push({
@@ -304,7 +359,7 @@ export const dbRelAnnotations: TAnnotationsTree = {
         }
 
         // T3/T4/T5/T6: Find matching FK on this interface (inherited fields included)
-        const struct = getParentStruct(token);
+        const struct = getParentStruct(token, doc);
         if (struct) {
           // T6: Duplicate .to with same alias/target
           const fieldName = field.id;
@@ -382,11 +437,12 @@ export const dbRelAnnotations: TAnnotationsTree = {
       },
       validate(token, args, doc) {
         const errors = [] as TMessages;
-        const field = token.parentNode!;
+        const field = annotationTarget(token, doc);
+        if (!field) return errors;
         const alias = args[0]?.text;
 
         // R2: Must be on a @db.table interface
-        const owner = getDbTableOwner(token);
+        const owner = getDbTableOwner(token, doc);
         if (!owner || owner.countAnnotations("db.table") === 0) {
           errors.push({
             message: "@db.rel.from is only valid on fields of a @db.table interface",
@@ -404,17 +460,19 @@ export const dbRelAnnotations: TAnnotationsTree = {
           });
         }
 
-        const targetTypeName = getNavTargetTypeName(field);
-        if (!targetTypeName) {
+        const targetRef = getNavTargetRef(field);
+        const targetTypeName = targetRef?.id;
+        if (!targetRef || !targetTypeName) {
           return errors;
         }
 
-        // R1: Target type must have @db.table
-        const unwound = doc.unwindType(targetTypeName);
+        // R1: Target type must have @db.table (resolved where the field is written)
+        const unwound = doc.refOrigin(targetRef).unwindType(targetTypeName);
         if (!unwound) {
           return errors;
         }
-        const targetDef = unwound.def;
+        // (the table this block writes into — a self-relation — as the block lands it)
+        const targetDef = landedDeclaration(token, doc, unwound.def);
         const targetDoc = unwound.doc;
         if (!isInterface(targetDef) || targetDef.countAnnotations("db.table") === 0) {
           errors.push({
@@ -426,7 +484,7 @@ export const dbRelAnnotations: TAnnotationsTree = {
         }
 
         // R6: Duplicate .from with same alias/target (inherited fields included)
-        const fields = getTypeFields(getParentStruct(token), doc);
+        const fields = getTypeFields(getParentStruct(token, doc), doc);
         if (fields) {
           const fieldName = field.id;
           for (const [name, prop] of fields) {
@@ -452,7 +510,7 @@ export const dbRelAnnotations: TAnnotationsTree = {
         }
 
         // R3/R4/R5: Find matching FK on the target type pointing back to this type
-        const thisTypeName = getParentTypeName(token);
+        const thisTypeName = getParentTypeName(token, doc);
         if (!thisTypeName) {
           return errors;
         }
@@ -522,7 +580,8 @@ export const dbRelAnnotations: TAnnotationsTree = {
       },
       validate(token, args, doc) {
         const errors = [] as TMessages;
-        const field = token.parentNode!;
+        const field = annotationTarget(token, doc);
+        if (!field) return errors;
 
         // V6: Cannot coexist with .to or .from
         if (field.countAnnotations("db.rel.to") > 0 || field.countAnnotations("db.rel.from") > 0) {
@@ -566,13 +625,13 @@ export const dbRelAnnotations: TAnnotationsTree = {
         if (!junctionUnwound) {
           return errors;
         }
-        const junctionDef = junctionUnwound.def;
+        const junctionDef = landedDeclaration(token, doc, junctionUnwound.def);
         if (!isInterface(junctionDef)) {
           return errors;
         }
 
         // Get this type name and target type name
-        const thisTypeName = getParentTypeName(token);
+        const thisTypeName = getParentTypeName(token, doc);
         const targetTypeName = getNavTargetTypeName(field);
         if (!thisTypeName || !targetTypeName) {
           return errors;
@@ -638,9 +697,10 @@ export const dbRelAnnotations: TAnnotationsTree = {
       ),
       nodeType: ["prop"],
       passedWhenReferred: false,
-      validate(token) {
+      validate(token, _args, doc) {
         const errors = [] as TMessages;
-        const field = token.parentNode!;
+        const field = annotationTarget(token, doc);
+        if (!field) return errors;
         const isNav =
           field.countAnnotations("db.rel.to") > 0 ||
           field.countAnnotations("db.rel.from") > 0 ||
@@ -676,7 +736,8 @@ export const dbRelAnnotations: TAnnotationsTree = {
       },
       validate(token, args, doc) {
         const errors = [] as TMessages;
-        const field = token.parentNode!;
+        const field = annotationTarget(token, doc);
+        if (!field) return errors;
 
         const hasTo = field.countAnnotations("db.rel.to") > 0;
         const hasFrom = field.countAnnotations("db.rel.from") > 0;

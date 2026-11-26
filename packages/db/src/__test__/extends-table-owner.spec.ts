@@ -950,3 +950,117 @@ export interface EfPrice extends EfPricedBase {
     expect(await diagnostics(source)).toContain(message);
   });
 });
+
+// A cross-field rule a field's own annotation checks over the fields of the
+// type declaring it: when a table inherits the fields from its bases, the
+// table checks the rule over its own fields, on its `@db.table` (since 0.1.194).
+describe("cross-field rules over the fields a table inherits", () => {
+  const ref = `
+@db.table 'ef_refs'
+export interface EfRef {
+    @meta.id
+    a: string
+
+    @meta.id
+    b: string
+}
+`;
+  const compositeMessage =
+    "@db.rel.FK target 'EfRef.a' is one column of a composite primary key — a foreign key must reference a unique column; for value help without a constraint use @ui.valueHelp";
+
+  it("two version columns from two bases: one error, on the declared @db.table", async () => {
+    const found = await diagnosticsIn({
+      "fixture.as": `
+export interface EfCreated {
+    @db.column.version
+    a: number.int
+}
+
+export interface EfEdited {
+    @db.column.version
+    b: number.int
+}
+
+@db.table 'ef_twice'
+export interface EfTwice extends EfCreated, EfEdited {
+    @meta.id
+    id: string
+}
+
+@db.table 'ef_twice'
+annotate EfTwice {
+}`,
+    });
+    expect(found).toEqual([
+      {
+        file: "fixture.as",
+        line: 11,
+        message: 'At most one @db.column.version per table — inherited: "a", "b"',
+      },
+    ]);
+  });
+
+  it("a foreign key a base that is no table declares to one column of a composite key", async () => {
+    const found = await diagnosticsIn({
+      "fixture.as": `${ref}
+export interface EfRefHolder {
+    @db.rel.FK 'ref'
+    refA: EfRef.a
+}
+
+@db.table 'ef_holders'
+export interface EfHolder extends EfRefHolder {
+    @meta.id
+    id: string
+}`,
+    });
+    expect(found).toEqual([
+      {
+        file: "fixture.as",
+        line: 15,
+        message: `Inherited field "refA": ${compositeMessage}`,
+      },
+    ]);
+  });
+
+  it.each([
+    [
+      "the table declares the other column",
+      `
+export interface EfRefHolder {
+    @db.rel.FK 'ref'
+    refA: EfRef.a
+}
+
+@db.table 'ef_holders'
+export interface EfHolder extends EfRefHolder {
+    @meta.id
+    id: string
+
+    @db.rel.FK 'ref'
+    refB: EfRef.b
+}`,
+    ],
+    [
+      "two bases declare one column each",
+      `
+export interface EfRefA {
+    @db.rel.FK 'ref'
+    refA: EfRef.a
+}
+
+export interface EfRefB {
+    @db.rel.FK 'ref'
+    refB: EfRef.b
+}
+
+@db.table 'ef_holders'
+export interface EfHolder extends EfRefA, EfRefB {
+    @meta.id
+    id: string
+}`,
+    ],
+  ])("an inherited composite foreign key is accepted when %s", async (_name, source) => {
+    expect(await diagnostics(ref + source)).toEqual([]);
+  });
+});

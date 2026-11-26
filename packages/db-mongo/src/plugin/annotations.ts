@@ -16,6 +16,7 @@ import {
   annotationExample,
 } from "@atscript/core";
 import {
+  annotationTarget,
   encryptedSearchProblem,
   findStoredField,
   primitiveBaseType,
@@ -155,23 +156,6 @@ function nonStringValue(
 }
 
 /**
- * The prop an annotation on `field` describes: the prop itself, or — for an
- * `annotate` block entry — the prop the entry names (`undefined` when it names
- * several, through a union).
- */
-function describedProp(
-  field: SemanticNode,
-  doc: AtscriptDoc,
-): { prop: SemanticNode; doc: AtscriptDoc } | undefined {
-  if (!isRef(field)) return { prop: field, doc };
-  const at = field.token("identifier")?.range.start;
-  const block = at && doc.annotateBlockAt(at.line, at.character);
-  const found =
-    block && doc.unwindType(block.targetName, [field.id!, ...field.chain.map((c) => c.text)]);
-  return found?.node ? { prop: found.node, doc: found.doc } : undefined;
-}
-
-/**
  * `validate` of a field annotation that maps the field as an Atlas Search
  * `string`: the ciphertext refusal, then the rule that the field's declared
  * type holds strings only.
@@ -188,8 +172,9 @@ function stringMappingValidate(annotation: string): TAnnotationSpecConfig["valid
     if (held) {
       // (an integer — `number.int`, `@expect.int`, `@db.default.increment` — can join a
       // fulltext index instead)
-      const described = describedProp(field, doc);
-      const verdict = described && searchFieldVerdict(described.prop, described.doc);
+      // (the field it lands on — in an `annotate` block, the field the entry names)
+      const described = annotationTarget(token, doc);
+      const verdict = described && searchFieldVerdict(described, doc);
       const instead =
         verdict && "kind" in verdict && verdict.kind === "integer"
           ? "to match it by exact number, list it in @db.index.fulltext; for text search, annotate a string field"
@@ -340,7 +325,8 @@ export const annotations: TAnnotationsTree = {
       multiple: false,
       validate(token, _args, doc) {
         // A dynamic mapping indexes every string field — ciphertext included
-        const encrypted = findStoredField(token.parentNode, doc, (prop, path) =>
+        // (the interface it lands on — in an `annotate` block, the one the block writes into)
+        const encrypted = findStoredField(annotationTarget(token, doc), doc, (prop, path) =>
           prop.countAnnotations("db.encrypted") > 0 ? path : undefined,
         );
         if (!encrypted) return [];

@@ -172,6 +172,14 @@ export function isIntegerTextField(meta: TableMetadata, fd: TDbFieldMeta): boole
   return valueTypeOf(meta, fd).integerText === true;
 }
 
+/**
+ * Whether a filter on `fd` accepts `value` as a comparison operand — the
+ * guard above (a key part takes the same values, since 0.1.194).
+ */
+export function acceptsFilterValue(meta: TableMetadata, fd: TDbFieldMeta, value: unknown): boolean {
+  return rejectedValue(valueTypeOf(meta, fd), value) === undefined;
+}
+
 /** A decimal literal (`5`, `-1.5`, `.5`, `1e3`), surrounding blanks allowed — no hex, no `Infinity`. */
 const NUMERIC_RE = /^\s*[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?\s*$/i;
 /** An integer literal (`5`, `-12`), surrounding blanks allowed. */

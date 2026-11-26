@@ -10,6 +10,7 @@ import type {
 } from "@atscript/core";
 
 import {
+  annotationTarget,
   getAnnotationAlias,
   getDbTableOwner,
   getNavTargetTypeName,
@@ -88,14 +89,14 @@ export function joinOrderScope(join: TAnnotationTokens): TQueryScope | undefined
  * unqualified — the `@db.view.having` scope.
  * @since 0.1.147
  */
-export function computeScope(propToken: Token): TQueryScope | undefined {
-  const view = getDbTableOwner(propToken);
+export function computeScope(propToken: Token, doc: AtscriptDoc): TQueryScope | undefined {
+  const view = getDbTableOwner(propToken, doc);
   return view ? viewHavingScope(view) : undefined;
 }
 
 /** The condition of a `@db.agg.*` on a view field: the scope of the view's `@db.view.filter`. */
-export function aggConditionScope(propToken: Token): TQueryScope | undefined {
-  const view = getDbTableOwner(propToken);
+export function aggConditionScope(propToken: Token, doc: AtscriptDoc): TQueryScope | undefined {
+  const view = getDbTableOwner(propToken, doc);
   return view ? viewFilterScope(view) : undefined;
 }
 
@@ -104,10 +105,10 @@ export function aggConditionScope(propToken: Token): TQueryScope | undefined {
  * of the prop's chain-ref type, else of the view's `@db.view.for` entry —
  * where the runtime reads the aggregate's source column from.
  */
-export function aggFieldScope(propToken: Token): TQueryScope | undefined {
-  const def = propToken.parentNode?.getDefinition();
+export function aggFieldScope(propToken: Token, doc: AtscriptDoc): TQueryScope | undefined {
+  const def = annotationTarget(propToken, doc)?.getDefinition();
   const refType = def && isRef(def) && def.hasChain ? def.id : undefined;
-  const view = refType ? undefined : getDbTableOwner(propToken);
+  const view = refType ? undefined : getDbTableOwner(propToken, doc);
   const target = refType ?? (view ? viewEntry(view) : undefined);
   return target ? { allowedTypes: [], unqualifiedTarget: target } : undefined;
 }
@@ -153,24 +154,35 @@ function joinOfArg(joins: TAnnotationTokens[], arg: Token): TAnnotationTokens | 
   return joins.find((a) => a.args.includes(arg));
 }
 
+/** The scope of the node an argument's annotation applies to ({@link annotationTarget}). */
+function onTarget(
+  scope: (node: SemanticNode) => TQueryScope | undefined,
+): (arg: Token, doc: AtscriptDoc) => TQueryScope | undefined {
+  return (arg, doc) => {
+    const node = annotationTarget(arg, doc);
+    return node ? scope(node) : undefined;
+  };
+}
+
 /** The `fieldScope` hooks (argument token → scope) the annotation specs declare. */
 export const fieldScopes = {
-  viewFilter: (arg) => (arg.parentNode ? viewFilterScope(arg.parentNode) : undefined),
-  viewJoin: (arg) => {
-    const view = arg.parentNode;
+  viewFilter: onTarget(viewFilterScope),
+  viewJoin: (arg, doc) => {
+    const view = annotationTarget(arg, doc);
     const joins = view ? viewJoins(view) : [];
     const join = joinOfArg(joins, arg);
     return view && join ? viewJoinScope(view, join, earlierJoinTargets(joins, join)) : undefined;
   },
-  joinOrder: (arg) => {
-    const join = arg.parentNode ? joinOfArg(viewJoins(arg.parentNode), arg) : undefined;
+  joinOrder: (arg, doc) => {
+    const view = annotationTarget(arg, doc);
+    const join = view ? joinOfArg(viewJoins(view), arg) : undefined;
     return join ? joinOrderScope(join) : undefined;
   },
-  viewHaving: (arg) => (arg.parentNode ? viewHavingScope(arg.parentNode) : undefined),
+  viewHaving: onTarget(viewHavingScope),
   compute: computeScope,
   aggCondition: aggConditionScope,
   aggField: aggFieldScope,
-  relFilter: (arg) => (arg.parentNode ? relFilterScope(arg.parentNode) : undefined),
+  relFilter: onTarget(relFilterScope),
 } satisfies Record<string, TFieldScopeHook>;
 
 // The `refFilter` predicates of the ref arguments — the validators pass the

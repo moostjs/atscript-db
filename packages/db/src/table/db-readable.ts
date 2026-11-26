@@ -101,6 +101,7 @@ import { deletePath, isEmptyObject, selfOrAncestor } from "../shared/object";
 import { rowMatchesKey } from "../shared/keys";
 import { storedValuesFilter } from "../query/normalize-filter";
 import { unionValueMembers } from "../shared/union-shape";
+import { acceptsFilterValue } from "../query/filter-values";
 
 /** A read translated for the adapter, with what finishing its rows needs — see `_translateRead`. */
 interface TReadPlan {
@@ -323,33 +324,45 @@ function withInnerKeys(query: AggregateQuery): AggregateQuery {
 }
 
 /**
- * Checks whether an id value is type-compatible with a field's design type.
- * Used by `findById` to skip primary-key lookup when the id clearly can't match,
- * falling through to unique-property search instead. Takes the value after
- * {@link idValue} (a boolean field's `"true"` / `"false"` already a boolean).
+ * An id part (`raw`: what a URL or a caller sends) as its key field `field`
+ * compares it, or `undefined` when it cannot be a value of the field — the
+ * identification then matches no row, on every adapter, without a read.
+ *
+ * The type of the field's column decides (since 0.1.194; `T | null` is a
+ * `T`, number literals a number — `resolveDesignType`):
+ *
+ * - a number takes what a filter on the field takes ({@link acceptsFilterValue}):
+ *   numeric text (`'5'`, `'-1.5'`; no hex, no `Infinity`), kept as the text
+ *   (the adapter's `prepareId` converts it); an integer field (`number.int`
+ *   and its sizes, `number.timestamp`, `@expect.int`, `@db.default.increment`
+ *   / `@db.default.now`) whole numbers only (`'1.5'` is none);
+ * - a boolean exactly `true` / `false` (since 0.1.192);
+ * - an object or array an object;
+ * - anything else text, with the field's `@normalize.*` applied (like a
+ *   filter's equality).
  */
-function isIdCompatible(id: unknown, fieldType: TAtscriptAnnotatedType): boolean {
-  const dt = resolveDesignType(fieldType);
-  switch (dt) {
+function keyPartValue(
+  meta: TableMetadata,
+  field: string,
+  fieldType: TAtscriptAnnotatedType,
+  raw: unknown,
+): unknown {
+  switch (resolveDesignType(fieldType)) {
     case "number": {
-      if (typeof id === "number") {
-        return true;
-      }
-      if (typeof id === "string") {
-        return id !== "" && !Number.isNaN(Number(id));
-      }
-      return false;
+      const fd = meta.descriptorByPath.get(field);
+      const numeric = typeof raw === "number" || typeof raw === "string";
+      return numeric && fd && acceptsFilterValue(meta, fd, raw) ? raw : undefined;
     }
     case "boolean": {
-      return typeof id === "boolean";
+      const value = raw === "true" ? true : raw === "false" ? false : raw;
+      return typeof value === "boolean" ? value : undefined;
     }
     case "object":
     case "array": {
-      return typeof id === "object" && id !== null;
+      return typeof raw === "object" && raw !== null ? raw : undefined;
     }
     default: {
-      // 'string' and unknown design types
-      return typeof id === "string";
+      return typeof raw === "string" ? normalizeForType(fieldType, raw) : undefined;
     }
   }
 }
@@ -2470,9 +2483,9 @@ export class AtscriptDbReadable<
     const filter: FilterExpr = {};
     for (const field of fields) {
       const fieldType = this.flatMap.get(field);
-      const value = idValue(fieldType, idObj[field]);
+      const raw = idObj[field];
+      const value = fieldType ? keyPartValue(this._meta, field, fieldType, raw) : raw;
       if (value === undefined) return null;
-      if (fieldType && !isIdCompatible(value, fieldType)) return null;
       try {
         filter[field] = fieldType ? this.adapter.prepareId(value, fieldType) : value;
       } catch {
@@ -2487,8 +2500,8 @@ export class AtscriptDbReadable<
    */
   private _tryFieldFilter(field: string, raw: unknown): FilterExpr | null {
     const fieldType = this.flatMap.get(field);
-    const id = idValue(fieldType, raw);
-    if (fieldType && !isIdCompatible(id, fieldType)) {
+    const id = fieldType ? keyPartValue(this._meta, field, fieldType, raw) : raw;
+    if (id === undefined) {
       return null;
     }
     try {
@@ -2537,19 +2550,4 @@ export class AtscriptDbReadable<
   ): TDbForeignKey | undefined {
     return findRemoteFK(targetTable, thisTableName, alias);
   }
-}
-
-/**
- * An id value as the field stores it (`@normalize.*` applied), like a
- * filter's equality. For a boolean field the text `true` / `false` — what a
- * URL carries (`GET /one?id=…&active=true`) — is the boolean it names (since
- * 0.1.192), so the filter compares a boolean; any other text stays text and
- * {@link isIdCompatible} refuses it.
- */
-function idValue(fieldType: TAtscriptAnnotatedType | undefined, value: unknown): unknown {
-  if (!fieldType || typeof value !== "string") return value;
-  if (resolveDesignType(fieldType) === "boolean") {
-    return value === "true" ? true : value === "false" ? false : value;
-  }
-  return normalizeForType(fieldType, value);
 }

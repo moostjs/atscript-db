@@ -228,21 +228,20 @@ export class MemoryAdapter extends BaseDbAdapter {
    * coerce the bound parameter; memory cannot, so it MUST coerce here.
    *
    * Mirrors the Mongo adapter's `prepareId` MINUS its `objectId` branch (an
-   * in-memory store has no ObjectId ids): a boolean field — `boolean | null`
-   * included — keeps the boolean the framework hands over (a key part
-   * `active: boolean`, since 0.1.192), a leaf `designType` of `"number"`
+   * in-memory store has no ObjectId ids). The field's column type decides
+   * (`resolveDesignType`: `T | null` is a `T`, number literals `1 | 2 | 3` a
+   * number — since 0.1.194): a boolean field keeps the boolean the framework
+   * hands over (a key part `active: boolean`, since 0.1.192), a number field
    * coerces via `Number(id)`, everything else via `String(id)`.
    */
   override prepareId(id: unknown, _fieldType: unknown): unknown {
     const fieldType = _fieldType as TAtscriptAnnotatedType;
-    if (resolveDesignType(fieldType) === "boolean") {
+    const designType = resolveDesignType(fieldType);
+    if (designType === "boolean") {
       return id;
     }
-    if (fieldType.type.kind === "") {
-      const dt = (fieldType.type as any).designType;
-      if (dt === "number") {
-        return Number(id);
-      }
+    if (designType === "number") {
+      return Number(id);
     }
     return String(id);
   }

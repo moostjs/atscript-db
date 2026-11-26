@@ -483,16 +483,15 @@ export class MongoAdapter extends BaseDbAdapter {
     if ((tags as Set<string>)?.has("objectId") && (tags as Set<string>)?.has("mongo")) {
       return id instanceof ObjectId ? id : new ObjectId(id as string);
     }
-    // a boolean key part (`boolean | null` included) compares as the boolean
-    // the framework hands over
-    if (resolveDesignType(fieldType) === "boolean") {
+    // The field's column type decides (`T | null` is a `T`, number literals
+    // `1 | 2 | 3` a number — since 0.1.194): a boolean key part compares as
+    // the boolean the framework hands over, a number one as a number.
+    const designType = resolveDesignType(fieldType);
+    if (designType === "boolean") {
       return id;
     }
-    if (fieldType.type.kind === "") {
-      const dt = (fieldType.type as any).designType;
-      if (dt === "number") {
-        return Number(id);
-      }
+    if (designType === "number") {
+      return Number(id);
     }
     return String(id);
   }

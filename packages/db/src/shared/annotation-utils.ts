@@ -2,6 +2,8 @@ import {
   AnnotationSpec,
   annotationExample,
   type AtscriptDoc,
+  documentsEpoch,
+  isAnnotate,
   isArray,
   isConst,
   isGroup,
@@ -9,28 +11,200 @@ import {
   isPrimitive,
   isRef,
   isStructure,
-  type SemanticInterfaceNode,
+  SemanticInterfaceNode,
+  type SemanticAnnotateNode,
   type SemanticNode,
-  type SemanticPropNode,
-  type SemanticStructureNode,
+  SemanticPropNode,
+  type SemanticRefNode,
+  SemanticStructureNode,
+  type TAnnotationTokens,
   type Token,
   type TMessages,
 } from "@atscript/core";
 
 import { SEARCH_PROBLEM, searchKindOf } from "./search-fields";
 
+// ── Where an annotation lands (since 0.1.194) ───────────────────────────────
+
+/**
+ * The node a db annotation applies to, in the type it ends up in — the one
+ * rule every db check reads its field (or type) through, so an annotation is
+ * checked the same way whether it is written on the field or in an
+ * `annotate` block:
+ *
+ * - written on its node (a field, an interface, …): that node;
+ * - in an `annotate` block: the node it lands on in the {@link landBlock
+ *   landed copy} of the interface the block writes into — an entry's
+ *   annotation the top-level field it names, a top-level one the interface;
+ * - `undefined` for anything else in a block — a nested entry
+ *   (`address.city`), a block on a type that is no interface: such an
+ *   annotation is applied, but not checked.
+ *
+ * Without `doc` (a doc-optional helper called without one) the node it is
+ * written on, an annotate block's entry included.
+ */
+export function annotationTarget(token: Token, doc?: AtscriptDoc): SemanticNode | undefined {
+  const node = token.parentNode;
+  if (!node || !doc) return node;
+  if (isAnnotate(node)) return landBlock(node, doc)?.type;
+  if (!isRef(node)) return node;
+  const block = entryBlock(node, doc);
+  return block ? landBlock(block, doc)?.fields.get(node) : node;
+}
+
+/**
+ * Declaration `decl` as the annotation carrying `token` sees it: the landed
+ * copy when `decl` is the interface the token's `annotate` block writes into
+ * — a relation to the same table, completed in the same block — else `decl`
+ * (another interface is read as declared).
+ */
+export function landedDeclaration(
+  token: Token,
+  doc: AtscriptDoc,
+  decl: SemanticNode,
+): SemanticNode {
+  const node = token.parentNode;
+  const block = isAnnotate(node) ? node : isRef(node) ? entryBlock(node, doc) : undefined;
+  const landing = block && landBlock(block, doc);
+  return landing && landing.decl === decl ? landing.type : decl;
+}
+
+/** The `annotate` block an annotated entry belongs to, if `ref` is one. */
+function entryBlock(ref: SemanticRefNode, doc: AtscriptDoc): SemanticAnnotateNode | undefined {
+  const at = ref.token("identifier")?.range.start;
+  const block = at && doc.annotateBlockAt(at.line, at.character);
+  return block && block.annotatedEntries.includes(ref) ? block : undefined;
+}
+
+/** The landed copy of an `annotate` block (see {@link landBlock}). */
+interface TLanding {
+  /** The declared interface the block writes into. */
+  decl: SemanticNode;
+  /** The interface the block writes into, with the block's annotations applied. */
+  type: SemanticInterfaceNode;
+  /** Each annotated top-level entry → the field it lands on. */
+  fields: Map<SemanticRefNode, SemanticPropNode>;
+}
+
+/** {@link landBlock} per block, per documents' epoch (any document's change invalidates it). */
+const landings = new WeakMap<
+  SemanticAnnotateNode,
+  { epoch: number; landing: TLanding | undefined }
+>();
+
+/**
+ * The landed copy of `annotate` block `block` (declared in `doc`): a
+ * check-only copy of the interface the block writes into, its fields
+ * (inherited ones included) with the block's top-level entries applied —
+ * what the checks of an annotation in the block see, as they see a declared
+ * interface. `undefined` when the block's target, as the compiler resolves
+ * it, is no interface.
+ *
+ * - `annotate T { … }` writes into T (`AtscriptDoc.blockTarget`): T's fields
+ *   with the block's annotations over T's own (`AtscriptDoc.overlayAnnotations`,
+ *   the way the block applies them to T's metadata);
+ * - `annotate T as U { … }` declares U, a copy of T (`AtscriptDoc.declTarget`):
+ *   T's fields with U's entries merged in, and U's type-level annotations
+ *   over T's (`AtscriptDoc.evalAnnotationsForNode`). U is a `@db.table` when
+ *   T is, and it answers to T's name: the references in its fields, and the
+ *   foreign keys to its rows, name T.
+ *
+ * Other blocks writing into the same interface are not applied (an
+ * annotation written on the field does not see them either).
+ */
+function landBlock(block: SemanticAnnotateNode, doc: AtscriptDoc): TLanding | undefined {
+  const epoch = documentsEpoch();
+  const known = landings.get(block);
+  if (known?.epoch === epoch) return known.landing;
+  const landing = buildLanding(block, doc);
+  landings.set(block, { epoch, landing });
+  return landing;
+}
+
+function buildLanding(block: SemanticAnnotateNode, doc: AtscriptDoc): TLanding | undefined {
+  const target = block.isMutating ? doc.blockTarget(block) : doc.declTarget(block.targetName);
+  const decl = target && ("node" in target ? target.node : target.def);
+  if (!target || !isInterface(decl)) return undefined;
+  const fields = getTypeFields(decl, target.doc) ?? new Map<string, SemanticPropNode>();
+  // (a nested entry lands nowhere: it is not checked; a repeated entry is a compile error)
+  const entries = new Map(
+    block.annotatedEntries.filter((entry) => !entry.hasChain).map((entry) => [entry.id!, entry]),
+  );
+
+  const type = new SemanticInterfaceNode();
+  const name = decl.token("identifier");
+  if (name) type.carryToken(name, "identifier");
+  setAnnotations(
+    type,
+    block.isMutating
+      ? doc.overlayAnnotations(decl.annotations, block.annotations ?? [])
+      : doc.evalAnnotationsForNode(block),
+  );
+
+  const landed = new Map<SemanticRefNode, SemanticPropNode>();
+  const props: SemanticPropNode[] = [];
+  for (const [fieldName, prop] of fields) {
+    const entry = entries.get(fieldName);
+    let annotations = prop.annotations;
+    if (entry) {
+      annotations = block.isMutating
+        ? doc.overlayAnnotations(annotations, entry.annotations!)
+        : doc.mergeNodesAnnotations(annotations, entry.annotations!, true);
+    }
+    const copy = landProp(prop, annotations, target.doc);
+    props.push(copy);
+    if (entry) landed.set(entry, copy);
+  }
+  const struct = new SemanticStructureNode();
+  struct.setProps(props);
+  type.carryDefinition(struct);
+  return { decl, type, fields: landed };
+}
+
+/**
+ * A landed copy of field `prop` (of the interface declared in `doc`)
+ * carrying `annotations` (see {@link landBlock}), registered as declared
+ * where `prop` is (`AtscriptDoc.declaringDoc`).
+ */
+function landProp(
+  prop: SemanticPropNode,
+  annotations: TAnnotationTokens[] | undefined,
+  doc: AtscriptDoc,
+): SemanticPropNode {
+  const landed = new SemanticPropNode();
+  for (const key of ["identifier", "optional"] as const) {
+    const token = prop.token(key);
+    if (token) landed.carryToken(token, key);
+  }
+  const def = prop.getDefinition();
+  if (def) landed.carryDefinition(def);
+  setAnnotations(landed, annotations);
+  doc.declaringDoc(prop, doc).registerProp(landed);
+  return landed;
+}
+
+/** Sets a node's annotations and the counts `countAnnotations` reads. */
+function setAnnotations(node: SemanticNode, annotations: TAnnotationTokens[] | undefined): void {
+  node.annotations = annotations;
+  const counts = new Map<string, number>();
+  for (const a of annotations ?? []) counts.set(a.name, (counts.get(a.name) ?? 0) + 1);
+  node.annotationsCounter = counts;
+}
+
 /**
  * Names of a field's effective annotations: its own plus the ones it inherits
  * through its type ref (`price: Order.price`), with the `passedWhenReferred:
  * false` ones dropped — the set codegen writes into the field's runtime
- * metadata (`AtscriptDoc.evalAnnotationsForNode`). Compile checks that mirror
- * a runtime metadata check read this, not the own-only `countAnnotations`.
+ * metadata (`AtscriptDoc.evalAnnotationsForNode`, in the document declaring
+ * the field). Compile checks that mirror a runtime metadata check read this,
+ * not the own-only `countAnnotations`.
  * @since 0.1.162
  */
 export function effectiveAnnotationNames(field: SemanticNode, doc?: AtscriptDoc): Set<string> {
   const names = new Set(field.annotations?.map((a) => a.name));
   // Without a doc (callers built against <= 0.1.161) only the field's own annotations count.
-  for (const a of doc?.evalAnnotationsForNode(field) ?? []) names.add(a.name);
+  const fieldDoc = doc?.declaringDoc(field, doc);
+  for (const a of fieldDoc?.evalAnnotationsForNode(field) ?? []) names.add(a.name);
   return names;
 }
 
@@ -45,7 +219,9 @@ export function validateExclusiveWith(
   doc?: AtscriptDoc,
 ): TMessages {
   const errors = [] as TMessages;
-  const field = token.parentNode!;
+  // (an annotation that lands nowhere — a nested entry — is read on its entry)
+  const field = annotationTarget(token, doc) ?? token.parentNode;
+  if (!field) return errors;
   const effective = effectiveAnnotationNames(field, doc);
   for (const { key, displayName } of others) {
     if (!effective.has(key)) continue;
@@ -74,7 +250,10 @@ export function validateIncompatible(
   pairs: ReadonlyArray<readonly [annotation: string, why: string]>,
   doc?: AtscriptDoc,
 ): TMessages {
-  const effective = effectiveAnnotationNames(token.parentNode!, doc);
+  // (an annotation that lands nowhere — a nested entry — is read on its entry)
+  const field = annotationTarget(token, doc) ?? token.parentNode;
+  if (!field) return [];
+  const effective = effectiveAnnotationNames(field, doc);
   return pairs
     .filter(([name]) => effective.has(name))
     .map(([name, why]) => ({
@@ -125,7 +304,7 @@ export function isNullableUnion(
   if (!def || depth > 8) return false;
   if (isNullMember(def)) return true;
   if (isRef(def)) {
-    return isNullableUnion(doc.unwindType(def.id!, def.chain)?.def, doc, depth + 1);
+    return isNullableUnion(doc.unwindRef(def)?.def, doc, depth + 1);
   }
   const group = def as SemanticNode & {
     isGroup?: boolean;
@@ -159,7 +338,8 @@ export function searchFieldVerdict(
 ): { kind: "string" | "integer" | "other" } | { problem: string } {
   const def = field.getDefinition();
   if (!def || !isRef(def)) return { kind: "other" };
-  const leaf = doc.unwindType(def.id!, def.chain)?.def;
+  // (resolved where it is written — an annotate block's field may be another file's)
+  const leaf = doc.unwindRef(def)?.def;
   const base = primitiveBaseType(leaf);
   if (base === undefined) return { kind: "other" };
   // Effective annotations — what the runtime check reads off the field's
@@ -193,10 +373,12 @@ export function searchFieldVerdict(
  * fields include the inherited ones ({@link getTypeFields}; `doc` since 0.1.192).
  */
 export function integerMemberIndexProblem(token: Token, doc: AtscriptDoc): string | undefined {
-  const field = token.parentNode!;
-  const struct = getParentStruct(token);
+  const target = annotationTarget(token, doc);
+  const struct = getParentStruct(token, doc);
   const fields = getTypeFields(struct, doc);
-  if (!struct || !fields) return undefined;
+  if (!target || !struct || !fields) return undefined;
+  // (typed: a narrowed `target` in the loops below is a circular inference)
+  const field: SemanticNode = target;
   const props = [...fields.values()];
   const topLevel = !!struct.ownerNode && isInterface(struct.ownerNode);
   if (topLevel && field.id === "_id") return undefined;
@@ -236,7 +418,7 @@ export function validateSiblingStringField(
   const fieldName = args[0]?.text;
   if (!fieldName) return errors;
 
-  const fields = getTypeFields(getParentStruct(token), doc);
+  const fields = getTypeFields(getParentStruct(token, doc), doc);
   if (!fields) return errors;
 
   const sibling = fields.get(fieldName);
@@ -273,8 +455,8 @@ export function validateSiblingStringField(
  * @since 0.1.192
  */
 export function siblingStringFields(token: Token, doc: AtscriptDoc): SemanticPropNode[] {
-  const field = token.parentNode;
-  const fields = getTypeFields(getParentStruct(token), doc)?.values() ?? [];
+  const field = annotationTarget(token, doc);
+  const fields = getTypeFields(getParentStruct(token, doc), doc)?.values() ?? [];
   return [...fields].filter((prop) => prop !== field && isStringValued(prop.getDefinition(), doc));
 }
 
@@ -299,13 +481,14 @@ function isStringValued(def: SemanticNode | undefined, doc: AtscriptDoc, depth =
 }
 
 /**
- * Traverse from annotation token → prop → structure → interface
- * to check if the parent interface has @db.table.
+ * The interface whose top-level field the annotation's field is — else the
+ * structure holding the field (a nested object, a type's structure) — in the
+ * type it ends up in ({@link annotationTarget}; `doc` since 0.1.194):
+ * whether the field is a field of a `@db.table` / `@db.view` interface.
  */
-export function getDbTableOwner(token: Token): SemanticNode | undefined {
-  const field = token.parentNode!;
-  const struct = field.ownerNode;
-  if (!struct || !isStructure(struct)) {
+export function getDbTableOwner(token: Token, doc?: AtscriptDoc): SemanticNode | undefined {
+  const struct = getParentStruct(token, doc);
+  if (!struct) {
     return undefined;
   }
   const iface = struct.ownerNode;
@@ -313,13 +496,16 @@ export function getDbTableOwner(token: Token): SemanticNode | undefined {
 }
 
 /**
- * Get the parent structure node from an annotation token — the structure
- * that DECLARES the annotated field (see {@link getTypeFields} for the fields
+ * The structure holding the annotation's field ({@link annotationTarget};
+ * `doc` since 0.1.194) — the one that DECLARES it, or for an annotate
+ * block's field the one it lands in (see {@link getTypeFields} for the fields
  * of the type, inherited ones included).
  */
-export function getParentStruct(token: Token): SemanticStructureNode | undefined {
-  const field = token.parentNode!;
-  const struct = field.ownerNode;
+export function getParentStruct(
+  token: Token,
+  doc?: AtscriptDoc,
+): SemanticStructureNode | undefined {
+  const struct = annotationTarget(token, doc)?.ownerNode;
   return struct && isStructure(struct) ? (struct as SemanticStructureNode) : undefined;
 }
 
@@ -351,10 +537,12 @@ export function getTypeFields(
 }
 
 /**
- * Get the parent interface name (for error messages and cross-type resolution).
+ * Get the parent interface name (for error messages and cross-type
+ * resolution) — of the type the field ends up in ({@link annotationTarget};
+ * `doc` since 0.1.194).
  */
-export function getParentTypeName(token: Token): string | undefined {
-  const struct = getParentStruct(token);
+export function getParentTypeName(token: Token, doc?: AtscriptDoc): string | undefined {
+  const struct = getParentStruct(token, doc);
   if (!struct) {
     return undefined;
   }
@@ -372,7 +560,8 @@ export function validateFieldBaseType(
   expectedType: string | string[],
 ): TMessages {
   const errors = [] as TMessages;
-  const field = token.parentNode!;
+  const field = annotationTarget(token, doc);
+  if (!field) return errors;
   const baseType = getPrimitiveBaseType(field, doc);
   if (baseType === undefined) return errors;
   const allowed = Array.isArray(expectedType) ? expectedType : [expectedType];
@@ -391,14 +580,35 @@ export function validateFieldBaseType(
  * Unwraps arrays (e.g., `Post[]` → `Post`).
  */
 export function getNavTargetTypeName(field: SemanticNode): string | undefined {
+  return getNavTargetRef(field)?.id;
+}
+
+/**
+ * The type reference of a navigational field's target (`Post` of
+ * `posts: Post[]`) — its name resolves where it is written
+ * (`AtscriptDoc.refOrigin`).
+ * @since 0.1.194
+ */
+export function getNavTargetRef(field: SemanticNode): SemanticRefNode | undefined {
   let def = field.getDefinition();
   if (isArray(def)) {
     def = def?.getDefinition();
   }
-  if (isRef(def)) {
-    return def.id!;
-  }
-  return undefined;
+  return isRef(def) ? def : undefined;
+}
+
+/**
+ * Whether annotation `name` on `prop` — a field of the interface `owner` — is
+ * written on one of `owner`'s own fields, so its own `validate` checked it as
+ * a field of `owner`. Otherwise `owner` inherits it, and a rule over
+ * `owner`'s fields is checked on `owner`'s `@db.table` (since 0.1.194).
+ */
+export function checkedAsFieldOf(prop: SemanticNode, name: string, owner: SemanticNode): boolean {
+  const own = owner.getDefinition();
+  return (
+    !!own &&
+    (prop.annotations ?? []).some((a) => a.name === name && a.token.parentNode?.ownerNode === own)
+  );
 }
 
 /** A `@db.table` interface's table name: its `@db.table` argument, else its name. */
@@ -495,7 +705,8 @@ export function refActionAnnotation(name: "onDelete" | "onUpdate"): AnnotationSp
     },
     validate(token, args, doc) {
       const errors = [] as TMessages;
-      const field = token.parentNode!;
+      const field = annotationTarget(token, doc);
+      if (!field) return errors;
 
       if (field.countAnnotations("db.rel.FK") === 0) {
         errors.push({
@@ -534,7 +745,7 @@ export function refActionAnnotation(name: "onDelete" | "onUpdate"): AnnotationSp
       // D5: Multiple onDelete/onUpdate in same composite FK group
       const fkAlias = getAnnotationAlias(field, "db.rel.FK");
       if (fkAlias) {
-        const fields = getTypeFields(getParentStruct(token), doc);
+        const fields = getTypeFields(getParentStruct(token, doc), doc);
         if (fields) {
           const annotationName = `db.rel.${name}`;
           let count = 0;

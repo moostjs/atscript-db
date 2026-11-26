@@ -70,6 +70,31 @@ export interface InheritedSecret extends SecretBase {
     );
   });
 
+  it.each([
+    ["the interface declares", "@db.encrypted\n    ", "    title\n"],
+    ["the same block declares", "", "    @db.encrypted\n    ssn\n"],
+  ])(
+    "refuses @db.mongo.search.dynamic at the top of an annotate block over an encrypted field %s",
+    async (_name, inline, entries) => {
+      const found = await errorsFor(`
+@db.table 'block_secrets'
+@db.mongo.collection
+export interface BlockSecret {
+    title: string
+    ${inline}ssn?: string
+}
+
+@db.mongo.search.dynamic
+annotate BlockSecret {
+${entries}}
+`);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatch(
+        /@db\.mongo\.search\.dynamic indexes every field, including the @db\.encrypted field "ssn"/,
+      );
+    },
+  );
+
   it("accepts @db.mongo.search.dynamic without encrypted fields", async () => {
     expect(
       await errorsFor(`

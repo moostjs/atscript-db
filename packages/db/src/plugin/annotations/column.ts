@@ -18,6 +18,8 @@ import type {
   TMessages,
 } from "@atscript/core";
 import {
+  annotationTarget,
+  checkedAsFieldOf,
   effectiveAnnotationNames,
   getDbTableOwner,
   getParentStruct,
@@ -65,10 +67,39 @@ function walkFieldAncestors(field: SemanticNode, wholeValue: readonly string[]) 
   return { whole };
 }
 
-/** How many fields of a type — declared or inherited — carry `@db.column.version`. */
-function versionFieldCount(node: SemanticNode | undefined, doc: AtscriptDoc): number {
+/** The fields of a type — declared or inherited — that carry `@db.column.version`. */
+function versionFields(node: SemanticNode | undefined, doc: AtscriptDoc): SemanticNode[] {
   const fields = getTypeFields(node, doc)?.values() ?? [];
-  return [...fields].filter((prop) => prop.countAnnotations("db.column.version") > 0).length;
+  return [...fields].filter((prop) => prop.countAnnotations("db.column.version") > 0);
+}
+
+/**
+ * At most one `@db.column.version` per table, for the version columns the
+ * `@db.table` interface `owner` inherits: each column's own annotation counts
+ * the fields of the type declaring it, so when none of them is checked as a
+ * field of `owner` ({@link checkedAsFieldOf} — they all come from its bases),
+ * two or more are reported on the table's `@db.table` (since 0.1.194).
+ */
+export function inheritedVersionProblems(
+  owner: SemanticNode,
+  doc: AtscriptDoc,
+  range: Token["range"],
+): TMessages {
+  const fields = versionFields(owner, doc);
+  if (
+    fields.length <= 1 ||
+    fields.some((prop) => checkedAsFieldOf(prop, "db.column.version", owner))
+  ) {
+    return [];
+  }
+  const names = fields.map((prop) => `"${prop.id ?? ""}"`).join(", ");
+  return [
+    {
+      message: `At most one @db.column.version per table — inherited: ${names}`,
+      severity: 1,
+      range,
+    },
+  ];
 }
 
 /**
@@ -79,7 +110,8 @@ function versionFieldCount(node: SemanticNode | undefined, doc: AtscriptDoc): nu
  */
 function validateVersionExempt(token: Token, doc: AtscriptDoc): TMessages {
   const errors = [] as TMessages;
-  const field = token.parentNode!;
+  const field = annotationTarget(token, doc);
+  if (!field) return errors;
   const fail = (message: string, severity: 1 | 2 = 1) => {
     errors.push({ message, severity, range: token.range });
   };
@@ -111,7 +143,7 @@ function validateVersionExempt(token: Token, doc: AtscriptDoc): TMessages {
 
   // W1: the enclosing top-level table has no version column (declared or inherited)
   if (tableOwner && tableOwner.countAnnotations("db.table") > 0) {
-    if (versionFieldCount(tableOwner, doc) === 0) {
+    if (versionFields(tableOwner, doc).length === 0) {
       fail(
         `${tag} has no effect — table '${tableOwner.id ?? ""}' declares no @db.column.version`,
         2,
@@ -139,8 +171,9 @@ function validateMergePlacement(token: Token, doc: AtscriptDoc): TMessages {
     ],
     doc,
   );
-  if (errors.length > 0) return errors;
-  const { whole } = walkFieldAncestors(token.parentNode!, ["db.json", "db.encrypted"]);
+  const field = annotationTarget(token, doc);
+  if (errors.length > 0 || !field) return errors;
+  const { whole } = walkFieldAncestors(field, ["db.json", "db.encrypted"]);
   if (whole) {
     const where = whole.via === "element" ? "an array element" : `a @${whole.via} field`;
     errors.push({
@@ -159,7 +192,7 @@ function validateMergePlacement(token: Token, doc: AtscriptDoc): TMessages {
  * refused on it, so no patch strategy applies there.
  */
 function nullableBase(def: SemanticNode | undefined, doc: AtscriptDoc): SemanticNode | undefined {
-  if (def && isRef(def)) return nullableBase(doc.unwindType(def.id!, def.chain)?.def, doc);
+  if (def && isRef(def)) return nullableBase(doc.unwindRef(def)?.def, doc);
   if (!def || !isGroup(def) || def.op !== "|") return def;
   const values = def.unwrap().filter((member) => !isNullMember(member));
   const base = values.length === 1 ? nullableBase(values[0], doc) : undefined;
@@ -185,7 +218,8 @@ const ON_UPDATE_INC_INCOMPATIBLE: ReadonlyArray<[annotation: string, why: string
 function validateOnUpdateInc(token: Token, doc: AtscriptDoc): TMessages {
   const tag = "@db.onUpdate.inc";
   const errors = validateFieldBaseType(token, doc, tag, "number");
-  const field = token.parentNode!;
+  const field = annotationTarget(token, doc);
+  if (!field) return errors;
   const fail = (message: string) => {
     errors.push({ message, severity: 1, range: token.range });
   };
@@ -195,7 +229,7 @@ function validateOnUpdateInc(token: Token, doc: AtscriptDoc): TMessages {
   if (field.has("optional")) {
     fail(`${tag} requires a non-optional field — the counter is always populated (default 0)`);
   }
-  const struct = getParentStruct(token);
+  const struct = getParentStruct(token, doc);
   if (!struct?.ownerNode || !isInterface(struct.ownerNode)) {
     fail(`${tag} must sit on a top-level field of the table, not inside a nested object`);
   }
@@ -207,7 +241,7 @@ function validateOnUpdateInc(token: Token, doc: AtscriptDoc): TMessages {
 function isIntegerField(field: SemanticNode, doc: AtscriptDoc): boolean {
   const def = field.getDefinition();
   if (!def || !isRef(def)) return true;
-  const leaf = doc.unwindType(def.id!, def.chain)?.def;
+  const leaf = doc.unwindRef(def)?.def;
   if (primitiveBaseType(leaf) !== "number") return true;
   if ((leaf as SemanticPrimitiveNode).tags?.has("int")) return true;
   // `@expect.int` on the field or on an alias it refers to
@@ -248,9 +282,9 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         values: ["replace", "merge"],
       },
       validate(token, args, doc) {
-        const field = token.parentNode!;
+        const field = annotationTarget(token, doc);
         const errors = [] as TMessages;
-        const definition = field.getDefinition();
+        const definition = field?.getDefinition();
         if (!definition) {
           return errors;
         }
@@ -402,13 +436,14 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       multiple: false,
       validate(token, _args, doc) {
         const errors = [] as TMessages;
-        const field = token.parentNode!;
+        const field = annotationTarget(token, doc);
+        if (!field) return errors;
         const fail = (message: string, severity: 1 | 2 = 1) => {
           errors.push({ message, severity, range: token.range });
         };
 
         // D1: a top-level field of a @db.table
-        const owner = getDbTableOwner(token);
+        const owner = getDbTableOwner(token, doc);
         if (!owner || !isInterface(owner) || owner.countAnnotations("db.table") === 0) {
           fail("@db.column.derived is only valid on a top-level field of a @db.table interface");
           return errors;
@@ -430,7 +465,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
           return errors;
         }
         const ref = definition as SemanticRefNode;
-        const tableName = getParentTypeName(token);
+        const tableName = getParentTypeName(token, doc);
         if (ref.id !== tableName) {
           fail(
             `@db.column.derived must reference the enclosing table '${tableName ?? ""}', not '${ref.id ?? ""}' — a derived column reads its own row`,
@@ -438,7 +473,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
           return errors;
         }
 
-        const info = jsonChainInfo(ref, doc);
+        const info = jsonChainInfo(ref, doc.refOrigin(ref));
         const path = `${info.typeName}.${info.chain.join(".")}`;
         const notInsideJson = `@db.column.derived path '${path}' does not read inside a @db.json field — a flattened or scalar column needs no derived column`;
         if (info.chain.length < 2) {
@@ -535,11 +570,13 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       validate(token, _args, doc) {
         const sealed = sealedSearchProblem(token, doc, "@db.column.searchable");
         if (sealed) return [sealed];
-        const verdict = searchFieldVerdict(token.parentNode!, doc);
+        const field = annotationTarget(token, doc);
+        if (!field) return [];
+        const verdict = searchFieldVerdict(field, doc);
         if (!("problem" in verdict)) return [];
         return [
           {
-            message: `@db.column.searchable needs a string or an integer field — "${token.parentNode!.id}" ${verdict.problem}`,
+            message: `@db.column.searchable needs a string or an integer field — "${field.id}" ${verdict.problem}`,
             severity: 1,
             range: token.range,
           },
@@ -570,7 +607,8 @@ export const dbColumnAnnotations: TAnnotationsTree = {
           // Reject optional version fields — the column is server-managed and
           // always populated (DEFAULT 0); a nullable version column would let
           // `NULL + 1` produce `NULL` and silently break the auto-bump invariant.
-          const field = token.parentNode!;
+          const field = annotationTarget(token, doc);
+          if (!field) return errors;
           if (field.has("optional")) {
             errors.push({
               message:
@@ -582,7 +620,7 @@ export const dbColumnAnnotations: TAnnotationsTree = {
 
           // Cross-field uniqueness: at most one @db.column.version per struct,
           // inherited fields included
-          if (versionFieldCount(getParentStruct(token), doc) > 1) {
+          if (versionFields(getParentStruct(token, doc), doc).length > 1) {
             errors.push({
               message: "At most one @db.column.version per table",
               severity: 1,
@@ -668,7 +706,8 @@ export const dbColumnAnnotations: TAnnotationsTree = {
         const errors = validateFieldBaseType(token, doc, "db.default.increment", "number");
         // Schema sync refuses a primary-key change that demotes an auto-increment
         // column (MySQL cannot keep AUTO_INCREMENT off a key) — flag it at compile time.
-        if (token.parentNode!.countAnnotations("meta.id") === 0) {
+        const field = annotationTarget(token, doc);
+        if (field && field.countAnnotations("meta.id") === 0) {
           errors.push({
             message: `@db.default.increment on a field without @meta.id — auto-increment columns must be primary-key columns for schema sync to manage them`,
             severity: 2,
@@ -726,7 +765,8 @@ export const dbColumnAnnotations: TAnnotationsTree = {
       passedWhenReferred: false,
       validate(token, args, doc) {
         const errors = validateFieldBaseType(token, doc, "@db.onUpdate.now", "number");
-        const field = token.parentNode!;
+        const field = annotationTarget(token, doc);
+        if (!field) return errors;
         for (const [name, why] of [
           ["meta.id", "the primary key identifies the row and is never updated"],
           ["db.column.version", "the version column is adapter-managed"],
@@ -783,12 +823,11 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     passedWhenReferred: false,
     validate(token, _args, doc) {
       const errors = [] as TMessages;
-      const field = token.parentNode!;
-      const definition = field.getDefinition();
+      const definition = annotationTarget(token, doc)?.getDefinition();
 
       // J1: warning on primitive types
       if (definition && isRef(definition)) {
-        const unwound = doc.unwindType(definition.id!, definition.chain);
+        const unwound = doc.unwindRef(definition);
         if (unwound && isPrimitive(unwound.def)) {
           errors.push({
             message:
@@ -812,10 +851,10 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     ),
     nodeType: ["prop"],
     passedWhenReferred: false,
-    validate(token, _args, _doc) {
+    validate(token, _args, doc) {
       const errors = [] as TMessages;
-      const field = token.parentNode!;
-      if (field.countAnnotations("meta.id") > 0) {
+      const field = annotationTarget(token, doc);
+      if (field && field.countAnnotations("meta.id") > 0) {
         errors.push({
           message: `@db.ignore cannot coexist with @meta.id — a field cannot be both a primary key and excluded from the database`,
           severity: 1,
@@ -863,9 +902,10 @@ export const dbColumnAnnotations: TAnnotationsTree = {
     nodeType: ["prop"],
     passedWhenReferred: false,
     multiple: false,
-    validate(token, _args, _doc) {
+    validate(token, _args, doc) {
       const errors = [] as TMessages;
-      const field = token.parentNode!;
+      const field = annotationTarget(token, doc);
+      if (!field) return errors;
       if (field.countAnnotations("meta.id") > 0) {
         errors.push({
           message: `@db.writeOnly cannot coexist with @meta.id — the primary key must be readable`,
@@ -910,9 +950,10 @@ function columnCapability(capability: "filterable" | "sortable", verb: string): 
     nodeType: ["prop"],
     passedWhenReferred: false,
     multiple: false,
-    validate(token, _args, _doc) {
+    validate(token, _args, doc) {
       const errors = [] as TMessages;
-      const owner = getDbTableOwner(token);
+      if (!annotationTarget(token, doc)) return errors;
+      const owner = getDbTableOwner(token, doc);
       if (!owner || owner.countAnnotations("db.table") === 0) {
         errors.push({
           message: `@db.column.${capability} is only valid on fields of a @db.table interface`,

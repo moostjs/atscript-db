@@ -3,8 +3,14 @@ import type { TAnnotationsTree } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
 import type { AtscriptDoc, SemanticNode } from "@atscript/core";
 import { isInterface } from "@atscript/core";
-import { getTypeFields, inheritedForeignRelations } from "../../shared/annotation-utils";
+import {
+  annotationTarget,
+  getTypeFields,
+  inheritedForeignRelations,
+} from "../../shared/annotation-utils";
 import { hasAnyViewAnnotation } from "../../shared/validation-utils";
+import { inheritedVersionProblems } from "./column";
+import { inheritedForeignKeyProblems } from "./rel";
 
 export const dbTableAnnotations: TAnnotationsTree = {
   table: {
@@ -29,7 +35,8 @@ export const dbTableAnnotations: TAnnotationsTree = {
       },
       validate(token, _args, doc) {
         const errors = [] as TMessages;
-        const owner = token.parentNode!;
+        const owner = annotationTarget(token, doc);
+        if (!owner) return errors;
         // VW6: Cannot be both @db.table and @db.view
         if (hasAnyViewAnnotation(owner)) {
           errors.push({
@@ -38,7 +45,13 @@ export const dbTableAnnotations: TAnnotationsTree = {
             range: token.range,
           });
         }
-        errors.push(...inheritedForeignRelations(token, doc));
+        // The fields a declared table inherits (an annotate block's @db.table
+        // does not check them)
+        if (isInterface(token.parentNode) && token.parentNode.hasExtends) {
+          errors.push(...inheritedForeignRelations(token, doc));
+          errors.push(...inheritedVersionProblems(owner, doc, token.range));
+          errors.push(...inheritedForeignKeyProblems(owner, doc, token.range));
+        }
         return errors;
       },
     }),
@@ -58,10 +71,10 @@ export const dbTableAnnotations: TAnnotationsTree = {
         type: "string",
         description: "The previous table/collection name.",
       },
-      validate(token, _args, _doc) {
+      validate(token, _args, doc) {
         const errors = [] as TMessages;
-        const owner = token.parentNode!;
-        if (owner.countAnnotations("db.table") === 0) {
+        const owner = annotationTarget(token, doc);
+        if (owner && owner.countAnnotations("db.table") === 0) {
           errors.push({
             message: "@db.table.renamed requires @db.table on the same interface",
             severity: 1,
@@ -95,7 +108,8 @@ export const dbTableAnnotations: TAnnotationsTree = {
         },
         validate(token, args, doc) {
           const errors = [] as TMessages;
-          const owner = token.parentNode!;
+          const owner = annotationTarget(token, doc);
+          if (!owner) return errors;
 
           if (hasAnyViewAnnotation(owner)) {
             errors.push({
@@ -259,9 +273,10 @@ export const dbTableAnnotations: TAnnotationsTree = {
         type: "number",
         description: "Non-negative integer: maximum nesting depth accepted for nested writes.",
       },
-      validate(token, args, _doc) {
+      validate(token, args, doc) {
         const errors = [] as TMessages;
-        const owner = token.parentNode!;
+        const owner = annotationTarget(token, doc);
+        if (!owner) return errors;
 
         // D1: Must be on a @db.table interface
         if (owner.countAnnotations("db.table") === 0) {
@@ -368,10 +383,10 @@ function tableCapability(capability: "filterable" | "sortable"): AnnotationSpec 
       description: `${verb[0]!.toUpperCase()}${verb.slice(1)}-gating mode: 'auto' (default) or 'manual'.`,
       values: ["auto", "manual"],
     },
-    validate(token, _args, _doc) {
+    validate(token, _args, doc) {
       const errors = [] as TMessages;
-      const owner = token.parentNode!;
-      if (owner.countAnnotations("db.table") === 0) {
+      const owner = annotationTarget(token, doc);
+      if (owner && owner.countAnnotations("db.table") === 0) {
         errors.push({
           message: `@db.table.${capability} requires @db.table on the same interface`,
           severity: 1,

@@ -2,6 +2,7 @@ import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { TAnnotationsTree, TMessages } from "@atscript/core";
 import { isRef } from "@atscript/core";
 
+import { annotationTarget } from "../../shared/annotation-utils";
 import { isDbSourceDecl, validateRefArgument } from "../../shared/validation-utils";
 import { DB_ENTITY_ANNOTATIONS } from "../../shared/derived-rules";
 
@@ -46,7 +47,8 @@ export const dbAliasAnnotations: TAnnotationsTree = {
     },
     validate(token, args, doc) {
       const errors = [] as TMessages;
-      const owner = token.parentNode!;
+      const owner = annotationTarget(token, doc);
+      if (!owner) return errors;
       const target = args[0]?.text;
 
       // VA3: an alias is a scope name, never a table or view of its own

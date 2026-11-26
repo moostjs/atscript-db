@@ -2,7 +2,7 @@ import { AnnotationSpec, annotationExample } from "@atscript/core";
 import type { AtscriptDoc, TAnnotationsTree, Token, TQueryScope } from "@atscript/core";
 import type { TMessages } from "@atscript/core";
 import { getFieldsForType, isArray, isPrimitive, isProp } from "@atscript/core";
-import { getAnnotationAlias } from "../../shared/annotation-utils";
+import { annotationTarget, getAnnotationAlias } from "../../shared/annotation-utils";
 import {
   earlierJoinTargets,
   findViewCycle,
@@ -109,9 +109,10 @@ export const dbViewAnnotations: TAnnotationsTree = {
         type: "string",
         description: "The view name in the database. If omitted, derived from the interface name.",
       },
-      validate(token, _args, _doc) {
+      validate(token, _args, doc) {
         const errors = [] as TMessages;
-        const owner = token.parentNode!;
+        const owner = annotationTarget(token, doc);
+        if (!owner) return errors;
         // VW6: Cannot be both @db.table and @db.view
         if (owner.countAnnotations("db.table") > 0) {
           errors.push({
@@ -143,7 +144,8 @@ export const dbViewAnnotations: TAnnotationsTree = {
       },
       validate(token, args, doc) {
         const errors = [] as TMessages;
-        const owner = token.parentNode!;
+        const owner = annotationTarget(token, doc);
+        if (!owner) return errors;
         // VW6: Cannot be both @db.table and @db.view
         if (owner.countAnnotations("db.table") > 0) {
           errors.push({
@@ -230,7 +232,8 @@ export const dbViewAnnotations: TAnnotationsTree = {
       ],
       validate(token, args, doc) {
         const errors = [] as TMessages;
-        const owner = token.parentNode!;
+        const owner = annotationTarget(token, doc);
+        if (!owner) return errors;
 
         // VW1: Must be on a @db.view interface
         if (!hasAnyViewAnnotation(owner) && !args[0]) {
@@ -336,7 +339,8 @@ export const dbViewAnnotations: TAnnotationsTree = {
       },
       validate(token, args, doc) {
         const errors = [] as TMessages;
-        const owner = token.parentNode!;
+        const owner = annotationTarget(token, doc);
+        if (!owner) return errors;
 
         // VW2: Must be on a @db.view interface
         if (!hasAnyViewAnnotation(owner) && !args[0]) {
@@ -384,9 +388,10 @@ export const dbViewAnnotations: TAnnotationsTree = {
       ),
       nodeType: ["interface"],
       passedWhenReferred: false,
-      validate(token, _args, _doc) {
+      validate(token, _args, doc) {
         const errors = [] as TMessages;
-        const owner = token.parentNode!;
+        const owner = annotationTarget(token, doc);
+        if (!owner) return errors;
 
         // VW3: Must be on a @db.view interface
         if (!hasAnyViewAnnotation(owner)) {
@@ -417,9 +422,10 @@ export const dbViewAnnotations: TAnnotationsTree = {
         type: "string",
         description: "The previous view name.",
       },
-      validate(token, _args, _doc) {
+      validate(token, _args, doc) {
         const errors = [] as TMessages;
-        const owner = token.parentNode!;
+        const owner = annotationTarget(token, doc);
+        if (!owner) return errors;
         if (!hasAnyViewAnnotation(owner)) {
           errors.push({
             message: "@db.view.renamed requires @db.view on the same interface",
@@ -451,7 +457,8 @@ export const dbViewAnnotations: TAnnotationsTree = {
       },
       validate(token, args, doc) {
         const errors = [] as TMessages;
-        const owner = token.parentNode!;
+        const owner = annotationTarget(token, doc);
+        if (!owner) return errors;
         if (!hasAnyViewAnnotation(owner)) {
           errors.push({
             message: "@db.view.having is only valid on @db.view interfaces",

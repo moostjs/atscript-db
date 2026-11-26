@@ -7,7 +7,7 @@ import type {
   Token,
 } from "@atscript/core";
 import { NULL_WHEN_EMPTY_AGGREGATE_FNS, type TDbAggregateFn } from "../../query/aggregate-fns";
-import { validateFieldBaseType } from "../../shared/annotation-utils";
+import { annotationTarget, validateFieldBaseType } from "../../shared/annotation-utils";
 import { validateQueryScope } from "../../shared/validation-utils";
 import { aggConditionScope, fieldScopes } from "../lsp-scopes";
 
@@ -56,9 +56,11 @@ function validateAggArgs(
 
   const condition = args[1];
   if (!condition?.queryNode) return errors;
+  const prop = annotationTarget(token, doc);
+  if (!prop) return errors;
 
   // The scope of the view's @db.view.filter — what the editor completes too (lsp-scopes)
-  const scope = aggConditionScope(token);
+  const scope = aggConditionScope(token, doc);
   if (!scope) {
     errors.push({
       message: `A conditional ${annotation} requires @db.view.for on the view`,
@@ -69,8 +71,7 @@ function validateAggArgs(
   }
   errors.push(...validateQueryScope(condition, scope, doc));
 
-  const prop = token.parentNode;
-  if (conditionalIsNullable(name) && prop && !prop.has("optional")) {
+  if (conditionalIsNullable(name) && !prop.has("optional")) {
     const field = prop.id ?? "field";
     errors.push({
       message: `Field "${field}" has a conditional ${annotation} and must be optional (${field}?: …) — it is NULL when no row matches`,
