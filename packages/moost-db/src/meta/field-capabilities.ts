@@ -20,10 +20,13 @@ import {
   findAncestorInSet,
   groupSourceVerdict,
   isJsonValueField,
+  listedFilterOps,
   narrowerFilterOps,
   selfOrAncestor,
   numericOperandProblem,
   resolveDesignType,
+  unlistedFilterOp,
+  unlistedOpReason,
 } from "@atscript/db";
 import { BUCKET_UNITS } from "@uniqu/core";
 import { unknownFieldMessage } from "../http-errors";
@@ -41,16 +44,27 @@ import { unknownFieldMessage } from "../http-errors";
  *
  * A filter entry is judged by its predicate class (the core's `canFilterLeaf`):
  * `filterable` is the value-comparison verdict, `filterOps` the narrower
- * predicates that still pass where it is `false`.
+ * predicates that still pass where it is `false` — or, when the adapter's
+ * `filterOps(fd)` defines a list (since 0.1.196), the operators of that list
+ * the field accepts, on a filterable field too; an entry passes only when
+ * every one of its operators is listed.
  *
  * A calendar-bucket source (`bucketable`) is the core's `bucketSourceVerdict`
  * (the same function the core path guard runs) under the HTTP-only
  * `@db.writeOnly` veto.
  */
 export interface TFieldCapability {
-  /** A value-comparison filter on this path passes the gate (adapter ∧ ¬writeOnly ∧ ¬encrypted ∧ policy). */
+  /**
+   * A value-comparison filter on this path passes the gate (adapter ∧
+   * ¬writeOnly ∧ ¬encrypted ∧ policy ∧ a comparison operator left in the
+   * adapter's `filterOps(fd)` list, when it defines one).
+   */
   filterable: boolean;
-  /** Present when `filterable` is `false` yet narrower predicates (`$exists`, `$geoWithin`) pass the gate. */
+  /**
+   * Present when `filterable` is `false` yet narrower predicates (`$exists`,
+   * `$geoWithin`) pass the gate; or (since 0.1.196) the operators the
+   * adapter's `filterOps(fd)` list accepts on the field, whatever `filterable` says.
+   */
   filterOps?: string[];
   /** A `$sort` on this path passes the gate (adapter ∧ ¬writeOnly ∧ ¬encrypted ∧ policy). */
   sortable: boolean;
@@ -148,13 +162,17 @@ export type TCapabilityReadable = Pick<
   | "supportsAggregateExpressions"
   | "dimensions"
   | "measures"
->;
+> &
+  // Optional: a readable without it has no operator lists (since 0.1.196).
+  Partial<Pick<AtscriptDbReadable, "filterOps">>;
 
 interface TEntry {
   fd: TDbFieldMeta;
   cap: TFieldCapability;
   /** Filter verdict per predicate class: `undefined` = accepted, else the reason clause. */
   filterBy: Record<TFilterPredicate, string | undefined>;
+  /** The adapter's `filterOps(fd)` list — an entry's operators must all be in it. */
+  listed?: readonly string[];
   /** adapter ∧ ¬writeOnly ∧ ¬encrypted — policy-free; what `$groupBy` / `$having` / aggregate `$field` need. */
   physicalFilterable: boolean;
   physicalReason?: string;
@@ -482,15 +500,26 @@ export class FieldCapabilityIndex implements TQueryPathSource {
       geo: verdict("geo", true),
       relation: REASON_NOT_RELATION,
     };
-    // writeOnly / encrypted / policy veto every predicate alike, so narrower
-    // predicates remain only when the adapter's storage veto alone blocks compare.
+    // writeOnly / encrypted / policy veto every predicate alike. Otherwise an
+    // adapter's operator list names what passes (filterable or not); without
+    // one, narrower predicates remain only when the storage veto blocks compare.
+    const listed = source.filterOps?.(fd);
     const filterOps =
-      filterBy.compare === REASON_ADAPTER_FILTER && !filterPolicyBlocked
-        ? narrowerFilterOps(fd, source)
-        : [];
-    if (filterOps.length > 0) {
+      isWriteOnly || filterPolicyBlocked
+        ? []
+        : listed !== undefined
+          ? listedFilterOps(fd, source)!
+          : filterBy.compare === REASON_ADAPTER_FILTER
+            ? narrowerFilterOps(fd, source)
+            : [];
+    if (filterBy.compare === REASON_ADAPTER_FILTER && filterOps.length > 0) {
       filterBy.compare = `${ADAPTER_FILTER_REASON}${acceptedOperatorsHint(filterOps)}.`;
     }
+    // The type takes comparisons but the list leaves none.
+    const noCompareListed =
+      filterBy.compare === undefined &&
+      listed !== undefined &&
+      !filterOps.some((op) => op !== "$exists" && op !== "$geoWithin");
     const physicalReason = verdict("compare", false);
 
     let sortReason = source.canSortField(fd) ? undefined : REASON_ADAPTER_SORT;
@@ -511,7 +540,7 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     const group = isWriteOnly ? undefined : groupSourceVerdict(fd, this._bucketTable, source);
     const groupReason = !group ? REASON_WRITE_ONLY : group.ok ? undefined : `${group.reason}.`;
     const cap: TFieldCapability = {
-      filterable: filterBy.compare === undefined,
+      filterable: filterBy.compare === undefined && !noCompareListed,
       sortable: sortReason === undefined,
       selectable: true,
       indexed: fd.isIndexed === true,
@@ -525,12 +554,16 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     if (groupReason) cap.groupReason = groupReason;
     if (filterOps.length > 0) cap.filterOps = filterOps;
     if (filterBy.compare) cap.filterReason = filterBy.compare;
+    else if (noCompareListed) {
+      cap.filterReason = `the adapter does not accept comparisons on this field${acceptedOperatorsHint(filterOps)}.`;
+    }
     if (sortReason) cap.sortReason = sortReason;
     if (bucketReason) cap.bucketReason = bucketReason;
     return {
       fd,
       cap,
       filterBy,
+      listed,
       physicalFilterable: physicalReason === undefined,
       physicalReason,
     };
@@ -589,7 +622,9 @@ export class FieldCapabilityIndex implements TQueryPathSource {
    * sources answer `Unknown field` like a nonexistent path.
    *
    * `predicate` is a filter entry's class (`collectQueryPaths` records it per
-   * occurrence); it only matters for `op === "filter"` on a listed leaf.
+   * occurrence); it only matters for `op === "filter"` on a listed leaf, and so
+   * do `ops`, the entry's operators (`TFilterRef.ops`, since 0.1.196): every
+   * one must be in the adapter's `filterOps(fd)` list when it defines one.
    *
    * `nullTest` (since 0.1.155): the filter entry only tests presence
    * (`TFilterRef.nullTest`) — accepted on a nested-object parent whose leaves
@@ -608,6 +643,7 @@ export class FieldCapabilityIndex implements TQueryPathSource {
     predicate: TFilterPredicate = "compare",
     prefix = "",
     nullTest = false,
+    ops?: readonly string[],
   ): TCapabilityVerdict | undefined {
     // Messages name the prefixed path; `exists` / classification use the local one.
     const path = prefix + local;
@@ -649,13 +685,23 @@ export class FieldCapabilityIndex implements TQueryPathSource {
             : notPermitted(path, op, `Selecting field "${path}" is not permitted.`, undefined);
         case "filter": {
           const reason = entry.filterBy[predicate];
-          return reason === undefined
+          if (reason !== undefined) {
+            return notPermitted(
+              path,
+              op,
+              `Filtering on field "${path}" is not permitted — ${reason}`,
+              reason,
+            );
+          }
+          // The adapter's operator list — the core guard's rule (`canFilterLeaf`).
+          const unlisted = ops && unlistedFilterOp(entry.listed, ops);
+          return unlisted === undefined
             ? undefined
-            : notPermitted(
+            : refused(
                 path,
                 op,
-                `Filtering on field "${path}" is not permitted — ${reason}`,
-                reason,
+                "FIELD_NOT_PERMITTED",
+                `Filtering on field "${path}" is not permitted — ${unlistedOpReason(unlisted, entry.cap.filterOps ?? [])}.`,
               );
         }
         case "sort":

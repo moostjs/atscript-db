@@ -231,7 +231,15 @@ export class RelationPredicateGate {
         if (error) return error;
         continue;
       }
-      const verdict = index.check(ref.path, "filter", visible, ref.predicate, prefix, ref.nullTest);
+      const verdict = index.check(
+        ref.path,
+        "filter",
+        visible,
+        ref.predicate,
+        prefix,
+        ref.nullTest,
+        ref.ops,
+      );
       if (verdict) return verdictError(verdict);
     }
     return undefined;

@@ -891,7 +891,15 @@ export class AsDbReadableController<
       if (where === undefined) continue;
       for (const ref of collectQueryPaths({ filter: where as FilterExpr }).filter) {
         if (!keys.has(ref.path)) continue;
-        const verdict = capabilities.check(ref.path, "filter", isVisible, ref.predicate);
+        const verdict = capabilities.check(
+          ref.path,
+          "filter",
+          isVisible,
+          ref.predicate,
+          "",
+          false,
+          ref.ops,
+        );
         if (verdict) return verdictError(verdict);
       }
     }
@@ -977,6 +985,7 @@ export class AsDbReadableController<
         ref.predicate,
         "",
         ref.nullTest,
+        ref.ops,
       );
       if (verdict) return verdictError(verdict);
     }
@@ -4448,8 +4457,9 @@ export class AsDbReadableController<
     for (const [path, cap, fd] of capabilities.entries()) {
       const entry: TFieldMeta = { sortable: cap.sortable, filterable: cap.filterable };
       if (cap.filterOps) {
-        // `filterable: false`, yet these narrower predicates pass the gate
-        // (e.g. `$exists` on a relational adapter's JSON column).
+        // The operators that pass: narrower predicates of a non-filterable
+        // field (`$exists` on a relational adapter's JSON column), or the
+        // adapter's `filterOps(fd)` list on any field (since 0.1.196).
         entry.filterOps = [...cap.filterOps];
       }
       if (cap.indexed) {

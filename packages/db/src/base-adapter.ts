@@ -6,7 +6,13 @@ import type {
   TValidatorPlugin,
 } from "@atscript/typescript/utils";
 
-import { type AggregateFn, BUCKET_UNITS, type BucketUnit, type FilterExpr } from "@uniqu/core";
+import {
+  type AggregateFn,
+  BUCKET_UNITS,
+  type BucketUnit,
+  type ComparisonOp,
+  type FilterExpr,
+} from "@uniqu/core";
 
 import { DbError, invalidQuery, notSupported } from "./db-error";
 import { BASE_AGGREGATE_FNS } from "./query/aggregate-fns";
@@ -1013,7 +1019,9 @@ export abstract class BaseDbAdapter {
    * even when the field carries `@db.column.filterable`.
    *
    * Vetoes value comparison only — a sole-`$exists` entry needs just a stored
-   * column (`canFilterLeaf`).
+   * column (`canFilterLeaf`). To accept only some operators on a field,
+   * return them from {@link filterOps} instead; its list narrows every
+   * predicate class, `$exists` included.
    */
   canFilterField(fd: TDbFieldMeta): boolean {
     if (fd.encrypted) {
@@ -1022,6 +1030,24 @@ export abstract class BaseDbAdapter {
       return false;
     }
     return fd.storage !== "json";
+  }
+
+  /**
+   * The filter operators this adapter executes on this field, when that is
+   * fewer than its type takes; `undefined` (the default) for no restriction.
+   * The list only narrows: what the field accepts is the type's rule
+   * intersected with it. It applies to the core's own reads too, so a key,
+   * foreign-key or join field must accept `$eq` and `$in` (checked when the
+   * table is built). An empty list refuses every filter, `$exists` included.
+   *
+   * The core guard and moost-db's HTTP gate refuse an entry whose operators
+   * are not all listed (`FIELD_NOT_PERMITTED`, HTTP 400); `/meta` serves the
+   * accepted operators as `fields[P].filterOps`.
+   *
+   * @since 0.1.196
+   */
+  filterOps(_fd: TDbFieldMeta): readonly (ComparisonOp | "$geoWithin")[] | undefined {
+    return undefined;
   }
 
   /**

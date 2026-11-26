@@ -405,6 +405,13 @@ export class TableMetadata {
   }
 
   /**
+   * Set at build when the adapter's `filterOps(fd)` list of a primary-key or
+   * foreign-key field lacks `$eq` or `$in` — the operators the core's own
+   * reads use. The table refuses every use with this message. @internal
+   */
+  filterOpsProblem?: string;
+
+  /**
    * Whether the value of the LOGICAL field `path` is always there, may be
    * NULL / missing, or is declared by only some members of a union of
    * objects on the way ({@link TPathPresence}); `undefined` inside an array.
@@ -665,6 +672,9 @@ export class TableMetadata {
 
     adapter.onAfterFlatten?.();
 
+    // After `_built`: an adapter's `filterOps` may read the table's metadata.
+    this.filterOpsProblem = this._keyFilterOpsProblem(adapter);
+
     // Build physical field list for UniquSelect exclusion inversion.
     // Skip nav-relation fields and their descendants — they aren't selectable
     // columns on this table, so they must not appear in an inverted SELECT list.
@@ -682,6 +692,27 @@ export class TableMetadata {
         this.allPhysicalFields.push(physical);
       }
     }
+  }
+
+  /**
+   * The core reads a primary-key or foreign-key field with `$eq` (composite
+   * keys) and `$in` — relation loads, nested writes, foreign-key checks,
+   * cascades — so the adapter's `filterOps(fd)` list of such a field must
+   * hold both.
+   */
+  private _keyFilterOpsProblem(adapter: BaseDbAdapter): string | undefined {
+    const keys = new Set(this.primaryKeys);
+    for (const fk of this.foreignKeys.values()) {
+      for (const field of fk.fields) keys.add(field);
+    }
+    for (const fd of this.fieldDescriptors) {
+      if (!keys.has(fd.path)) continue;
+      const ops = adapter.filterOps(fd);
+      if (ops && !(ops.includes("$eq") && ops.includes("$in"))) {
+        return `filterOps of key field "${fd.path}" must include $eq and $in — the core reads primary-key and foreign-key fields with them`;
+      }
+    }
+    return undefined;
   }
 
   // ── Private: union / tuple member metadata ──────────────────────────────

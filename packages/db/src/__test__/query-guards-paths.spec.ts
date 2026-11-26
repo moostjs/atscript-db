@@ -485,12 +485,13 @@ describe("filterPredicateOf / canFilterLeaf — the shared classification", () =
       } as any,
     });
     expect(refs.filter).toEqual([
-      // presence-only entries are marked (since 0.1.155 — a stored object accepts them)
-      { path: "ctx", predicate: "exists", nullTest: true },
-      { path: "ctx", predicate: "compare" },
-      { path: "geo", predicate: "geo" },
-      { path: "ctx", predicate: "exists", nullTest: true },
-      { path: "title", predicate: "compare" },
+      // presence-only entries are marked (since 0.1.155 — a stored object accepts them);
+      // each entry carries its operators, `$eq` for a bare value (since 0.1.196)
+      { path: "ctx", predicate: "exists", nullTest: true, ops: ["$exists"] },
+      { path: "ctx", predicate: "compare", ops: ["$eq"] },
+      { path: "geo", predicate: "geo", ops: ["$geoWithin"] },
+      { path: "ctx", predicate: "exists", nullTest: true, ops: ["$exists"] },
+      { path: "title", predicate: "compare", ops: ["$exists", "$ne"] },
     ]);
   });
 });

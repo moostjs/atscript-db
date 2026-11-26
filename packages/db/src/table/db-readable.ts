@@ -19,6 +19,7 @@ import type {
   AggregateFn,
   AggregateQuery,
   BucketUnit,
+  ComparisonOp,
   FilterExpr,
   NestedAggregateQuery,
   ResolvedRowOrderKey,
@@ -469,6 +470,10 @@ export class AtscriptDbReadable<
           (type) => resolver(type) as unknown as TRelationFilterOwner | undefined,
         );
       }
+    }
+    // The adapter's `filterOps` refuse a key field the core's own reads need.
+    if (this._meta.filterOpsProblem) {
+      throw new Error(`Table "${this.tableName}": ${this._meta.filterOpsProblem}`);
     }
     if (this._meta.encryptedFields.size > 0 && !this._encryption) {
       // Never silently store/read plaintext on a model that declares
@@ -1855,6 +1860,14 @@ export class AtscriptDbReadable<
   /** Whether the adapter can filter on a given field (proxies adapter capability). */
   public canFilterField(fd: TDbFieldMeta): boolean {
     return this.adapter.canFilterField(fd);
+  }
+
+  /**
+   * The filter operators the adapter executes on a field, `undefined` for no
+   * restriction (proxies adapter capability). @since 0.1.196
+   */
+  public filterOps(fd: TDbFieldMeta): readonly (ComparisonOp | "$geoWithin")[] | undefined {
+    return this.adapter.filterOps(fd);
   }
 
   /** Calendar-bucket units the adapter can group by (proxies adapter capability; empty = none). */

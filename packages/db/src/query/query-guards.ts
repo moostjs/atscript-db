@@ -342,6 +342,11 @@ export interface TFilterRef {
    * related table, not walked here). @since 0.1.147
    */
   relation?: Array<{ op: RelationOp; filter: FilterExpr }>;
+  /**
+   * Other entries: the entry's operators (`$eq` for a bare value), checked
+   * against the adapter's `filterOps(fd)` list. @since 0.1.196
+   */
+  ops?: string[];
 }
 
 /**
@@ -356,8 +361,12 @@ export const ADAPTER_FILTER_REASON = "adapter cannot filter on this storage type
  */
 export const ENCRYPTED_REASON = "field is @db.encrypted (ciphertext cannot be compared or ordered)";
 
-/** The adapter-shaped capability {@link canFilterLeaf} consults (a `BaseDbAdapter` or a readable). */
-type TFilterCapabilitySource = Pick<BaseDbAdapter, "canFilterField" | "isGeoSearchable">;
+/**
+ * The adapter-shaped capability {@link canFilterLeaf} consults (a `BaseDbAdapter`
+ * or a readable); without `filterOps` no operator list applies.
+ */
+type TFilterCapabilitySource = Pick<BaseDbAdapter, "canFilterField" | "isGeoSearchable"> &
+  Partial<Pick<BaseDbAdapter, "filterOps">>;
 
 /** The operator each non-`compare` predicate class stands for, in `filterOps` order. */
 export const FILTER_PREDICATE_OPS = { exists: "$exists", geo: "$geoWithin" } as const;
@@ -372,6 +381,11 @@ export function filterPredicateOf(value: unknown): TFilterPredicate {
   return keys.length === 1 && keys[0] === "$exists" ? "exists" : "compare";
 }
 
+/** The operators of a filter entry's value: its keys, `$eq` for a bare value. */
+function entryOpsOf(value: unknown): string[] {
+  return isPlainObject(value) ? Object.keys(value) : ["$eq"];
+}
+
 /** The `{ op, filter }` list of a `relation` entry's operator map. */
 function relationOpsOf(value: unknown): Array<{ op: RelationOp; filter: FilterExpr }> {
   const out: Array<{ op: RelationOp; filter: FilterExpr }> = [];
@@ -382,9 +396,9 @@ function relationOpsOf(value: unknown): Array<{ op: RelationOp; filter: FilterEx
 }
 
 /**
- * Whether a stored leaf physically supports a filter predicate of this class
- * — the one rule the core path guard and moost-db's HTTP capability index
- * both apply:
+ * Whether a stored leaf accepts a filter entry of this predicate class — the
+ * one rule the core path guard and moost-db's HTTP capability index both
+ * apply. The type's rule per class:
  *
  * - `compare` → `adapter.canFilterField(fd)`;
  * - `exists` → any stored column: it tests whether the column holds a value
@@ -392,36 +406,86 @@ function relationOpsOf(value: unknown): Array<{ op: RelationOp; filter: FilterEx
  *   array storage on relational adapters) does not apply;
  * - `geo` → a `db.geoPoint` leaf on a geo-searchable adapter.
  *
- * `@db.encrypted` vetoes every class.
+ * `@db.encrypted` vetoes every class. With `ops` (the entry's operators,
+ * `TFilterRef.ops`, since 0.1.196) every one of them must also be in the
+ * adapter's `filterOps(fd)` list when it defines one — a sole `$exists`
+ * included; without `ops` only the type's rule is answered.
  */
 export function canFilterLeaf(
   fd: TDbFieldMeta,
   predicate: TFilterPredicate,
   adapter: TFilterCapabilitySource,
+  ops?: readonly string[],
 ): boolean {
   if (fd.encrypted) return false;
+  let accepted: boolean;
   switch (predicate) {
     case "relation":
       // A stored leaf is never a navigation relation.
       return false;
     case "exists":
-      return true;
+      accepted = true;
+      break;
     case "geo":
-      return fd.isGeoPoint === true && adapter.isGeoSearchable();
+      accepted = fd.isGeoPoint === true && adapter.isGeoSearchable();
+      break;
     default:
-      return adapter.canFilterField(fd);
+      accepted = adapter.canFilterField(fd);
   }
+  return (
+    accepted && (ops === undefined || unlistedFilterOp(adapter.filterOps?.(fd), ops) === undefined)
+  );
 }
 
 /**
- * The operators of the non-`compare` predicate classes a leaf physically
- * accepts — named in a value-comparison rejection by the core guard, and
+ * The first of `ops` missing from an adapter's `filterOps(fd)` `list`;
+ * `undefined` when every one is listed or there is no list. @since 0.1.196
+ */
+export function unlistedFilterOp(
+  list: readonly string[] | undefined,
+  ops: readonly string[],
+): string | undefined {
+  return list === undefined ? undefined : ops.find((op) => !list.includes(op));
+}
+
+/** The predicate class a single operator belongs to. */
+function predicateOfOp(op: string): TFilterPredicate {
+  return op === "$exists" ? "exists" : op === "$geoWithin" ? "geo" : "compare";
+}
+
+/**
+ * The operators of the adapter's `filterOps(fd)` list the leaf's type
+ * accepts, in the list's order (what `/meta` serves as `filterOps`);
+ * `undefined` when the adapter defines no list. @since 0.1.196
+ */
+export function listedFilterOps(
+  fd: TDbFieldMeta,
+  adapter: TFilterCapabilitySource,
+): string[] | undefined {
+  return adapter
+    .filterOps?.(fd)
+    ?.filter((op) => canFilterLeaf(fd, predicateOfOp(op), adapter, [op]));
+}
+
+/**
+ * The reason clause for an operator the adapter's `filterOps(fd)` list leaves
+ * out, naming the operators the field accepts.
+ * @internal Shared wording for moost-db's capability index — not consumer API.
+ */
+export function unlistedOpReason(op: string, accepted: readonly string[]): string {
+  return `the adapter does not accept ${op} on this field${acceptedOperatorsHint(accepted)}`;
+}
+
+/**
+ * The operators of the non-`compare` predicate classes a leaf accepts — its
+ * type's rule intersected with the adapter's `filterOps(fd)` list (since
+ * 0.1.196) — named in a value-comparison rejection by the core guard, and
  * listed (under the HTTP policy) as `/meta.fields[P].filterOps`.
  */
 export function narrowerFilterOps(fd: TDbFieldMeta, adapter: TFilterCapabilitySource): string[] {
   const ops: string[] = [];
   for (const [predicate, op] of Object.entries(FILTER_PREDICATE_OPS)) {
-    if (canFilterLeaf(fd, predicate as TFilterPredicate, adapter)) ops.push(op);
+    if (canFilterLeaf(fd, predicate as TFilterPredicate, adapter, [op])) ops.push(op);
   }
   return ops;
 }
@@ -668,8 +732,8 @@ export function collectQueryPaths(query: TGuardedQuery, aggregate?: boolean): TQ
       predicate === "relation"
         ? { path, predicate, relation: relationOpsOf(value) }
         : isNullTest(value)
-          ? { path, predicate, nullTest: true }
-          : { path, predicate },
+          ? { path, predicate, nullTest: true, ops: entryOpsOf(value) }
+          : { path, predicate, ops: entryOpsOf(value) },
     );
   };
   collectFilterKeys(query.filter, pushFilterRef, undefined, refs);
@@ -825,7 +889,9 @@ function pathSourceOf(meta: TableMetadata): TQueryPathSource {
  *   leaf columns (`selectExpansion`);
  * - everything else is rejected.
  *
- * `predicate` is a filter entry's class; other positions leave the default.
+ * `predicate` is a filter entry's class and `ops` its operators (checked
+ * against the adapter's `filterOps(fd)` list, since 0.1.196); other
+ * positions leave the defaults.
  *
  * Messages are the short programmatic forms; the HTTP wording (moost-db's
  * `FieldCapabilityIndex`, with `$with` hints and leaf lists) is what clients
@@ -838,6 +904,7 @@ export function guardPath(
   op: TQueryPathOp,
   predicate: TFilterPredicate = "compare",
   nullTest = false,
+  ops?: readonly string[],
 ): void {
   const verb = OP_VERB[op];
   const { kind, parent } = classifyQueryPath(pathSourceOf(meta), path);
@@ -881,6 +948,19 @@ export function guardPath(
           throw pathError(
             path,
             `Cannot sort by "${path}" — adapter cannot sort on this storage type`,
+            fieldReason("FIELD_NOT_PERMITTED", path, op),
+          );
+        }
+        return;
+      }
+      const entryOps = op === "filter" ? ops : undefined;
+      if (entryOps && canFilterLeaf(fd, predicate, adapter)) {
+        // The storage accepts the class; the adapter's operator list may not.
+        const unlisted = unlistedFilterOp(adapter.filterOps(fd), entryOps);
+        if (unlisted !== undefined) {
+          throw pathError(
+            path,
+            `Cannot ${verb} "${path}" — ${unlistedOpReason(unlisted, listedFilterOps(fd, adapter)!)}`,
             fieldReason("FIELD_NOT_PERMITTED", path, op),
           );
         }
@@ -1021,7 +1101,7 @@ export function guardPaths(
   }
   let relState = state;
   for (const ref of refs.filter) {
-    guardPath(meta, adapter, ref.path, "filter", ref.predicate, ref.nullTest);
+    guardPath(meta, adapter, ref.path, "filter", ref.predicate, ref.nullTest, ref.ops);
     if (ref.predicate === "relation") {
       guardRelationRef(meta, adapter, ref, (relState ??= relGuardState()));
     }

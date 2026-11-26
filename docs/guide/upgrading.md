@@ -8,7 +8,13 @@ Changes that need action or attention when you upgrade. Each entry links to the 
 
 ## 0.1.196 {#v0-1-196}
 
+### New
+
+- **An adapter can restrict the filter operators of each field: `filterOps(fd)`.** It returns the operators the adapter executes on the field (`ComparisonOp | "$geoWithin"`), or `undefined` (the default) for no restriction. The list only narrows what the field's type accepts; an entry passes only when every one of its operators is listed, and an empty list refuses every filter, `$exists` included. The core guard and moost-db's request gate refuse the others with `FIELD_NOT_PERMITTED` (HTTP 400), and `/meta.fields[P].filterOps` lists the accepted operators, also on a filterable field. A primary-key or foreign-key field must list `$eq` and `$in`, which the core's own reads use; otherwise the table refuses every use. The bundled adapters restrict nothing. See [`filterOps(fd)`](/adapters/creating-adapters#filter-ops).
+
 ### Custom adapters
+
+- **`collectQueryPaths()` filter entries carry their operators.** Each `TFilterRef` that is no relational predicate has `ops` (`$eq` for a bare value), which `canFilterLeaf(fd, predicate, adapter, ops)` and moost-db's `FieldCapabilityIndex.check(…, ops)` take as a new last argument. **Affected:** code that compares whole `TFilterRef` objects (`toEqual`); the other members are unchanged.
 
 - **The base class answers an unsupported vector search or grouped query with `NOT_SUPPORTED` (HTTP 400).** `BaseDbAdapter`'s defaults of `vectorSearch()`, `vectorSearchWithCount()` and `aggregate()` threw a plain `Error`, which moost-db answered 500; they throw `DbError("NOT_SUPPORTED")`, answered 400 with `code: "NOT_SUPPORTED"`. `NOT_SUPPORTED` is a new `DbErrorCode`: the adapter cannot perform what was asked and no more specific code applies; the message names the capability. Throw it for your adapter's own refusals of that kind. **Affected:** an adapter that does not override one of these methods — such a request answers 400 instead of 500. See [Capability Flags](/adapters/creating-adapters#capability-flags).
 

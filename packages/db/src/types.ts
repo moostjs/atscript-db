@@ -220,9 +220,10 @@ export interface TFieldMeta {
    * still pass the gate — `$exists` on a relational adapter's JSON / array
    * column, `$geoWithin` on a geoPoint of a geo-searchable adapter (what
    * moost-db reports; since 0.1.132). With `filterable: true`: a server that
-   * accepts only some comparison operators lists them, and a client offers
-   * only the conditions whose operators are all listed. Absent: the
-   * `filterable` verdict alone decides.
+   * accepts only some comparison operators lists them (moost-db: the
+   * adapter's `filterOps(fd)`, since 0.1.196), and a client offers only the
+   * conditions whose operators are all listed. Absent: the `filterable`
+   * verdict alone decides.
    */
   filterOps?: string[];
   /** Present (true) when the field is `@db.encrypted` — stored as ciphertext at rest. */
