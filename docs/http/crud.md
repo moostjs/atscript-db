@@ -159,7 +159,7 @@ Each key part is read as the type of its field's column — in `/one/:id`, in `/
 
 A value the key field cannot hold matches no row: the endpoint answers `404` on every adapter without querying the database (since 0.1.194; see [Upgrading](/guide/upgrading#v0-1-194)).
 
-On PostgreSQL that includes an integer outside its key column's `SMALLINT`, `INTEGER` or `BIGINT` range, as [Type Mapping](/adapters/postgresql#type-mapping) gives it (since 0.1.195, see [Upgrading](/guide/upgrading#v0-1-195)).
+On PostgreSQL that includes an integer outside its key column's `SMALLINT`, `INTEGER` or `BIGINT` range, as [Type Mapping](/adapters/postgresql#type-mapping) gives it (since 0.1.195, see [Upgrading](/guide/upgrading#v0-1-195)). A view is not range-checked: its column types come from the source tables, so PostgreSQL refuses such an id and the endpoint answers `400` `INVALID_QUERY`.
 
 ### GET /meta {#get-meta}
 
